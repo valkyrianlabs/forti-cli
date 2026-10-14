@@ -1,5 +1,6 @@
 #include "ops.hpp"
 #include "policy.hpp"
+#include "session.hpp"
 
 #include <forti/engine/engine.hpp>
 
@@ -152,22 +153,32 @@ namespace forti::engine {
 
     const Profile& Engine::profile(std::string_view name) { return profiles().select(name); }
 
+    namespace detail {
+
+        std::shared_ptr<fortiapi::Client> make_client(const Options& options, SecretStore& secrets,
+                                                      const Profile& profile, std::optional<unsigned> retries) {
+            fortiapi::Config config;
+            config.host = profile.host;
+            config.port = profile.port;
+            config.vdom = profile.vdom;
+            config.ca_bundle = profile.ca_bundle;
+            config.client_cert = profile.client_cert;
+            config.resolve_ip = profile.resolve_ip;
+            config.connect_timeout = std::chrono::milliseconds(profile.connect_timeout_ms);
+            config.timeout = std::chrono::milliseconds(profile.timeout_ms);
+            if (retries) config.retries = *retries;
+            config.api_key = resolve_secret(profile.api_key, profile.api_key_account(), secrets);
+            if (profile.cert_password.source != SecretRef::Source::none)
+                config.client_cert_password = resolve_secret(profile.cert_password, profile.cert_password_account(), secrets);
+            return options.transport ? std::make_shared<fortiapi::Client>(config, options.transport(config))
+                                     : std::make_shared<fortiapi::Client>(config);
+        }
+
+    }  // namespace detail
+
     fortiapi::Client& Engine::client(const Profile& profile) {
         if (auto it = clients_.find(profile.name); it != clients_.end()) return *it->second;
-        fortiapi::Config config;
-        config.host = profile.host;
-        config.port = profile.port;
-        config.vdom = profile.vdom;
-        config.ca_bundle = profile.ca_bundle;
-        config.client_cert = profile.client_cert;
-        config.resolve_ip = profile.resolve_ip;
-        config.connect_timeout = std::chrono::milliseconds(profile.connect_timeout_ms);
-        config.timeout = std::chrono::milliseconds(profile.timeout_ms);
-        config.api_key = resolve_secret(profile.api_key, profile.api_key_account(), *secrets_);
-        if (profile.cert_password.source != SecretRef::Source::none)
-            config.client_cert_password = resolve_secret(profile.cert_password, profile.cert_password_account(), *secrets_);
-        auto client = options_.transport ? std::make_shared<fortiapi::Client>(config, options_.transport(config))
-                                         : std::make_shared<fortiapi::Client>(config);
+        auto client = detail::make_client(options_, *secrets_, profile);
         return *clients_.emplace(profile.name, std::move(client)).first->second;
     }
 
@@ -350,11 +361,5 @@ namespace forti::engine {
         }
         return ok(std::move(results), std::move(meta));
     }
-
-    // ---- plan / apply: phase 2 (engine/src/plan.cpp) ----
-
-    json Engine::plan(const json&) { throw Failure(Code::internal, "plan: not implemented yet"); }
-
-    json Engine::apply(const json&) { throw Failure(Code::internal, "apply: not implemented yet"); }
 
 }  // namespace forti::engine

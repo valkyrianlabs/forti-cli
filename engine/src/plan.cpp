@@ -1,0 +1,875 @@
+//
+// Engine::plan and Engine::apply (architecture.md, "Operating modes and mutation safety").
+//
+// plan reads, validates through the typed SDK operations (ops.hpp), and stores a digest-bound plan;
+// it never mutates the device. apply executes a stored plan exactly once, in order, with no retries
+// after send, re-reading each object to verify it. Around that it writes a rollback plan, probes
+// management connectivity after critical-risk operations, and appends a redacted audit record.
+//
+// Recovery aids are not guaranteed recovery: the rollback plan (and, once forti-api gap G9 lands, the
+// config backup) needs a working management path. Recovering from a management lockout needs an
+// independent path the operator provides (console, out-of-band interface, device-side auto-revert).
+//
+
+#include "ops.hpp"
+#include "plan_store.hpp"
+#include "policy.hpp"
+#include "session.hpp"
+
+#include <forti/engine/engine.hpp>
+
+#include <forti_api/client.hpp>
+#include <forti_api/monitor.hpp>
+
+#include <algorithm>
+#include <format>
+#include <map>
+#include <set>
+
+namespace forti::engine {
+
+    namespace {
+
+        using json = nlohmann::json;
+        using detail::Risk;
+
+        constexpr std::size_t max_operations = 200;
+
+        // ---- request parsing ----
+
+        void allow_keys(const json& object, std::initializer_list<std::string_view> allowed, std::string_view what) {
+            if (!object.is_object()) throw Failure(Code::usage, std::format("{}: expected a JSON object", what));
+            std::vector<std::string> unknown;
+            for (auto it = object.begin(); it != object.end(); ++it)
+                if (std::ranges::find(allowed, std::string_view(it.key())) == allowed.end()) unknown.push_back(it.key());
+            if (!unknown.empty()) {
+                std::string list;
+                for (const auto& key: unknown) list += (list.empty() ? "" : ", ") + key;
+                throw Failure(Code::usage, std::format("{}: unknown field(s): {}", what, list),
+                              {{"unknown", unknown}, {"allowed", allowed}});
+            }
+        }
+
+        std::string text(const json& object, const char* key, std::string_view what) {
+            auto it = object.find(key);
+            if (it == object.end() || it->is_null()) return {};
+            if (it->is_string()) return it->get<std::string>();
+            if (it->is_number_integer()) return it->dump();
+            throw Failure(Code::usage, std::format("{}: \"{}\" must be a string", what, key));
+        }
+
+        void validate_vdom(std::string_view vdom) {
+            bool valid = vdom.size() <= 31;
+            for (char c: vdom) valid = valid && (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.');
+            if (!valid) throw Failure(Code::usage, std::format("invalid VDOM name: {}", vdom));
+        }
+
+        // One requested operation, validated for shape (attribute validation is the SDK's, in ops).
+        struct OpRequest {
+            std::string op, resource_name, key;
+            json set = json::object(), object = json::object(), body = json::object();
+            std::vector<std::string> clear;
+        };
+
+        OpRequest parse_operation(const json& item, std::size_t index) {
+            std::string where = std::format("operations[{}]", index);
+            if (!item.is_object()) throw Failure(Code::usage, where + ": expected an object");
+            OpRequest request;
+            request.op = text(item, "op", where);
+            if (request.op == "create") allow_keys(item, {"op", "resource", "object"}, where);
+            else if (request.op == "update") allow_keys(item, {"op", "resource", "key", "set", "clear"}, where);
+            else if (request.op == "delete") allow_keys(item, {"op", "resource", "key"}, where);
+            else if (request.op == "action") allow_keys(item, {"op", "resource", "body"}, where);
+            else throw Failure(Code::usage, std::format("{}: \"op\" must be create, update, delete or action", where));
+            request.resource_name = text(item, "resource", where);
+            if (request.resource_name.empty()) throw Failure(Code::usage, where + ": \"resource\" is required");
+            request.key = text(item, "key", where);
+            if (auto it = item.find("set"); it != item.end() && !it->is_null()) {
+                if (!it->is_object()) throw Failure(Code::usage, where + ": \"set\" must be an object");
+                request.set = *it;
+            }
+            if (auto it = item.find("clear"); it != item.end() && !it->is_null()) {
+                if (it->is_string()) request.clear.push_back(it->get<std::string>());
+                else if (it->is_array()) {
+                    for (const auto& name: *it) {
+                        if (!name.is_string()) throw Failure(Code::usage, where + ": \"clear\" must list attribute names");
+                        request.clear.push_back(name.get<std::string>());
+                    }
+                } else throw Failure(Code::usage, where + ": \"clear\" must be an array of attribute names");
+            }
+            if (auto it = item.find("object"); it != item.end()) {
+                if (!it->is_object()) throw Failure(Code::usage, where + ": \"object\" must be an object");
+                request.object = *it;
+            } else if (request.op == "create") throw Failure(Code::usage, where + ": create needs \"object\"");
+            if (auto it = item.find("body"); it != item.end() && !it->is_null()) {
+                if (!it->is_object()) throw Failure(Code::usage, where + ": \"body\" must be an object");
+                request.body = *it;
+            }
+            return request;
+        }
+
+        // ---- device access ----
+
+        // What a reply envelope says about the device (serial, version, vdom).
+        struct Identity {
+            std::string serial, version;
+
+            void take(const json& body) {
+                if (!body.is_object()) return;
+                if (auto it = body.find("serial"); it != body.end() && it->is_string() && serial.empty()) serial = *it;
+                if (auto it = body.find("version"); it != body.end() && it->is_string() && version.empty()) version = *it;
+            }
+        };
+
+        fortiapi::Query query_for(const std::string& vdom) {
+            fortiapi::Query query;
+            if (!vdom.empty()) query.vdom(vdom);
+            return query;
+        }
+
+        std::string object_path(const Resource& resource, const std::string& key) {
+            return key.empty() ? resource.path : fortiapi::path(resource.path, key);
+        }
+
+        // The current object, or nullopt when it does not exist (404 or no results).
+        std::optional<json> read_current(fortiapi::Client& client, const Resource& resource, const std::string& key,
+                                         const fortiapi::Query& query, Identity& identity) {
+            std::string path = object_path(resource, key);
+            fortiapi::Result result = client.exchange(fortiapi::Method::Get, path, query);
+            identity.take(result.body);
+            if (result.http_status == 404) return std::nullopt;
+            if (!result.ok()) throw fortiapi::ApiError(fortiapi::Method::Get, path, result.http_status, std::move(result.body));
+            auto it = result.body.find("results");
+            if (it == result.body.end()) throw Failure(Code::api, std::format("{}: the reply has no results", path));
+            if (it->is_array()) {
+                if (it->empty()) return std::nullopt;
+                return it->front();
+            }
+            return *it;
+        }
+
+        // ---- values ----
+
+        json reset_value(const FieldInfo& field) {
+            if (field.reset.empty()) return nullptr;
+            json value = json::parse(field.reset, nullptr, false);
+            return value.is_discarded() ? json(field.reset) : value;
+        }
+
+        std::optional<std::string> scalar_text(const json& value) {
+            if (value.is_string()) return value.get<std::string>();
+            if (value.is_number() || value.is_boolean()) return value.dump();
+            return std::nullopt;
+        }
+
+        // Does the device value `have` satisfy the requested `want`? Objects: every requested
+        // attribute matches (the device adds q_origin_key and defaults). Arrays: same size, each
+        // requested entry matches a distinct device entry. Scalars: equal, or equal as text (FortiOS
+        // reports some numbers as strings and the reverse).
+        bool matches(const json& want, const json& have) {
+            if (want.is_object()) {
+                if (!have.is_object()) return false;
+                for (auto it = want.begin(); it != want.end(); ++it)
+                    if (!have.contains(it.key()) || !matches(it.value(), have[it.key()])) return false;
+                return true;
+            }
+            if (want.is_array()) {
+                if (!have.is_array() || have.size() != want.size()) return false;
+                std::vector<bool> used(have.size(), false);
+                for (const auto& item: want) {
+                    bool found = false;
+                    for (std::size_t i = 0; i < have.size() && !found; ++i)
+                        if (!used[i] && matches(item, have[i])) used[i] = found = true;
+                    if (!found) return false;
+                }
+                return true;
+            }
+            if (want == have) return true;
+            auto a = scalar_text(want), b = scalar_text(have);
+            return a && b && *a == *b;
+        }
+
+        // Identity of a table entry for the diff: its name, id, or the entry itself.
+        std::string entry_id(const json& entry) {
+            if (entry.is_object()) {
+                for (const char* key: {"name", "id", "seq-num", "seq_num"})
+                    if (auto it = entry.find(key); it != entry.end() && !it->is_null())
+                        return it->is_string() ? it->get<std::string>() : it->dump();
+                json copy = entry;
+                copy.erase("q_origin_key");
+                return copy.dump();
+            }
+            return entry.is_string() ? entry.get<std::string>() : entry.dump();
+        }
+
+        // FortiOS replaces table attributes wholesale: say what the replacement adds and removes.
+        json table_change(const json& before, const json& after) {
+            std::vector<std::string> old_ids, new_ids;
+            if (before.is_array()) for (const auto& entry: before) old_ids.push_back(entry_id(entry));
+            if (after.is_array()) for (const auto& entry: after) new_ids.push_back(entry_id(entry));
+            json added = json::array(), removed = json::array();
+            for (const auto& id: new_ids) if (std::ranges::find(old_ids, id) == old_ids.end()) added.push_back(id);
+            for (const auto& id: old_ids) if (std::ranges::find(new_ids, id) == new_ids.end()) removed.push_back(id);
+            return {{"replaced", true}, {"added", added}, {"removed", removed}, {"result", new_ids}};
+        }
+
+        bool is_table_type(const FieldInfo* field) { return field && (field->type == "table" || field->type == "list"); }
+
+        // ---- building operation records ----
+
+        std::string key_of_object(const Resource& resource, const json& object) {
+            if (resource.kind != Kind::table || resource.key.empty()) return {};
+            auto it = object.find(resource.key);
+            if (it == object.end() || it->is_null()) return {};
+            if (it->is_string()) return it->get<std::string>();
+            if (it->is_number_integer() && it->get<long long>() != 0) return it->dump();   // 0: device assigns
+            return {};
+        }
+
+        // The record stored in the plan for one operation. `current` is the object as read (nullopt:
+        // absent); `known` is false when the state could not be read (no before-digest check then).
+        json build_record(std::size_t index, const OpRequest& request, const Resource& resource,
+                          const std::optional<json>& current, bool known) {
+            json record = {{"index", index}, {"op", request.op}, {"resource", resource.name()},
+                           {"path", resource.path}, {"kind", to_string(resource.kind)},
+                           {"risk", detail::to_string(detail::risk_of(resource))}};
+            if (!request.key.empty()) record["key"] = request.key;
+            auto fields = resource.fields();
+            json diff = json::array();
+
+            if (request.op == "create") {
+                if (current) throw Failure(Code::validation, std::format("{} {} already exists (use update)", resource.name(),
+                                                                         request.key),
+                                           {{"resource", resource.name()}, {"key", request.key}});
+                json body = resource.ops->create_body(request.object);
+                record["object"] = request.object;
+                record["before"] = nullptr;
+                record["before_digest"] = known ? json(detail::digest_of(nullptr)) : json(nullptr);
+                record["after"] = body;
+                for (auto it = body.begin(); it != body.end(); ++it) {
+                    json entry = {{"attribute", it.key()}, {"change", "add"}, {"before", nullptr}, {"after", it.value()}};
+                    if (is_table_type(resource.field(it.key(), fields))) entry["table"] = table_change(json::array(), it.value());
+                    diff.push_back(std::move(entry));
+                }
+                record["wire"] = {{"method", "POST"}, {"path", resource.path}, {"body", std::move(body)}};
+            } else if (request.op == "update") {
+                if (!current) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), request.key),
+                                            {{"resource", resource.name()}, {"key", request.key}});
+                if (request.set.empty() && request.clear.empty())
+                    throw Failure(Code::usage, std::format("{}: an update needs \"set\" or \"clear\"", resource.name()));
+                // The SDK addresses the PUT by the object's key member, so renaming through set would
+                // write to the new name's path: refuse it instead.
+                if (!resource.key.empty() &&
+                    (request.set.contains(resource.key) || std::ranges::find(request.clear, resource.key) != request.clear.end()))
+                    throw Failure(Code::validation, std::format("{}: the key attribute {} cannot be changed by an update",
+                                                                resource.name(), resource.key));
+                detail::Changes changes{request.set, request.clear};
+                json body = resource.ops->update_body(*current, changes);
+                json after = *current;
+                for (auto it = request.set.begin(); it != request.set.end(); ++it) {
+                    json before = current->contains(it.key()) ? (*current)[it.key()] : json(nullptr);
+                    json entry = {{"attribute", it.key()}, {"change", "set"}, {"before", before}, {"after", it.value()}};
+                    if (matches(it.value(), before)) entry["unchanged"] = true;
+                    if (is_table_type(resource.field(it.key(), fields))) entry["table"] = table_change(before, it.value());
+                    after[it.key()] = it.value();
+                    diff.push_back(std::move(entry));
+                }
+                for (const auto& name: request.clear) {
+                    const FieldInfo* field = resource.field(name, fields);
+                    json reset = field ? reset_value(*field) : json(nullptr);
+                    json before = current->contains(name) ? (*current)[name] : json(nullptr);
+                    json entry = {{"attribute", name}, {"change", "clear"}, {"before", before}, {"after", reset}};
+                    if (is_table_type(field)) entry["table"] = table_change(before, reset);
+                    after[name] = reset;
+                    diff.push_back(std::move(entry));
+                }
+                record["set"] = request.set;
+                record["clear"] = request.clear;
+                record["before"] = *current;
+                record["before_digest"] = detail::digest_of(*current);
+                record["after"] = std::move(after);
+                record["wire"] = {{"method", "PUT"}, {"path", object_path(resource, request.key)}, {"body", std::move(body)}};
+            } else if (request.op == "delete") {
+                if (!current) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), request.key),
+                                            {{"resource", resource.name()}, {"key", request.key}});
+                record["before"] = *current;
+                record["before_digest"] = detail::digest_of(*current);
+                record["after"] = nullptr;
+                record["note"] = "deletes the object";
+                record["wire"] = {{"method", "DELETE"}, {"path", object_path(resource, request.key)}, {"body", nullptr}};
+            } else {   // action
+                record["body"] = request.body;
+                record["before"] = nullptr;
+                record["before_digest"] = nullptr;
+                record["after"] = nullptr;
+                record["note"] = "monitor action: its side effects are not catalogued (forti-api gap G6); it cannot "
+                                 "be verified by re-reading or rolled back";
+                record["wire"] = {{"method", "POST"}, {"path", resource.path}, {"body", request.body}};
+            }
+            record["diff"] = std::move(diff);
+            return record;
+        }
+
+        // Resolves and checks that the operation fits the resource.
+        Resource resolve_for(const OpRequest& request, std::size_t index) {
+            std::string where = std::format("operations[{}]", index);
+            Resource resource = Catalog::instance().resolve(request.resource_name);
+            if (request.op == "action") {
+                if (resource.kind != Kind::monitor)
+                    throw Failure(Code::usage, std::format("{}: action needs a monitor path (monitor/...)", where));
+                return resource;
+            }
+            if (resource.kind == Kind::monitor || !resource.typed())
+                throw Failure(Code::usage, std::format("{}: {} is a monitor endpoint: only \"action\" applies", where,
+                                                       resource.name()));
+            if (resource.kind == Kind::singleton && request.op != "update")
+                throw Failure(Code::usage, std::format("{}: {} is a singleton: only update applies", where, resource.name()));
+            if (resource.kind == Kind::table && request.op != "create" && request.key.empty())
+                throw Failure(Code::usage, std::format("{}: {} needs \"key\" ({})", where, request.op, resource.key));
+            if (resource.kind == Kind::singleton && !request.key.empty())
+                throw Failure(Code::usage, std::format("{}: {} is a singleton and has no key", where, resource.name()));
+            return resource;
+        }
+
+        std::string summarize(const json& operations, const json& device, Risk risk) {
+            std::map<std::string, int> counts;
+            for (const auto& op: operations) ++counts[op.value("op", "")];
+            std::string parts;
+            for (const char* op: {"create", "update", "delete", "action"})
+                if (counts[op]) parts += std::format("{}{} {}", parts.empty() ? "" : ", ", counts[op], op);
+            return std::format("{} operation{} on {} ({}): {}; risk {}", operations.size(), operations.size() == 1 ? "" : "s",
+                               device.value("profile", ""), device.value("host", ""), parts, detail::to_string(risk));
+        }
+
+        json make_plan(json device, json operations, detail::Clock::time_point time, std::string kind,
+                       std::string rollback_of = {}) {
+            json plan = {{"format", detail::plan_format},
+                         {"id", detail::new_plan_id(time)},
+                         {"kind", std::move(kind)},
+                         {"created_at", detail::iso8601(time)},
+                         {"device", std::move(device)},
+                         {"operations", std::move(operations)}};
+            if (!rollback_of.empty()) plan["rollback_of"] = rollback_of;
+            Risk risk = detail::plan_risk(plan);
+            plan["risk"] = detail::to_string(risk);
+            plan["summary"] = summarize(plan["operations"], plan["device"], risk);
+            plan["digest"] = detail::plan_digest(plan);
+            return plan;
+        }
+
+        // Error details and messages may echo a value; never let a sensitive one out.
+        Failure redacted_failure(const Failure& failure) {
+            json details = detail::redact(failure.details());
+            std::string message = failure.what();
+            if (auto it = failure.details().find("attribute"); it != failure.details().end() && it->is_string() &&
+                                                                 detail::sensitive_name(it->get<std::string>()))
+                message = std::format("attribute {}: invalid value (redacted)", it->get<std::string>());
+            return {failure.code(), message, std::move(details)};
+        }
+
+        json mode_notes(const Profile& profile, const std::string& id) {
+            json notes = json::array();
+            switch (profile.mode) {
+                case Mode::read_only:
+                    notes.push_back(std::format("profile {} is read-only: apply will be refused (policy_denied)", profile.name));
+                    break;
+                case Mode::guarded:
+                    notes.push_back(std::format("guarded mode: a human must run `forti plan approve {}` before apply", id));
+                    break;
+                case Mode::autonomous:
+                    notes.push_back("autonomous mode: apply executes this plan without a human approval");
+                    break;
+            }
+            return notes;
+        }
+
+        constexpr std::string_view recovery_limitation =
+                "Rollback plans and config backups need a working management path to the device; they are not "
+                "independent recovery. Recovering from a management lockout needs the operator's independent path "
+                "(console, out-of-band interface, or a device-side auto-revert).";
+
+    }  // namespace
+
+    // ---- plan ----
+
+    json Engine::plan(const json& request) {
+        try {
+            allow_keys(request, {"profile", "vdom", "operations"}, "plan");
+            const Profile& profile = this->profile(text(request, "profile", "plan"));
+            std::string vdom = text(request, "vdom", "plan");
+            if (vdom.empty()) vdom = profile.vdom;
+            validate_vdom(vdom);
+            auto operations_it = request.find("operations");
+            if (operations_it == request.end() || !operations_it->is_array() || operations_it->empty())
+                throw Failure(Code::usage, "plan: \"operations\" must be a non-empty array");
+            if (operations_it->size() > max_operations)
+                throw Failure(Code::usage, std::format("plan: at most {} operations per plan", max_operations));
+
+            // Shape and catalog checks for every operation before the first device read.
+            std::vector<std::pair<OpRequest, Resource>> parsed;
+            std::set<std::string> targets;
+            for (std::size_t i = 0; i < operations_it->size(); ++i) {
+                OpRequest op = parse_operation((*operations_it)[i], i);
+                Resource resource = resolve_for(op, i);
+                if (op.op == "create") op.key = key_of_object(resource, op.object);
+                // One operation per object: each before-state is read once, before anything runs.
+                if (op.op != "action" && !(op.op == "create" && op.key.empty()) &&
+                    !targets.insert(object_path(resource, op.key)).second)
+                    throw Failure(Code::usage, std::format("operations[{}]: {} {} appears more than once in the plan",
+                                                           i, resource.name(), op.key));
+                parsed.emplace_back(std::move(op), std::move(resource));
+            }
+
+            fortiapi::Client& client = this->client(profile);
+            fortiapi::Query query = query_for(vdom);
+            Identity identity;
+            json records = json::array();
+            for (std::size_t i = 0; i < parsed.size(); ++i) {
+                const auto& [op, resource] = parsed[i];
+                std::optional<json> current;
+                bool known = false;
+                bool needs_read = op.op == "update" || op.op == "delete" || (op.op == "create" && !op.key.empty());
+                if (needs_read) {
+                    current = read_current(client, resource, resource.kind == Kind::table ? op.key : "", query, identity);
+                    known = true;
+                }
+                records.push_back(build_record(i, op, resource, current, known));
+            }
+            if (identity.serial.empty()) identity.take(client.get(fortiapi::Monitor::path("system/status"), query));
+            if (identity.serial.empty())
+                throw Failure(Code::api, "the device did not report its serial number; cannot bind the plan to it");
+
+            json device = {{"profile", profile.name}, {"host", profile.host}, {"port", profile.port},
+                           {"vdom", vdom}, {"serial", identity.serial}, {"version", identity.version}};
+            json plan = make_plan(std::move(device), std::move(records), detail::Clock::now(), "plan");
+            detail::save_plan(options_.paths, plan);
+
+            json data = detail::plan_view(plan);
+            std::string id = plan["id"];
+            data["mode"] = to_string(profile.mode);
+            data["notes"] = mode_notes(profile, id);
+            if (detail::plan_risk(plan) == Risk::critical)
+                data["notes"].push_back(std::format("critical risk: apply probes management connectivity after each "
+                                                    "critical operation; no pre-change config backup is taken yet "
+                                                    "(forti-api gap G9). {}", recovery_limitation));
+            data["apply"] = std::format("forti apply {}", id);
+            if (profile.mode == Mode::guarded) data["approve"] = std::format("forti plan approve {}", id);
+            return ok(std::move(data), {{"profile", profile.name}, {"vdom", vdom}});
+        } catch (...) {
+            throw redacted_failure(translate(std::current_exception()));
+        }
+    }
+
+    // ---- apply ----
+
+    namespace {
+
+        // The seam for the pre-change config backup of critical plans. forti-api has no raw download
+        // yet (gap G9): Client throws DecodeError on a non-JSON 2xx, so nothing is fetched. When the
+        // SDK's download lands, this writes <state>/backups/<plan id>.conf (0600 in a 0700 dir) and
+        // returns its reference. The backup is sensitive: never logged, never in output.
+        json pre_change_backup(const Paths&, const Profile&, const json&) {
+            return {{"status", "unavailable"},
+                    {"reason", "forti-api gap G9: no raw config download in the SDK yet"}};
+        }
+
+        struct Executed {
+            std::string status;          // verified | applied_unverified | failed | outcome_unknown | not_attempted
+            bool sent = false;           // the request may have reached the device
+            bool changed = false;        // the device may differ from the before-state (rollback needed)
+            std::string key;             // the object's key after the operation (device-assigned for creates)
+            std::optional<json> post;    // the object as re-read afterwards (nullopt: absent)
+            bool post_known = false;
+            json record = json::object();
+        };
+
+        // The inverse of one executed operation. nullopt when nothing needs undoing; throws Failure when
+        // no inverse exists.
+        std::optional<OpRequest> inverse(const json& op, const Resource& resource, const Executed& done) {
+            std::string kind = op["op"];
+            if (kind == "action") throw Failure(Code::validation, "monitor actions cannot be rolled back");
+            const json& before = op["before"];
+            OpRequest undo;
+            undo.resource_name = std::string(resource.name());
+            if (kind == "create") {
+                if (done.post_known && !done.post) return std::nullopt;   // nothing was created
+                if (done.key.empty()) throw Failure(Code::validation, "the created object's key is unknown");
+                undo.op = "delete";
+                undo.key = done.key;
+            } else if (kind == "update") {
+                undo.op = "update";
+                undo.key = op.value("key", "");
+                for (auto it = op["set"].begin(); it != op["set"].end(); ++it) {
+                    if (before.contains(it.key())) undo.set[it.key()] = before[it.key()];
+                    else undo.clear.push_back(it.key());
+                }
+                for (const auto& name: op["clear"]) {
+                    std::string attribute = name;
+                    if (before.contains(attribute)) undo.set[attribute] = before[attribute];
+                }
+                if (undo.set.empty() && undo.clear.empty()) return std::nullopt;
+            } else {   // delete: re-create from the writable attributes of the before-state
+                if (done.post_known && done.post) return std::nullopt;   // still there
+                undo.op = "create";
+                undo.key = op.value("key", "");
+                for (const auto& field: resource.fields())
+                    if (!field.read_only && before.contains(field.name) && !before[field.name].is_null())
+                        undo.object[field.name] = before[field.name];
+            }
+            return undo;
+        }
+
+        // Writes the rollback plan for the operations that may have changed the device (reverse order).
+        json write_rollback(const Paths& paths, const json& plan, const std::vector<Executed>& executed) {
+            json operations = json::array();
+            json skipped = json::array();
+            const json& ops = plan["operations"];
+            for (std::size_t n = executed.size(); n-- > 0;) {
+                const Executed& done = executed[n];
+                if (!done.changed) continue;
+                const json& op = ops[n];
+                try {
+                    Resource resource = Catalog::instance().resolve(op["resource"].get<std::string>());
+                    auto undo = inverse(op, resource, done);
+                    if (!undo) continue;
+                    // The rollback starts from the re-read post-state. When that is unknown (outcome
+                    // unknown, failed re-read) the planned after-state stands in and its before-digest
+                    // is not checked: apply of the rollback still re-reads before writing.
+                    std::optional<json> state = done.post;
+                    if (!done.post_known && undo->op != "create") state = op["after"];
+                    if (!done.post_known && undo->op == "create") state = std::nullopt;
+                    json record = build_record(operations.size(), *undo, resource, state, done.post_known);
+                    if (!done.post_known) record["before_digest"] = nullptr;
+                    operations.push_back(std::move(record));
+                } catch (...) {
+                    Failure failure = redacted_failure(translate(std::current_exception()));
+                    skipped.push_back({{"index", n}, {"op", op["op"]}, {"resource", op["resource"]},
+                                       {"reason", failure.what()}});
+                }
+            }
+            json out = {{"skipped", std::move(skipped)}};
+            if (operations.empty()) {
+                out["plan_id"] = nullptr;
+                return out;
+            }
+            json rollback = make_plan(plan["device"], std::move(operations), detail::Clock::now(), "rollback",
+                                      plan["id"].get<std::string>());
+            detail::save_plan(paths, rollback);
+            out["plan_id"] = rollback["id"];
+            out["apply"] = std::format("forti apply {}", rollback["id"].get<std::string>());
+            out["limitation"] = recovery_limitation;
+            return out;
+        }
+
+        // A fresh client (new connection) reads monitor/system/status: is the management path alive
+        // and still the same device?
+        json probe(const Options& options, SecretStore& secrets, const Profile& profile, const std::string& serial,
+                   const std::string& vdom) {
+            try {
+                auto fresh = detail::make_client(options, secrets, profile, 1u);
+                Identity identity;
+                identity.take(fresh->get(fortiapi::Monitor::path("system/status"), query_for(vdom)));
+                if (!identity.serial.empty() && identity.serial != serial)
+                    return {{"ok", false}, {"error", "the management address now answers with another serial number"}};
+                return {{"ok", true}};
+            } catch (...) {
+                return {{"ok", false}, {"error", redacted_failure(translate(std::current_exception())).what()}};
+            }
+        }
+
+        json attribute_names(const json& op) {
+            json names = json::array();
+            for (const char* key: {"set", "object", "body"})
+                if (auto it = op.find(key); it != op.end() && it->is_object())
+                    for (auto field = it->begin(); field != it->end(); ++field) names.push_back(field.key());
+            if (auto it = op.find("clear"); it != op.end()) for (const auto& name: *it) names.push_back(name);
+            return names;
+        }
+
+    }  // namespace
+
+    json Engine::apply(const json& request) {
+        const Paths& paths = options_.paths;
+        json event = {{"event", "apply"}};
+        try {
+            allow_keys(request, {"plan_id"}, "apply");
+            std::string id = text(request, "plan_id", "apply");
+            if (id.empty()) throw Failure(Code::usage, "apply: \"plan_id\" is required");
+            detail::validate_plan_id(id);
+            event["plan_id"] = id;
+
+            json plan = detail::load_plan(paths, id);
+            const json& device = plan["device"];
+            Risk risk = detail::plan_risk(plan);
+            event["digest"] = plan["digest"];
+            event["profile"] = device.value("profile", "");
+            event["host"] = device.value("host", "");
+            event["serial"] = device.value("serial", "");
+            event["risk"] = detail::to_string(risk);
+            if (plan.value("kind", "plan") == "rollback") event["rollback_of"] = plan.value("rollback_of", "");
+
+            if (detail::plan_applied(paths, id))
+                throw Failure(Code::policy_denied, std::format("plan {} was already applied; a plan runs at most once", id),
+                              {{"plan_id", id}, {"reason", "already_applied"}});
+            const Profile& profile = this->profile(device.value("profile", ""));
+            event["mode"] = to_string(profile.mode);
+            if (profile.mode == Mode::read_only)
+                throw Failure(Code::policy_denied,
+                              std::format("profile {} is read-only: apply is refused (its mode is set with forti configure)",
+                                          profile.name),
+                              {{"plan_id", id}, {"reason", "read_only"}, {"profile", profile.name}, {"mode", "read-only"}});
+            auto now = detail::Clock::now();
+            if (profile.mode == Mode::guarded) detail::verify_approval(paths, plan, now);
+            if (profile.host != device.value("host", "") || profile.port != device.value("port", 0u))
+                throw Failure(Code::stale_plan,
+                              std::format("profile {} now points at {}:{}, not the planned {}:{}", profile.name, profile.host,
+                                          profile.port, device.value("host", ""), device.value("port", 0u)),
+                              {{"plan_id", id}, {"reason", "device_identity"}});
+
+            std::string vdom = device.value("vdom", "");
+            fortiapi::Query query = query_for(vdom);
+            fortiapi::Client& client = this->client(profile);
+            Identity identity;
+
+            // Re-read every before-state; anything that moved makes the plan stale.
+            const json& ops = plan["operations"];
+            std::vector<Resource> resources;
+            std::vector<std::optional<json>> currents(ops.size());
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                const json& op = ops[i];
+                resources.push_back(Catalog::instance().resolve(op["resource"].get<std::string>()));
+                const Resource& resource = resources.back();
+                std::string kind = op["op"];
+                std::string key = op.value("key", "");
+                bool read = kind == "update" || kind == "delete" || (kind == "create" && op["before_digest"].is_string());
+                if (!read) continue;
+                currents[i] = read_current(client, resource, resource.kind == Kind::table ? key : "", query, identity);
+                auto stale = [&](std::string_view reason, std::string_view what) {
+                    throw Failure(Code::stale_plan,
+                                  std::format("{} {} {} since plan {} was made; plan again", resource.name(), key, what, id),
+                                  {{"plan_id", id}, {"reason", reason}, {"index", i}, {"resource", resource.name()},
+                                   {"key", key}});
+                };
+                if ((kind == "update" || kind == "delete") && !currents[i]) stale("before_changed", "no longer exists");
+                if (op["before_digest"].is_string() && detail::digest_of(currents[i] ? *currents[i] : json(nullptr)) !=
+                                                       op["before_digest"].get<std::string>())
+                    stale("before_changed", "changed");
+                if (kind == "update") {
+                    detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};
+                    if (resource.ops->update_body(*currents[i], changes) != op["wire"]["body"])
+                        stale("wire_changed", "would now be written differently");
+                } else if (kind == "create" && resource.ops->create_body(op["object"]) != op["wire"]["body"]) {
+                    stale("wire_changed", "would now be written differently");
+                }
+            }
+            if (identity.serial.empty()) identity.take(client.get(fortiapi::Monitor::path("system/status"), query));
+            if (identity.serial != device.value("serial", ""))
+                throw Failure(Code::stale_plan,
+                              std::format("the device at {} reports serial {}, not the planned {}; plan again",
+                                          profile.host, identity.serial.empty() ? "(none)" : identity.serial,
+                                          device.value("serial", "")),
+                              {{"plan_id", id}, {"reason", "device_serial"}});
+
+            json backup = nullptr;
+            if (risk == Risk::critical) backup = pre_change_backup(paths, profile, plan);
+
+            // Committed: the plan can never run again, and a guarded approval is used up.
+            detail::mark_applied(paths, id, now);
+            if (profile.mode == Mode::guarded) detail::consume_approval(paths, id, now);
+
+            std::vector<Executed> executed(ops.size());
+            std::optional<std::size_t> lost_at;
+            json probe_error = nullptr;
+            bool stop = false;
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                Executed& done = executed[i];
+                const json& op = ops[i];
+                const Resource& resource = resources[i];
+                std::string kind = op["op"];
+                done.key = op.value("key", "");
+                done.record = {{"index", i}, {"op", kind}, {"resource", resource.name()}};
+                if (!done.key.empty()) done.record["key"] = done.key;
+                if (stop) {
+                    done.status = "not_attempted";
+                    done.record["status"] = done.status;
+                    continue;
+                }
+                std::string object_key = resource.kind == Kind::table ? done.key : "";
+                try {
+                    if (kind == "create") {
+                        done.sent = true;
+                        fortiapi::Reply reply = resource.ops->create(client, op["object"], query);
+                        if (done.key.empty() && !reply.mkey.is_null())
+                            done.key = reply.mkey.is_string() ? reply.mkey.get<std::string>() : reply.mkey.dump();
+                        object_key = done.key;
+                    } else if (kind == "update") {
+                        detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};
+                        done.sent = true;
+                        resource.ops->update(client, *currents[i], changes, query);
+                    } else if (kind == "delete") {
+                        done.sent = true;
+                        resource.ops->remove(client, done.key, query);
+                    } else {
+                        done.sent = true;
+                        fortiapi::Monitor::post(std::string_view(resource.path).substr(8), op["body"], query, client);
+                    }
+                    done.status = "verified";
+                    done.changed = true;
+                } catch (const fortiapi::TransportError& error) {
+                    done.sent = !error.before_send();
+                    done.changed = done.sent;
+                    done.status = error.before_send() ? "failed" : "outcome_unknown";
+                    done.record["sent"] = done.sent;
+                    done.record["error"] = redacted_failure(translate(std::current_exception())).to_json();
+                    if (!error.before_send())
+                        done.record["note"] = "the request may have reached the device; its effect is unknown";
+                    stop = true;
+                } catch (...) {
+                    done.status = "failed";
+                    done.changed = done.sent;   // until the re-read below says otherwise
+                    done.record["error"] = redacted_failure(translate(std::current_exception())).to_json();
+                    stop = true;
+                }
+                if (!done.key.empty()) done.record["key"] = done.key;
+
+                // Re-read: verify a success; after a FortiOS error, see what was left behind (creates
+                // are not transactional).
+                if (done.status == "verified" || (done.status == "failed" && done.sent && kind != "action")) {
+                    if (kind == "action") {
+                        done.status = "applied_unverified";
+                        done.record["verification"] = "monitor actions cannot be verified by re-reading";
+                    } else if (resource.kind == Kind::table && object_key.empty()) {
+                        if (done.status == "verified") done.status = "applied_unverified";
+                        done.record["verification"] = "the created object's key was not reported";
+                    } else {
+                        try {
+                            Identity ignored;
+                            done.post = read_current(client, resource, object_key, query, ignored);
+                            done.post_known = true;
+                        } catch (...) {
+                            done.record["verification"] = std::string("re-read failed: ") +
+                                                          redacted_failure(translate(std::current_exception())).what();
+                        }
+                    }
+                    if (done.status == "failed") {
+                        if (done.post_known) {
+                            if (kind == "create" && done.post) {
+                                done.record["exists_after_failure"] = true;
+                                done.record["note"] = "FortiOS creates are not transactional: the object exists "
+                                                      "although the create failed";
+                            } else if (kind != "create" &&
+                                       json(detail::digest_of(done.post ? *done.post : json(nullptr))) != op["before_digest"]) {
+                                done.record["changed_after_failure"] = true;
+                            }
+                            done.changed = done.record.contains("exists_after_failure") ||
+                                           done.record.contains("changed_after_failure");
+                        }
+                    } else if (done.status == "verified" && !done.post_known) {
+                        done.status = "applied_unverified";
+                    } else if (done.status == "verified") {
+                        json mismatches = json::array();
+                        auto expect = [&](const std::string& attribute, const json& want) {
+                            json have = done.post && done.post->contains(attribute) ? (*done.post)[attribute] : json(nullptr);
+                            if (!matches(want, have))
+                                mismatches.push_back({{"attribute", attribute}, {"expected", want}, {"actual", have}});
+                        };
+                        if (kind == "create") {
+                            if (!done.post) done.record["verification"] = "the object was not found after the create";
+                            else for (auto it = op["object"].begin(); it != op["object"].end(); ++it) expect(it.key(), it.value());
+                        } else if (kind == "update") {
+                            if (!done.post) done.record["verification"] = "the object was not found after the update";
+                            else {
+                                for (auto it = op["set"].begin(); it != op["set"].end(); ++it) expect(it.key(), it.value());
+                                auto fields = resource.fields();
+                                for (const auto& name: op["clear"]) {
+                                    const FieldInfo* field = resource.field(name.get<std::string>(), fields);
+                                    expect(name, field ? reset_value(*field) : json(nullptr));
+                                }
+                            }
+                        } else if (kind == "delete" && done.post) {
+                            done.record["verification"] = "the object still exists after the delete";
+                        }
+                        if (!mismatches.empty()) {
+                            done.record["mismatches"] = detail::redact(mismatches);
+                            done.record["verification"] = "the device reports values other than those written (FortiOS "
+                                                          "normalizes some values, e.g. 192.0.2.0/24 → 192.0.2.0 255.255.255.0)";
+                        }
+                        if (done.record.contains("verification")) done.status = "applied_unverified";
+                    }
+                }
+                done.record["status"] = done.status;
+
+                // Management connectivity after a critical change that may have reached the device.
+                if (done.sent && resource.kind != Kind::monitor && detail::risk_of(resource) == Risk::critical) {
+                    json result = probe(options_, *secrets_, profile, device.value("serial", ""), vdom);
+                    done.record["management_probe"] = result;
+                    if (!result.value("ok", false)) {
+                        lost_at = i;
+                        probe_error = result["error"];
+                        stop = true;
+                    }
+                }
+            }
+
+            json rollback = write_rollback(paths, plan, executed);
+            json records = json::array();
+            json audit_ops = json::array();
+            std::size_t verified = 0, unverified = 0;
+            bool failed = false, unknown = false;
+            for (std::size_t i = 0; i < executed.size(); ++i) {
+                records.push_back(executed[i].record);
+                json entry = {{"index", i}, {"op", ops[i]["op"]}, {"resource", ops[i]["resource"]},
+                              {"status", executed[i].status}, {"attributes", attribute_names(ops[i])}};
+                if (!executed[i].key.empty()) entry["key"] = executed[i].key;
+                audit_ops.push_back(std::move(entry));
+                verified += executed[i].status == "verified";
+                unverified += executed[i].status == "applied_unverified";
+                failed = failed || executed[i].status == "failed";
+                unknown = unknown || executed[i].status == "outcome_unknown";
+            }
+            event["operations"] = audit_ops;
+            event["rollback_plan"] = rollback["plan_id"];
+            if (!backup.is_null()) event["backup"] = backup.value("status", "");
+
+            json record = {{"plan_id", id}, {"digest", plan["digest"]}, {"operations", records},
+                           {"verified", verified}, {"applied_unverified", unverified}, {"rollback", rollback}};
+            if (!backup.is_null()) record["backup"] = backup;
+
+            if (lost_at) {
+                const json& op = ops[*lost_at];
+                record["before"] = detail::redact(op["before"]);
+                record["probe_error"] = probe_error;
+                record["recovery"] = recovery_limitation;
+                throw Failure(Code::management_connectivity_lost,
+                              std::format("management connectivity to {} was lost after operation {} ({} {}); the "
+                                          "remaining operations were not attempted. {} Rollback plan: {}",
+                                          profile.host, *lost_at, op["op"].get<std::string>(), op["resource"].get<std::string>(),
+                                          recovery_limitation,
+                                          rollback["plan_id"].is_string() ? rollback["plan_id"].get<std::string>() : "none"),
+                              std::move(record));
+            }
+            if (unknown)
+                throw Failure(Code::outcome_unknown,
+                              std::format("plan {}: a request may have reached the device but no reply arrived; "
+                                          "execution stopped. Re-read the device before planning again", id),
+                              std::move(record));
+            if (failed)
+                throw Failure(Code::partial_failure,
+                              std::format("plan {}: execution stopped at a failed operation; see the record for what was "
+                                          "applied", id),
+                              std::move(record));
+            event["outcome"] = "ok";
+            detail::audit(paths, event);
+            record["status"] = "applied";
+            return ok(std::move(record), {{"profile", profile.name}, {"vdom", vdom}});
+        } catch (...) {
+            Failure failure = redacted_failure(translate(std::current_exception()));
+            event["outcome"] = to_string(failure.code());
+            event["error"] = {{"code", to_string(failure.code())}, {"message", failure.what()}};
+            if (auto it = failure.details().find("reason"); it != failure.details().end()) event["error"]["reason"] = *it;
+            detail::audit(paths, event);
+            throw failure;
+        }
+    }
+
+}  // namespace forti::engine

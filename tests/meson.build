@@ -6,7 +6,9 @@ if gtest_dep.found()
                             'unit/test_catalog.cpp',
                             'unit/test_read.cpp',
                             'unit/test_profiles.cpp',
-                            include_directories : include_directories('support'),
+                            'unit/test_plan.cpp',
+                            # test_plan.cpp also checks engine internals (SHA-256 vectors, digests, redaction).
+                            include_directories : include_directories('support', '../engine/src'),
                             dependencies : [forti_engine_dep, gtest_dep],
                             implicit_include_directories : false),
          suite : 'unit')
