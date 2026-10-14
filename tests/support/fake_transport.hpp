@@ -29,6 +29,14 @@ namespace forti::fake {
             return *this;
         }
 
+        // A non-JSON reply (file downloads such as a configuration backup).
+        FakeTransport& reply_raw(long status, std::string body, std::string content_type = "application/octet-stream") {
+            fortiapi::HttpResponse response{status, std::move(body)};
+            response.headers.emplace_back("Content-Type", std::move(content_type));
+            script.emplace_back(std::move(response));
+            return *this;
+        }
+
         FakeTransport& fail(int code, bool before_send) {
             script.emplace_back(fortiapi::TransportError("scripted transport failure", code, before_send));
             return *this;

@@ -116,6 +116,9 @@ namespace {
         }
     };
 
+    const std::string backup_text = "#config-version=FGT60F-7.4.8-FW-build2795-250523:opmode=0:vdom=0\n"
+                                    "config system global\n    set hostname \"fw1\"\nend\n";
+
     std::string digest_hex(std::string_view text) { return engine::detail::hex(engine::detail::sha256(text)); }
 
 }  // namespace
@@ -610,6 +613,7 @@ TEST_F(PlanTest, CriticalOperationsAreFollowedByAFreshManagementProbe) {
 
     transport->reply(200, fake::envelope(global));
     transport->reply(200, fake::envelope(json::array({address("LAN")})));
+    transport->reply_raw(200, backup_text);   // the pre-change configuration backup
     transport->reply(200, written());
     transport->reply(200, fake::envelope({{"hostname", "fw1"}, {"admin-sport", 8443}}));
     transport->fail(7, true).fail(7, true);   // the probe: no management path any more
@@ -621,7 +625,15 @@ TEST_F(PlanTest, CriticalOperationsAreFollowedByAFreshManagementProbe) {
     EXPECT_EQ(details["operations"][1]["status"], "not_attempted");
     EXPECT_TRUE(details["rollback"]["plan_id"].is_string());
     EXPECT_EQ(details["before"]["admin-sport"], 443);
-    EXPECT_EQ(details["backup"]["status"], "unavailable");   // forti-api gap G9
+    EXPECT_EQ(details["backup"]["status"], "saved");
+    fs::path backup = details["backup"]["path"].get<std::string>();
+    EXPECT_EQ(backup.parent_path(), paths.state / "backups");
+    EXPECT_EQ(mode_of(backup), 0600u);
+    EXPECT_EQ(mode_of(backup.parent_path()), 0700u);
+    EXPECT_EQ(slurp(backup), backup_text);
+    EXPECT_EQ(details["backup"]["sha256"], digest_hex(backup_text));
+    EXPECT_EQ(result.dump().find("config system global"), std::string::npos);   // never in output
+    EXPECT_EQ(slurp(paths.state / "audit.jsonl").find("config system global"), std::string::npos);
     std::string message = result["error"]["message"];
     EXPECT_NE(message.find("console, out-of-band interface, or a device-side auto-revert"), std::string::npos);
     EXPECT_EQ(writes(), 1u);
@@ -634,6 +646,7 @@ TEST_F(PlanTest, AHealthyProbeLetsExecutionContinue) {
     json planned = plan({{"operations", {{{"op", "update"}, {"resource", "system/global"}, {"set", {{"hostname", "fw2"}}}}}}});
     ASSERT_TRUE(planned["ok"]) << planned.dump();
     transport->reply(200, fake::envelope(global));
+    transport->reply_raw(200, backup_text);
     transport->reply(200, written());
     transport->reply(200, fake::envelope({{"hostname", "fw2"}}));
     transport->reply(200, fake::envelope({{"hostname", "fw2"}}));   // monitor/system/status through a fresh client
@@ -795,4 +808,61 @@ TEST_F(PlanTest, ConcurrentAppliesOfOnePlanRunItOnce) {
     EXPECT_EQ(applied, 1);
     EXPECT_EQ(refused, runners - 1);
     EXPECT_EQ(puts, 1u);
+}
+
+// ---- pre-change configuration backup (critical plans) ----
+
+namespace {
+    std::string plan_hostname(PlanTest& test) {
+        test.transport->reply(200, fake::envelope({{"hostname", "fw1"}}));
+        json planned = test.plan({{"operations", {{{"op", "update"}, {"resource", "system/global"}, {"set", {{"hostname", "fw2"}}}}}}});
+        EXPECT_TRUE(planned["ok"]) << planned.dump();
+        return planned["data"]["id"];
+    }
+}  // namespace
+
+TEST_F(PlanTest, ABackupThatCannotBeTakenStopsACriticalPlanBeforeAnyWrite) {
+    std::string id = plan_hostname(*this);
+    transport->reply(200, fake::envelope({{"hostname", "fw1"}}));
+    transport->reply(403, json{{"status", "error"}, {"http_status", 403}});
+    json result = apply(id);
+    EXPECT_EQ(result["error"]["code"], "policy_denied") << result.dump();
+    EXPECT_EQ(result["error"]["details"]["reason"], "backup_failed");
+    EXPECT_EQ(writes(), 0u);
+    EXPECT_FALSE(fs::exists(paths.state / "backups" / (id + ".conf.partial")));
+    EXPECT_FALSE(fs::exists(paths.state / "backups" / (id + ".conf")));
+
+    // Nothing was committed: the same plan can run once the cause is fixed.
+    transport->reply(200, fake::envelope({{"hostname", "fw1"}}));
+    transport->reply_raw(200, backup_text);
+    transport->reply(200, written());
+    transport->reply(200, fake::envelope({{"hostname", "fw2"}}));
+    transport->reply(200, fake::envelope({{"hostname", "fw2"}}));
+    json retried = apply(id);
+    ASSERT_TRUE(retried["ok"]) << retried.dump();
+    EXPECT_EQ(retried["data"]["backup"]["status"], "saved");
+}
+
+TEST_F(PlanTest, ABackupMustBeAFortiOSConfiguration) {
+    std::string id = plan_hostname(*this);
+    transport->reply(200, fake::envelope({{"hostname", "fw1"}}));
+    transport->reply_raw(200, "<html>login</html>", "text/html");
+    json result = apply(id);
+    EXPECT_EQ(result["error"]["details"]["reason"], "backup_failed") << result.dump();
+    EXPECT_EQ(writes(), 0u);
+}
+
+TEST_F(PlanTest, ProfilesCanOptOutOfTheCriticalBackup) {
+    auto options = fake::options(transport, Mode::autonomous);
+    options.paths = paths;
+    options.profiles->profiles.at("lab").backup_before_critical = false;
+    sut = std::make_unique<engine::Engine>(options);
+    std::string id = plan_hostname(*this);
+    transport->reply(200, fake::envelope({{"hostname", "fw1"}}));
+    transport->reply(200, written());
+    transport->reply(200, fake::envelope({{"hostname", "fw2"}}));
+    transport->reply(200, fake::envelope({{"hostname", "fw2"}}));
+    json result = apply(id);
+    ASSERT_TRUE(result["ok"]) << result.dump();
+    EXPECT_EQ(result["data"]["backup"]["status"], "skipped");
 }
