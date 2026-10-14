@@ -57,9 +57,10 @@ namespace forti::install {
         bool ok = !name.empty() && name.size() <= 64 && name.front() != '-' &&
                   std::ranges::all_of(name, [](char c) {
                       return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
-                             c == '-' || c == '.';
+                             c == '-';
                   });
-        if (!ok) throw Failure(Code::usage, "--profile expects a profile name (letters, digits, '.', '_', '-')");
+        // The engine's rule ([A-Za-z0-9_-]{1,64}): forti-mcp refuses any other --profile at startup.
+        if (!ok) throw Failure(Code::usage, "--profile expects a profile name (letters, digits, '_', '-')");
     }
 
     Entry desired_entry(const fs::path& forti_mcp, const std::optional<std::string>& profile) {

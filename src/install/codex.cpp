@@ -61,7 +61,9 @@ namespace forti::install {
                     auto path = project_config(context);
                     std::string summary = std::format("{} {} ({} [mcp_servers.{}])", fs::exists(path) ? "edit" : "create",
                                                       path.string(), current.registered ? "replace" : "add", server_name);
-                    return {{"write", summary, [path, desired] {
+                    auto root = context.project_dir;
+                    return {{"write", summary, [path, desired, root] {
+                                 require_inside(path, root);   // .codex -> ~/.codex would make this a global change
                                  auto text = read_file(path).value_or("");
                                  auto updated = toml::set_table(text, {"mcp_servers", std::string(server_name)},
                                                                 toml::render_server(server_name, desired));
@@ -83,6 +85,7 @@ namespace forti::install {
                     auto path = project_config(context);
                     auto stop = context.project_dir;
                     return {{"write", std::format("edit {} (remove [mcp_servers.{}])", path.string(), server_name), [path, stop] {
+                                 require_inside(path, stop);
                                  auto text = read_file(path).value_or("");
                                  auto updated = toml::remove_table(text, {"mcp_servers", std::string(server_name)});
                                  if (updated == text) return;

@@ -17,8 +17,15 @@ namespace forti::install {
 
     namespace fs = std::filesystem;
 
-    // nullopt when the file does not exist; throws Failure(config) on any other read error.
+    // nullopt when the file does not exist; throws Failure(config) on any other read error, and for
+    // anything but a regular file (a FIFO planted as .mcp.json must not hang forti) or one over 64 MiB.
     std::optional<std::string> read_file(const fs::path& path);
+
+    // Throws Failure(config) unless `path` stays inside `root` on disk: no component below `root` may be
+    // a symbolic link, and the last one must be a regular file or absent. Project-scope files live in a
+    // directory a repository controls; a link there (.mcp.json -> ~/.claude.json, .codex -> ~/.codex)
+    // would turn a project install into a change to user or global configuration.
+    void require_inside(const fs::path& path, const fs::path& root);
 
     // Writes through a temporary file in the same directory and rename(2), so readers see the old or
     // the new content, never a mix. Keeps the mode of an existing file (else `mode`), writes through

@@ -31,6 +31,7 @@ if gtest_dep.found()
     test('install', executable('installTests',
                                'install/test_files.cpp',
                                'install/test_adapters.cpp',
+                               'install/test_install_security.cpp',
                                dependencies : [forti_install_dep, gtest_dep],
                                implicit_include_directories : false),
          suite : 'unit', timeout : 120)

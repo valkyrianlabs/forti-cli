@@ -98,7 +98,9 @@ namespace forti::install {
                 if (!current.registered) return {};
                 if (scope == Scope::project) {
                     auto path = mcp_json_path(context);
-                    return {{"write", std::format("edit {} (remove mcpServers.{})", path.string(), server_name), [path] {
+                    auto root = context.project_dir;
+                    return {{"write", std::format("edit {} (remove mcpServers.{})", path.string(), server_name), [path, root] {
+                                 require_inside(path, root);
                                  auto text = read_file(path).value_or("");
                                  auto document = mcp_json::parse(text, path.string());
                                  if (!mcp_json::remove(document, server_name)) return;
@@ -179,7 +181,9 @@ namespace forti::install {
                 auto path = mcp_json_path(context);
                 std::string summary = std::format("{} {} ({} mcpServers.{})", fs::exists(path) ? "edit" : "create", path.string(),
                                                   replace ? "replace" : "add", server_name);
-                return {{"write", summary, [path, desired] {
+                auto root = context.project_dir;
+                return {{"write", summary, [path, desired, root] {
+                             require_inside(path, root);   // a project install never writes outside the project
                              // Re-read at execution time: never write back a stale copy.
                              auto text = read_file(path).value_or("");
                              auto document = mcp_json::parse(text, path.string());
