@@ -19,6 +19,7 @@ namespace forti::engine {
             case Code::approval_required: return "approval_required";
             case Code::policy_denied: return "policy_denied";
             case Code::partial_failure: return "partial_failure";
+            case Code::management_connectivity_lost: return "management_connectivity_lost";
             case Code::outcome_unknown: return "outcome_unknown";
         }
         return "internal";
@@ -39,6 +40,7 @@ namespace forti::engine {
             case Code::approval_required:
             case Code::policy_denied: return 7;
             case Code::partial_failure:
+            case Code::management_connectivity_lost:
             case Code::outcome_unknown: return 8;
         }
         return 1;

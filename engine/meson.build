@@ -17,12 +17,16 @@ foreach k : range(shards)
 endforeach
 
 engine_sources = files(
+    'src/approval.cpp',
     'src/catalog.cpp',
     'src/engine.cpp',
     'src/error.cpp',
+    'src/plan.cpp',
+    'src/plan_store.cpp',
     'src/policy.cpp',
     'src/profile.cpp',
     'src/secrets.cpp',
+    'src/sha256.cpp',
 )
 
 engine_deps = [forti_api_dep]

@@ -17,7 +17,7 @@ meson test -C build/dev --suite unit   # network-free; what CI runs
 | Path | What |
 |---|---|
 | `engine/include/forti/engine/` | Engine contract: `engine.hpp` (discover/read/plan/apply, JSON in and out), `catalog.hpp`, `profile.hpp`, `error.hpp` |
-| `engine/src/` | Implementation. `catalog_shard.cpp` is compiled N times and holds the typed SDK glue (`ops.hpp`); `policy.cpp` holds risk tiers |
+| `engine/src/` | Implementation. `catalog_shard.cpp` is compiled N times and holds the typed SDK glue (`ops.hpp`); `policy.cpp` holds risk tiers; `plan.cpp` plan/apply (rollback plans, management probe); `plan_store.cpp` plan files, approvals, audit log, redaction; `approval.cpp` the CLI-only approve/show/list API (`approval.hpp`) |
 | `src/cli/` | `forti`: argument parsing, the command table (`commands.cpp`), output (text, or `--json` envelope) |
 | `src/install/` | AI client adapters for `forti install mcp` |
 | `skill/` | The agent skill installed alongside the MCP registration |
