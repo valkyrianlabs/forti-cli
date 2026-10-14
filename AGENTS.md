@@ -8,9 +8,13 @@ in the parent workspace. A copy of the engine contract is in `.claude/context/en
 ```sh
 ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api   # SDK co-development (else the wrap downloads v1.0.0)
 meson setup build/dev -Dtests=enabled --buildtype=debugoptimized
-ninja -C build/dev -j6                 # each engine shard TU needs ~1.2 GB of RAM
+ninja -C build/dev -j4                 # engine shard TUs: ~1.8 GB each at -Os, ~3.9 GB with -g
 meson test -C build/dev --suite unit   # network-free; what CI runs
+meson install -C build/rel --skip-subprojects   # source installs: never install the SDK from the wrap
 ```
+
+The default build is `buildtype=release` with `optimization=s` (a stripped `forti` is about 12 MB).
+Packaging and release: `.claude/context/release.md`.
 
 ## Layout
 
