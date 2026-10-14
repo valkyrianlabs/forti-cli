@@ -18,10 +18,15 @@ archive="$PWD/release/forti-cli-${version}.tar.gz"
 
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
 brew tap valkyrianlabs/tap
+# Recent Homebrew refuses formulae from third-party taps until they are trusted; forti-cli depends on
+# valkyrianlabs/tap/forti-api, and the throwaway tap below holds the formula under test.
+trust() { if brew commands --quiet | grep -qx trust; then brew trust "$1"; fi; }
+trust valkyrianlabs/tap
 
 tap="forti-cli-ci/local"
 brew untap "$tap" >/dev/null 2>&1 || true
 brew tap-new --no-git "$tap"
+trust "$tap"
 tap_formula="$(brew --repository "$tap")/Formula/forti-cli.rb"
 trap 'brew uninstall --formula "$tap/forti-cli" >/dev/null 2>&1 || true; brew untap "$tap" >/dev/null 2>&1 || true' EXIT
 
