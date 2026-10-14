@@ -183,11 +183,21 @@ Automatic safeguards (every mode that writes):
    first failure. Per-operation status: `verified | applied_unverified | failed | outcome_unknown |
    not_attempted`. Results are `partial_failure` / `outcome_unknown` with the full execution record. An
    HTTP failure is never assumed to mean "nothing changed".
-3. **Recovery.** Every apply writes a generated **rollback plan** (inverse operations from the
-   recorded before-state). After each **critical**-risk operation, a fresh `fortiapi::Client` probes
-   management connectivity (`monitor/system/status`). On failure, execution stops with
-   `management_connectivity_lost`, the rollback plan id and the before-state. A pre-change full
-   config backup is blocked on forti-api gap G9 (no non-JSON download).
+3. **Recovery aids, not guaranteed recovery.**
+   - Every apply writes a generated **rollback plan** (inverse operations from the recorded
+     before-state).
+   - Critical plans take a **pre-change config backup** through forti-api's raw download (G9
+     upstream). It is stored only under `state/backups/` (0600 file, 0700 dir, never a shared temp
+     dir), never logged, and never included in output.
+   - After each **critical**-risk operation, a fresh `fortiapi::Client` probes management
+     connectivity (`monitor/system/status`). On failure, execution stops with
+     `management_connectivity_lost`, the rollback plan id, the backup reference and the before-state.
+
+   **Limitation, stated in docs and output:** the rollback plan and the backup both need a working
+   management path to the device. They are not independent recovery. Forti never claims it can
+   recover from a management lockout. That needs an independently executable mechanism (e.g. a
+   device-side auto-revert) or a verified alternate management path (console, out-of-band
+   interface), which the operator must provide.
 4. **Audit and redaction.** Every apply is appended to `state/audit.jsonl` (0600). Sensitive
    attributes (passwords, PSKs, secrets, keys, tokens; plus the live schema's `password` type) are
    redacted in diffs, output, audit records and error details. Stored plan files keep real values

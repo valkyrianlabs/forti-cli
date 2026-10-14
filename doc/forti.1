@@ -1,0 +1,274 @@
+.Dd October 14, 2026
+.Dt FORTI 1
+.Os
+.Sh NAME
+.Nm forti
+.Nd FortiOS from the command line
+.Sh SYNOPSIS
+.Nm
+.Op Ar global-options
+.Ar command
+.Op Ar arguments
+.Nm
+.Cm configure
+.Op Fl -profile Ar name Fl -host Ar host Op Ar options
+.Nm
+.Cm doctor
+.Op Fl -profile Ar name
+.Nm
+.Cm get
+.Ar resource
+.Op Ar key
+.Sh DESCRIPTION
+.Nm
+reads and changes FortiGate configuration through the FortiOS REST API.
+It works with
+.Em profiles :
+named connection settings for a device, kept in
+.Pa config.json
+together with a reference to the device's API key.
+The key itself is kept in the secret store, an environment variable or a command's output, never in
+the configuration file and never on the command line.
+.Pp
+Text output is meant for people; with
+.Fl -json
+every command prints a stable JSON envelope,
+.Dl {\(dqok\(dq: true, \(dqdata\(dq: ..., \(dqmeta\(dq: {...}}
+or
+.Dl {\(dqok\(dq: false, \(dqerror\(dq: {\(dqcode\(dq: ..., \(dqmessage\(dq: ..., \(dqdetails\(dq: {...}}}
+and the exit status follows the error code (see
+.Sx EXIT STATUS ) .
+.Sh GLOBAL OPTIONS
+Global options may appear before or after the command.
+.Bl -tag -width "-p, --profile name"
+.It Fl p , Fl -profile Ar name
+Use this profile.
+The default is the default profile, or the only one.
+.It Fl -vdom Ar name
+VDOM for this request.
+.It Fl -json
+Print the JSON result envelope.
+Also
+.Ev FORTI_OUTPUT Ns =json .
+.It Fl -no-color
+No ANSI colors.
+Colors are used only when the output is a terminal and
+.Ev NO_COLOR
+is unset.
+.It Fl h , Fl -help
+Help for
+.Nm
+or for a command.
+.It Fl -version
+Print the version and the FortiOS version the models were generated from.
+.El
+.Sh COMMANDS
+.Ss Setup
+.Bl -tag -width Ds
+.It Cm configure
+Create or update a profile.
+Without options it prompts on the terminal; the API key is typed with echo disabled.
+With options it runs without prompts:
+.Bl -tag -width "--api-key-command cmd"
+.It Fl -profile Ar name
+Profile name (letters, digits,
+.Ql -
+and
+.Ql _ ) .
+Required with other options.
+.It Fl -host Ar host
+Host name or address, without scheme or port.
+.It Fl -port Ar n
+Admin HTTPS port (default 443).
+.It Fl -vdom Ar name
+Default VDOM for the profile.
+.It Fl -ca-bundle Ar path
+PEM CA bundle that verifies the device certificate.
+.It Fl -resolve-ip Ar ip
+Connect to this address while verifying the certificate for
+.Ar host .
+.It Fl -client-cert Ar path
+PKCS#12 client certificate.
+.It Fl -api-key-stdin
+Read the API key from standard input and keep it in the secret store.
+.It Fl -api-key-env Ar var
+Read the key from the environment variable
+.Ar var
+on every use; only the name is saved.
+.It Fl -api-key-command Ar cmd
+Run
+.Ar cmd
+(split like a shell, executed without one) and use the first line of its output.
+.It Fl -cert-password-stdin , Fl -cert-password-env Ar var , Fl -cert-password-command Ar cmd
+The client certificate's password, from the same kinds of source.
+.It Fl -mode Ar mode
+.Cm read-only
+(default),
+.Cm guarded
+or
+.Cm autonomous ;
+see
+.Sx OPERATING MODES .
+.It Fl -default
+Make this the default profile.
+.It Fl -skip-check
+Save without contacting the device.
+.El
+.Pp
+Before saving,
+.Cm configure
+reads
+.Pa monitor/system/status
+from the device.
+If the read fails nothing is saved.
+An authentication failure is not retried, because FortiOS locks out an API user after repeated
+failures.
+.It Cm profile Op Cm list
+List profiles; the default is marked with
+.Ql * .
+.Cm devices
+is a short form.
+.It Cm profile show Op Ar name
+Show a profile and where its key comes from (never the key).
+.It Cm profile default Ar name
+Make
+.Ar name
+the default profile.
+.It Cm profile mode Oo Ar name Oc Ar mode
+Set the operating mode.
+.It Cm profile remove Ar name
+Delete the profile and its stored secrets.
+.It Cm doctor
+Run ordered checks: configuration directory and file modes, profile, secret resolution, CA bundle
+and client certificate files, connection (DNS, TCP, TLS), authentication, FortiOS version against
+the SDK schema, operating mode, and whether
+.Nm forti-mcp
+is on
+.Ev PATH .
+Each is reported as ok, warn, fail, skip or info.
+Exits 0 when nothing failed, otherwise with the status of the first failure.
+.El
+.Ss Read
+.Bl -tag -width Ds
+.It Cm devices
+List profiles.
+.It Cm discover Op Ar search | resource
+Search the resource catalog, or show a resource's attributes
+.Pq Fl -kind , Fl -fields , Fl -live , Fl -start , Fl -count .
+.It Cm get Ar resource Op Ar key
+Read configuration or monitor data
+.Pq Fl -filter , Fl -fields , Fl -start , Fl -count , Fl -param .
+.El
+.Ss Changes and integrations
+.Cm plan ,
+.Cm apply
+and
+.Cm install
+are described by
+.Nm
+.Ar command
+.Fl -help .
+.Sh OPERATING MODES
+The FortiOS account's privileges are the primary authorization boundary.
+A profile's mode is the operator's policy on top of it:
+.Bl -tag -width autonomous
+.It Cm read-only
+Reads and plan previews only; every apply is refused.
+The default.
+.It Cm guarded
+A change is applied only after a person approves the exact plan with
+.Nm
+.Cm plan approve Ar id .
+.It Cm autonomous
+Changes are applied without interactive approval.
+The agent can do anything the API account may do.
+Validation, drift checks, verification, audit records and rollback plans still apply.
+Scope the account's admin profile and trusted hosts to what the agent should manage.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width FORTI_SECRET_STORE
+.It Ev FORTI_CONFIG_DIR
+Configuration directory (default
+.Pa $XDG_CONFIG_HOME/forti ,
+else
+.Pa ~/.config/forti ) .
+.It Ev FORTI_STATE_DIR
+Plans, approvals and the audit log (default
+.Pa $XDG_STATE_HOME/forti ,
+else
+.Pa ~/.local/state/forti ) .
+.It Ev FORTI_CACHE_DIR
+Cached live schemas (default
+.Pa $XDG_CACHE_HOME/forti ,
+else
+.Pa ~/.cache/forti ) .
+.It Ev FORTI_SECRET_STORE
+.Cm file
+or
+.Cm keychain .
+Default: the macOS Keychain on macOS, the file store elsewhere.
+.It Ev FORTI_OUTPUT
+.Cm json
+prints the JSON envelope for every command.
+.It Ev NO_COLOR
+Disables colors.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa ~/.config/forti/config.json
+Profiles; mode 0600 in a 0700 directory.
+Contains no secrets.
+.It Pa ~/.config/forti/credentials/
+The file secret store: one 0600 file per secret.
+.It Login Keychain, service Dq forti
+The macOS secret store, accounts
+.Ar profile Ns /api-key
+and
+.Ar profile Ns /cert-password .
+.El
+.Sh EXIT STATUS
+.Bl -tag -width 3n -compact
+.It 0
+success
+.It 1
+internal error
+.It 2
+usage error
+.It 3
+configuration: missing or invalid profile, credentials or config file
+.It 4
+connection (DNS, connect, TLS, timeout) or authentication (HTTP 401/403)
+.It 5
+not found: unknown object or resource
+.It 6
+validation or other FortiOS error
+.It 7
+refused: read-only mode, missing approval, or stale plan
+.It 8
+partial failure or unknown outcome of a change
+.El
+.Sh EXAMPLES
+Configure a device, check it, and read its firewall policy:
+.Bd -literal -offset indent
+forti configure
+forti doctor
+forti get firewall/policy --fields policyid,name,action,status
+.Ed
+.Pp
+Configure from a password manager without prompts:
+.Bd -literal -offset indent
+op read op://ops/fw01/api-key | forti configure --profile fw01 \e
+    --host fw01.example.net --ca-bundle ~/fw01-ca.pem --api-key-stdin
+.Ed
+.Sh SECURITY
+TLS certificate verification is always on; no option disables it.
+Use
+.Fl -ca-bundle
+for self-signed or private-CA devices, and
+.Fl -resolve-ip
+to connect to an address while verifying the certificate's name.
+Secrets are never accepted as arguments and never printed.
+.Sh SEE ALSO
+.Xr forti-mcp 1
+.Pp
+.Lk https://github.com/valkyrianlabs/forti-cli

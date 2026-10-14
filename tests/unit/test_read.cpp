@@ -76,7 +76,17 @@ TEST_F(ReadTest, MonitorReadsAreBoundedClientSide) {
     EXPECT_EQ(result["data"].size(), 50u);
     EXPECT_TRUE(result["meta"]["truncated"]);
     EXPECT_EQ(result["meta"]["total"], 120);
+    EXPECT_EQ(result["meta"]["next_start"], 50);
     EXPECT_EQ(transport->requests[0].url, "https://fortigate.test:8443/api/v2/monitor/firewall/session");
+
+    // The next page is windowed locally from the same (full) device reply; start/count never reach
+    // the device, so a monitor that ignores them cannot make paging repeat itself.
+    transport->reply(200, fake::envelope(rows));
+    result = run({{"resource", "monitor/firewall/session"}, {"start", 100}, {"count", 50}});
+    ASSERT_EQ(result["data"].size(), 20u);
+    EXPECT_EQ(result["data"][0]["i"], 100);
+    EXPECT_FALSE(result["meta"].contains("next_start"));
+    EXPECT_EQ(transport->requests[1].url, "https://fortigate.test:8443/api/v2/monitor/firewall/session");
 }
 
 TEST_F(ReadTest, DiscoverResourceDescribesFieldsAndPolicy) {

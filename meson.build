@@ -15,4 +15,5 @@ subdir('engine')
 if not meson.is_subproject()
     subdir('src')
     subdir('tests')
+    install_man('doc/forti.1')
 endif

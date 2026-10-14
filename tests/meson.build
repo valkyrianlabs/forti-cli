@@ -12,4 +12,15 @@ if gtest_dep.found()
                             dependencies : [forti_engine_dep, gtest_dep],
                             implicit_include_directories : false),
          suite : 'unit')
+
+    # The CLI in-process (cli::run): arguments, configure, profiles, doctor, rendering, exit codes.
+    # test_keychain.cpp runs only with FORTI_TEST_KEYCHAIN=1 (it writes to the login keychain).
+    test('cli', executable('cliTests',
+                           'unit/test_cli.cpp',
+                           'unit/test_setup.cpp',
+                           'unit/test_keychain.cpp',
+                           include_directories : include_directories('support'),
+                           dependencies : [forti_cli_dep, gtest_dep],
+                           implicit_include_directories : false),
+         suite : 'unit')
 endif
