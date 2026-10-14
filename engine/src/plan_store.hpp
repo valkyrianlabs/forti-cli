@@ -96,6 +96,15 @@ namespace forti::engine::detail {
     // bodies redacted. The stored file keeps real values, because apply needs them.
     json plan_view(const json& plan, bool full = false);
 
+    // ---- Device replies ----
+
+    // FortiOS replies nest a handful of levels. nlohmann's parser is iterative but its copy constructor
+    // and dump() recurse, so a reply nested thousands deep (a hostile or broken device) would overflow
+    // the stack the first time the engine copies it. Checked iteratively, right after the SDK returns
+    // and before any copy: Failure(api) beyond `limit` levels.
+    inline constexpr std::size_t max_reply_depth = 256;
+    void check_reply_depth(const json& body, std::string_view what, std::size_t limit = max_reply_depth);
+
     // ---- Audit ----
 
     // Appends one line to <state>/audit.jsonl (0600), adding "time". The event must already be

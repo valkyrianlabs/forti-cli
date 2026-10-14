@@ -368,3 +368,17 @@ TEST_F(Engine, FailedBackupRefusesBeforeAnyWriteAndLeavesNoPartialFile) {
     if (fs::exists(paths.state / "backups"))
         for (const auto& entry: fs::directory_iterator(paths.state / "backups")) ADD_FAILURE() << entry.path();
 }
+
+// ---- S-17: a reply nested thousands deep is refused before the engine copies it (stack overflow) ----
+
+TEST_F(Engine, DeeplyNestedDeviceReplyIsRefusedNotACrash) {
+    std::string deep = "{\"http_status\":200,\"status\":\"success\",\"serial\":\"" + serial + "\",\"results\":" +
+                       std::string(100000, '[') + std::string(100000, ']') + "}";
+    transport->script.emplace_back(fortiapi::HttpResponse{200, deep});
+    json result = read({{"resource", "monitor/system/status"}});
+    EXPECT_EQ(result["error"]["code"], "api") << result.dump().substr(0, 300);
+
+    json shallow = fake::envelope(json::array({{{"name", "a"}, {"member", {{{"name", "b"}}}}}}));
+    transport->reply(200, shallow);
+    EXPECT_TRUE(read({{"resource", "firewall/addrgrp"}})["ok"]);
+}

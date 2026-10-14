@@ -1,4 +1,5 @@
 #include "ops.hpp"
+#include "plan_store.hpp"
 #include "policy.hpp"
 #include "session.hpp"
 
@@ -235,6 +236,7 @@ namespace forti::engine {
                     throw Failure(Code::usage, std::format("{}: no live schema (monitor endpoints have none)", resource.name()));
                 const Profile& profile = this->profile(text(request, "profile"));
                 live = resource.ops->schema(client(profile));
+                detail::check_reply_depth(live, resource.name());
             }
             auto live_child = [&](std::string_view name) -> json {
                 if (!live.is_object()) return nullptr;
@@ -278,6 +280,7 @@ namespace forti::engine {
         if (what == "capabilities") {
             const Profile& profile = this->profile(text(request, "profile"));
             json body = client(profile).get(fortiapi::Monitor::path("system/status"));
+            detail::check_reply_depth(body, "monitor/system/status");
             json device = device_meta(body);
             if (auto results = body.find("results"); results != body.end() && results->is_object())
                 for (const char* key: {"hostname", "model", "model_name", "model_number"})
@@ -350,6 +353,7 @@ namespace forti::engine {
         json body;
         try {
             body = client(profile).get(api_path, query);
+            detail::check_reply_depth(body, api_path);
         } catch (const fortiapi::ApiError& error) {
             if (key.empty() || !error.not_found()) throw;
             throw Failure(Code::not_found, std::format("{} \"{}\" not found", resource.name(), key),

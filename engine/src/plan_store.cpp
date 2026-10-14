@@ -403,6 +403,21 @@ namespace forti::engine::detail {
         return view;
     }
 
+    // ---- device replies ----
+
+    void check_reply_depth(const json& body, std::string_view what, std::size_t limit) {
+        std::vector<std::pair<const json*, std::size_t>> stack{{&body, 0}};
+        while (!stack.empty()) {
+            auto [node, depth] = stack.back();
+            stack.pop_back();
+            if (!node->is_structured()) continue;
+            if (depth >= limit)
+                throw Failure(Code::api, std::format("{}: the device reply is nested more than {} levels deep", what, limit));
+            for (const auto& child: *node)
+                if (child.is_structured()) stack.emplace_back(&child, depth + 1);
+        }
+    }
+
     // ---- audit ----
 
     bool audit(const Paths& paths, json event) {

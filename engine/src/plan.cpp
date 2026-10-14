@@ -141,6 +141,7 @@ namespace forti::engine {
                                          const fortiapi::Query& query, Identity& identity) {
             std::string path = object_path(resource, key);
             fortiapi::Result result = client.exchange(fortiapi::Method::Get, path, query);
+            detail::check_reply_depth(result.body, path);
             identity.take(result.body);
             if (result.http_status == 404) return std::nullopt;
             if (!result.ok()) throw fortiapi::ApiError(fortiapi::Method::Get, path, result.http_status, std::move(result.body));
