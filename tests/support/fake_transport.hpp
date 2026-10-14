@@ -52,7 +52,7 @@ namespace forti::fake {
 
     // An Engine with one profile ("lab", host fortigate.test, API key "test-key" in a memory store)
     // whose every client talks to `transport`.
-    inline engine::Options options(std::shared_ptr<FakeTransport> transport, bool writes = false) {
+    inline engine::Options options(std::shared_ptr<FakeTransport> transport, engine::Mode mode = engine::Mode::read_only) {
         engine::Options options;
         options.paths = {"/nonexistent/forti-test/config", "/nonexistent/forti-test/state", "/nonexistent/forti-test/cache"};
         options.secrets = engine::memory_secret_store();
@@ -63,7 +63,7 @@ namespace forti::fake {
         lab.host = "fortigate.test";
         lab.port = 8443;
         lab.api_key.source = engine::SecretRef::Source::store;
-        lab.writes = writes;
+        lab.mode = mode;
         profiles.profiles.emplace("lab", lab);
         profiles.default_profile = "lab";
         options.profiles = profiles;

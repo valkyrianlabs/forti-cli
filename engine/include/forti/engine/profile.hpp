@@ -40,6 +40,18 @@ namespace forti::engine {
         static SecretRef from_json(const nlohmann::json& json);
     };
 
+    // What the engine may do on a device (architecture.md, "Operating modes"). The FortiOS account's
+    // own privileges remain the primary authorization boundary; the mode is the operator's policy on top.
+    enum class Mode {
+        read_only,    // no mutations (default)
+        guarded,      // mutations need a human approval of the exact plan (`forti plan approve`)
+        autonomous,   // mutations run without interactive approval; safeguards still apply
+    };
+
+    std::string_view to_string(Mode mode);
+    // "read-only" | "guarded" | "autonomous"; throws Failure(config) otherwise.
+    Mode parse_mode(std::string_view text);
+
     struct Profile {
         std::string name;
         std::string host;
@@ -50,7 +62,7 @@ namespace forti::engine {
         std::string resolve_ip;    // connect here while verifying TLS for `host`
         SecretRef api_key;         // default: Source::store
         SecretRef cert_password;   // default: none
-        bool writes = false;       // apply is refused unless true
+        Mode mode = Mode::read_only;
         unsigned connect_timeout_ms = 5000;
         unsigned timeout_ms = 30000;
 

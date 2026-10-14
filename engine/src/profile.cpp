@@ -77,6 +77,22 @@ namespace forti::engine {
         return ref;
     }
 
+    std::string_view to_string(Mode mode) {
+        switch (mode) {
+            case Mode::read_only: return "read-only";
+            case Mode::guarded: return "guarded";
+            case Mode::autonomous: return "autonomous";
+        }
+        return "read-only";
+    }
+
+    Mode parse_mode(std::string_view text) {
+        if (text == "read-only") return Mode::read_only;
+        if (text == "guarded") return Mode::guarded;
+        if (text == "autonomous") return Mode::autonomous;
+        throw Failure(Code::config, std::format("unknown mode \"{}\" (read-only, guarded, autonomous)", text));
+    }
+
     void validate_profile_name(std::string_view name) {
         bool valid = !name.empty() && name.size() <= 64;
         for (char c: name) valid = valid && (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_');
@@ -84,7 +100,7 @@ namespace forti::engine {
     }
 
     nlohmann::json Profile::to_json() const {
-        nlohmann::json out = {{"host", host}, {"port", port}, {"writes", writes}, {"api_key", api_key.to_json()}};
+        nlohmann::json out = {{"host", host}, {"port", port}, {"mode", to_string(mode)}, {"api_key", api_key.to_json()}};
         if (!vdom.empty()) out["vdom"] = vdom;
         if (!ca_bundle.empty()) out["ca_bundle"] = ca_bundle;
         if (!client_cert.empty()) out["client_cert"] = client_cert;
@@ -122,7 +138,7 @@ namespace forti::engine {
             profile.ca_bundle = get_or<std::string>(json, "ca_bundle", "");
             profile.client_cert = get_or<std::string>(json, "client_cert", "");
             profile.resolve_ip = get_or<std::string>(json, "resolve_ip", "");
-            profile.writes = get_or<bool>(json, "writes", false);
+            profile.mode = parse_mode(get_or<std::string>(json, "mode", "read-only"));
             profile.connect_timeout_ms = get_or<unsigned>(json, "connect_timeout_ms", 5000);
             profile.timeout_ms = get_or<unsigned>(json, "timeout_ms", 30000);
             profile.api_key = json.contains("api_key") ? SecretRef::from_json(json["api_key"])

@@ -271,7 +271,7 @@ namespace forti::engine {
                        {"device", device},
                        {"sdk_schema_version", sdk_schema_version},
                        {"schema_matches_device", matches},
-                       {"writes_enabled", profile.writes},
+                       {"mode", to_string(profile.mode)},
                        {"resources", Catalog::instance().size()}});
         }
 
