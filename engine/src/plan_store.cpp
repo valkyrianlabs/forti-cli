@@ -177,7 +177,7 @@ namespace forti::engine::detail {
             bool shape = false;
             std::string method, path;
             std::string key = is("key", json::value_t::string) ? op["key"].get<std::string>() : std::string();
-            if (op.contains("key") && !op["key"].is_string()) tampered(id, "operation");
+            if (op.contains("key") && (!op["key"].is_string() || !addressable_key(key))) tampered(id, "operation");
             if (name == "action") {
                 shape = resource.kind == Kind::monitor && is("body", json::value_t::object);
                 method = "POST";
@@ -401,6 +401,17 @@ namespace forti::engine::detail {
         view["operations"] = std::move(operations);
         if (plan.contains("warnings")) view["warnings"] = plan["warnings"];
         return view;
+    }
+
+    // ---- object keys ----
+
+    bool addressable_key(std::string_view key) { return !key.empty() && key != "." && key != ".."; }
+
+    void validate_key(std::string_view key, std::string_view where) {
+        if (!addressable_key(key))
+            throw Failure(Code::usage, std::format("{}: \"{}\" cannot be used as an object key (it would address the "
+                                                   "table or its parent, not one object)", where, key),
+                          {{"key", key}});
     }
 
     // ---- device replies ----

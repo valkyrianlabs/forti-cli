@@ -96,6 +96,16 @@ namespace forti::engine::detail {
     // bodies redacted. The stored file keeps real values, because apply needs them.
     json plan_view(const json& plan, bool full = false);
 
+    // ---- Object keys ----
+
+    // A table key becomes one URL path segment. The SDK percent-encodes everything but unreserved
+    // characters, '.' included, so a key of "." or ".." stays a dot segment, and libcurl removes dot
+    // segments: DELETE cmdb/firewall/address/. is sent as DELETE cmdb/firewall/address/ (the whole
+    // table), ".." reaches the parent. False for those (and for empty keys).
+    [[nodiscard]] bool addressable_key(std::string_view key);
+    // Throws Failure(usage) unless addressable_key(key).
+    void validate_key(std::string_view key, std::string_view where);
+
     // ---- Device replies ----
 
     // FortiOS replies nest a handful of levels. nlohmann's parser is iterative but its copy constructor

@@ -89,6 +89,7 @@ namespace forti::engine {
             request.resource_name = text(item, "resource", where);
             if (request.resource_name.empty()) throw Failure(Code::usage, where + ": \"resource\" is required");
             request.key = text(item, "key", where);
+            if (!request.key.empty()) detail::validate_key(request.key, where);
             if (auto it = item.find("set"); it != item.end() && !it->is_null()) {
                 if (!it->is_object()) throw Failure(Code::usage, where + ": \"set\" must be an object");
                 request.set = *it;
@@ -409,7 +410,11 @@ namespace forti::engine {
             for (std::size_t i = 0; i < operations_it->size(); ++i) {
                 OpRequest op = parse_operation((*operations_it)[i], i);
                 Resource resource = resolve_for(op, i);
-                if (op.op == "create") op.key = key_of_object(resource, op.object);
+                if (op.op == "create") {
+                    op.key = key_of_object(resource, op.object);
+                    // The key is used for the existence check now and for a rollback delete later.
+                    if (!op.key.empty()) detail::validate_key(op.key, std::format("operations[{}]", i));
+                }
                 // One operation per object: each before-state is read once, before anything runs.
                 if (op.op != "action" && !(op.op == "create" && op.key.empty()) &&
                     !targets.insert(object_path(resource, op.key)).second)
@@ -780,6 +785,8 @@ namespace forti::engine {
                         fortiapi::Reply reply = resource.ops->create(client, op["object"], query);
                         if (done.key.empty() && !reply.mkey.is_null())
                             done.key = reply.mkey.is_string() ? reply.mkey.get<std::string>() : reply.mkey.dump();
+                        // A device-reported key is used for verification and the rollback delete.
+                        if (!detail::addressable_key(done.key)) done.key.clear();
                         object_key = done.key;
                     } else if (kind == "update") {
                         detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};

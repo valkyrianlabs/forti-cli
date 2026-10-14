@@ -382,3 +382,27 @@ TEST_F(Engine, DeeplyNestedDeviceReplyIsRefusedNotACrash) {
     transport->reply(200, shallow);
     EXPECT_TRUE(read({{"resource", "firewall/addrgrp"}})["ok"]);
 }
+
+// ---- S-18: "." and ".." are not object keys (libcurl removes dot segments: the table itself) ----
+
+TEST_F(Engine, DotSegmentKeysCannotAddressTheTable) {
+    for (const char* key: {".", ".."}) {
+        json planned = plan({{"operations", {{{"op", "delete"}, {"resource", "firewall/address"}, {"key", key}}}}});
+        EXPECT_EQ(planned["error"]["code"], "usage") << key << ": " << planned.dump();
+        planned = plan({{"operations", {{{"op", "create"}, {"resource", "firewall/address"},
+                                         {"object", {{"name", key}, {"subnet", "192.0.2.1 255.255.255.255"}}}}}}});
+        EXPECT_EQ(planned["error"]["code"], "usage") << key;
+        EXPECT_EQ(read({{"resource", "firewall/address"}, {"key", key}})["error"]["code"], "usage") << key;
+    }
+    EXPECT_TRUE(transport->requests.empty());
+
+    // A stored plan rewritten to target "." is refused as tampered.
+    std::string id = plan_comment();
+    tamper(id, [](json& plan) {
+        auto& op = plan["operations"][0];
+        op["key"] = ".";
+        op["wire"]["path"] = "cmdb/firewall/address/.";
+    });
+    EXPECT_EQ(apply(id)["error"]["details"]["reason"], "tampered");
+    EXPECT_EQ(writes(), 0u);
+}

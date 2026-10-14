@@ -313,6 +313,7 @@ namespace forti::engine {
         }
 
         std::string key = text(request, "key");
+        if (!key.empty()) detail::validate_key(key, resource.name());
         if (!key.empty() && resource.kind != Kind::table)
             throw Failure(Code::usage, std::format("{} is a {}: it has no keyed objects", resource.name(), to_string(resource.kind)));
 
