@@ -320,8 +320,10 @@ namespace forti::engine {
         std::size_t start = number(request, "start", 0);
         std::size_t count = std::min(number(request, "count", default_page), max_page);
         if (count == 0) throw Failure(Code::usage, "\"count\" must be at least 1");
+        // cmdb tables page on the device. Monitor endpoints do not page consistently (some ignore
+        // start/count), so the engine windows their results itself: deterministic next_start.
         bool server_paging = listing && resource.kind == Kind::table;
-        if (server_paging || (listing && (request.contains("start") || request.contains("count")))) {
+        if (server_paging) {
             query.start(start);
             query.count(count);
         }
@@ -345,16 +347,21 @@ namespace forti::engine {
             if (results.empty()) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), key));
             results = std::move(results.front());
         } else if (listing && results.is_array()) {
-            bool truncated = false;
-            if (!server_paging && results.size() > count) {   // a monitor that ignores count
-                meta["total"] = results.size();
-                results.erase(results.begin() + static_cast<std::ptrdiff_t>(count), results.end());
-                truncated = true;
-            }
             meta["start"] = start;
+            if (server_paging) {
+                if (results.size() == count) meta["next_start"] = start + count;
+            } else {
+                std::size_t total = results.size();
+                std::size_t first = std::min(start, total), last = std::min(first + count, total);
+                results = json(results.begin() + static_cast<std::ptrdiff_t>(first),
+                               results.begin() + static_cast<std::ptrdiff_t>(last));
+                meta["total"] = total;
+                if (last < total) {
+                    meta["next_start"] = last;
+                    meta["truncated"] = true;
+                }
+            }
             meta["returned"] = results.size();
-            if (server_paging && results.size() == count) meta["next_start"] = start + count;
-            if (truncated) meta["truncated"] = true;
         }
         return ok(std::move(results), std::move(meta));
     }
