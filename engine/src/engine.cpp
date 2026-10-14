@@ -1,5 +1,6 @@
 #include "ops.hpp"
 #include "policy.hpp"
+#include "session.hpp"
 
 #include <forti/engine/engine.hpp>
 
@@ -152,22 +153,32 @@ namespace forti::engine {
 
     const Profile& Engine::profile(std::string_view name) { return profiles().select(name); }
 
+    namespace detail {
+
+        std::shared_ptr<fortiapi::Client> make_client(const Options& options, SecretStore& secrets,
+                                                      const Profile& profile, std::optional<unsigned> retries) {
+            fortiapi::Config config;
+            config.host = profile.host;
+            config.port = profile.port;
+            config.vdom = profile.vdom;
+            config.ca_bundle = profile.ca_bundle;
+            config.client_cert = profile.client_cert;
+            config.resolve_ip = profile.resolve_ip;
+            config.connect_timeout = std::chrono::milliseconds(profile.connect_timeout_ms);
+            config.timeout = std::chrono::milliseconds(profile.timeout_ms);
+            if (retries) config.retries = *retries;
+            config.api_key = resolve_secret(profile.api_key, profile.api_key_account(), secrets);
+            if (profile.cert_password.source != SecretRef::Source::none)
+                config.client_cert_password = resolve_secret(profile.cert_password, profile.cert_password_account(), secrets);
+            return options.transport ? std::make_shared<fortiapi::Client>(config, options.transport(config))
+                                     : std::make_shared<fortiapi::Client>(config);
+        }
+
+    }  // namespace detail
+
     fortiapi::Client& Engine::client(const Profile& profile) {
         if (auto it = clients_.find(profile.name); it != clients_.end()) return *it->second;
-        fortiapi::Config config;
-        config.host = profile.host;
-        config.port = profile.port;
-        config.vdom = profile.vdom;
-        config.ca_bundle = profile.ca_bundle;
-        config.client_cert = profile.client_cert;
-        config.resolve_ip = profile.resolve_ip;
-        config.connect_timeout = std::chrono::milliseconds(profile.connect_timeout_ms);
-        config.timeout = std::chrono::milliseconds(profile.timeout_ms);
-        config.api_key = resolve_secret(profile.api_key, profile.api_key_account(), *secrets_);
-        if (profile.cert_password.source != SecretRef::Source::none)
-            config.client_cert_password = resolve_secret(profile.cert_password, profile.cert_password_account(), *secrets_);
-        auto client = options_.transport ? std::make_shared<fortiapi::Client>(config, options_.transport(config))
-                                         : std::make_shared<fortiapi::Client>(config);
+        auto client = detail::make_client(options_, *secrets_, profile);
         return *clients_.emplace(profile.name, std::move(client)).first->second;
     }
 
@@ -271,7 +282,7 @@ namespace forti::engine {
                        {"device", device},
                        {"sdk_schema_version", sdk_schema_version},
                        {"schema_matches_device", matches},
-                       {"writes_enabled", profile.writes},
+                       {"mode", to_string(profile.mode)},
                        {"resources", Catalog::instance().size()}});
         }
 
@@ -320,15 +331,25 @@ namespace forti::engine {
         std::size_t start = number(request, "start", 0);
         std::size_t count = std::min(number(request, "count", default_page), max_page);
         if (count == 0) throw Failure(Code::usage, "\"count\" must be at least 1");
+        // cmdb tables page on the device. Monitor endpoints do not page consistently (some ignore
+        // start/count), so the engine windows their results itself: deterministic next_start.
         bool server_paging = listing && resource.kind == Kind::table;
-        if (server_paging || (listing && (request.contains("start") || request.contains("count")))) {
+        if (server_paging) {
             query.start(start);
             query.count(count);
         }
         add_params(query, request);
 
         std::string api_path = key.empty() ? resource.path : fortiapi::path(resource.path, key);
-        json body = client(profile).get(api_path, query);
+        json body;
+        try {
+            body = client(profile).get(api_path, query);
+        } catch (const fortiapi::ApiError& error) {
+            if (key.empty() || !error.not_found()) throw;
+            throw Failure(Code::not_found, std::format("{} \"{}\" not found", resource.name(), key),
+                          {{"resource", resource.name()}, {"key", key}, {"method", "GET"}, {"path", error.path()},
+                           {"http_status", error.http_status()}});
+        }
         json results = body.contains("results") ? std::move(body["results"]) : json();
 
         json meta = {{"resource", resource.name()}, {"profile", profile.name}, {"device", device_meta(body)}};
@@ -337,24 +358,23 @@ namespace forti::engine {
             if (results.empty()) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), key));
             results = std::move(results.front());
         } else if (listing && results.is_array()) {
-            bool truncated = false;
-            if (!server_paging && results.size() > count) {   // a monitor that ignores count
-                meta["total"] = results.size();
-                results.erase(results.begin() + static_cast<std::ptrdiff_t>(count), results.end());
-                truncated = true;
-            }
             meta["start"] = start;
+            if (server_paging) {
+                if (results.size() == count) meta["next_start"] = start + count;
+            } else {
+                std::size_t total = results.size();
+                std::size_t first = std::min(start, total), last = std::min(first + count, total);
+                results = json(results.begin() + static_cast<std::ptrdiff_t>(first),
+                               results.begin() + static_cast<std::ptrdiff_t>(last));
+                meta["total"] = total;
+                if (last < total) {
+                    meta["next_start"] = last;
+                    meta["truncated"] = true;
+                }
+            }
             meta["returned"] = results.size();
-            if (server_paging && results.size() == count) meta["next_start"] = start + count;
-            if (truncated) meta["truncated"] = true;
         }
         return ok(std::move(results), std::move(meta));
     }
-
-    // ---- plan / apply: phase 2 (engine/src/plan.cpp) ----
-
-    json Engine::plan(const json&) { throw Failure(Code::internal, "plan: not implemented yet"); }
-
-    json Engine::apply(const json&) { throw Failure(Code::internal, "apply: not implemented yet"); }
 
 }  // namespace forti::engine

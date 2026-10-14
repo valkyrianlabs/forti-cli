@@ -38,6 +38,13 @@ namespace forti::engine {
         std::optional<ProfileSet> profiles;
     };
 
+    // Plan ids: 12-32 characters of [a-z0-9-], starting with a letter or digit, so an id is safe to
+    // paste into a shell command and never parses as an option. The engine generates
+    // "YYYYMMDD-HHMMSS-xxxxxx" (UTC time, 6 random hex digits). apply/show/approve reject anything else
+    // with `usage`. forti-mcp's inputSchema uses the same pattern.
+    inline constexpr std::string_view plan_id_pattern = "^[a-z0-9][a-z0-9-]{11,31}$";
+    [[nodiscard]] bool valid_plan_id(std::string_view id);
+
     // Read-size limits (the MCP adapter applies its own byte budget on top).
     inline constexpr std::size_t default_page = 50;
     inline constexpr std::size_t max_page = 1000;

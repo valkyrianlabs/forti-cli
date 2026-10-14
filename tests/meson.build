@@ -6,8 +6,30 @@ if gtest_dep.found()
                             'unit/test_catalog.cpp',
                             'unit/test_read.cpp',
                             'unit/test_profiles.cpp',
-                            include_directories : include_directories('support'),
+                            'unit/test_plan.cpp',
+                            # test_plan.cpp also checks engine internals (SHA-256 vectors, digests, redaction).
+                            include_directories : include_directories('support', '../engine/src'),
                             dependencies : [forti_engine_dep, gtest_dep],
                             implicit_include_directories : false),
          suite : 'unit')
+
+    # The CLI in-process (cli::run): arguments, configure, profiles, doctor, rendering, exit codes.
+    # test_keychain.cpp runs only with FORTI_TEST_KEYCHAIN=1 (it writes to the login keychain).
+    test('cli', executable('cliTests',
+                           'unit/test_cli.cpp',
+                           'unit/test_setup.cpp',
+                           'unit/test_keychain.cpp',
+                           include_directories : include_directories('support'),
+                           dependencies : [forti_cli_dep, gtest_dep],
+                           implicit_include_directories : false),
+         suite : 'unit')
+
+    # src/install: .mcp.json and config.toml edits, and the client adapters against fake
+    # `claude`/`codex` scripts (no real client, no real home directory).
+    test('install', executable('installTests',
+                               'install/test_files.cpp',
+                               'install/test_adapters.cpp',
+                               dependencies : [forti_install_dep, gtest_dep],
+                               implicit_include_directories : false),
+         suite : 'unit', timeout : 120)
 endif

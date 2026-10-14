@@ -47,8 +47,17 @@ TEST(Profiles, RoundTripWithoutSecretsAndPrivateModes) {
     const Profile& profile = loaded.select("");
     EXPECT_EQ(profile.host, "fw.example.net");
     EXPECT_EQ(profile.port, 8443u);
-    EXPECT_FALSE(profile.writes);   // read-only unless explicitly enabled
+    EXPECT_EQ(profile.mode, Mode::read_only);   // no mutations unless the operator opts in
     EXPECT_EQ(profile.api_key.source, SecretRef::Source::env);
+}
+
+TEST(Profiles, ModesRoundTrip) {
+    for (auto mode: {Mode::read_only, Mode::guarded, Mode::autonomous}) {
+        Profile profile = Profile::from_json("p", {{"host", "h"}, {"mode", to_string(mode)}});
+        EXPECT_EQ(profile.mode, mode);
+        EXPECT_EQ(Profile::from_json("p", profile.to_json()).mode, mode);
+    }
+    EXPECT_THROW(Profile::from_json("p", {{"host", "h"}, {"mode", "yolo"}}), Failure);
 }
 
 TEST(Profiles, SecretsInConfigAreRefused) {
@@ -83,4 +92,14 @@ TEST(Secrets, ResolutionNamesTheSourceNeverTheValue) {
     EXPECT_EQ(resolve_secret({SecretRef::Source::env, "FORTI_TEST_SECRET", {}}, "a", *store), "from-env");
     EXPECT_EQ(resolve_secret({SecretRef::Source::command, {}, {"printf", "from-command\\nignored"}}, "a", *store),
               "from-command");
+}
+
+TEST(ErrorCodes, RoundTrip) {
+    for (int c = 0; c <= static_cast<int>(Code::outcome_unknown) + 4; ++c) {
+        auto name = to_string(static_cast<Code>(c));
+        if (name == "internal" && c != 0) continue;   // past the last enumerator
+        ASSERT_EQ(parse_code(name), static_cast<Code>(c)) << name;
+    }
+    EXPECT_EQ(exit_code(*parse_code("management_connectivity_lost")), 8);
+    EXPECT_FALSE(parse_code("nope"));
 }

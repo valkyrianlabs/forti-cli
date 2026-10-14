@@ -40,7 +40,8 @@ namespace forti::cli {
                 }
                 request["params"] = std::move(object);
             }
-            return emit(context.output, engine::Engine::envelope([&] { return context.engine.read(request); }));
+            return emit(context.output, engine::Engine::envelope([&] { return context.engine.read(request); }),
+                        table_renderer(fields));
         }
 
         // ---- discover ----
@@ -85,14 +86,16 @@ namespace forti::cli {
         }
 
         int run_devices(Context& context, const Args&) {
-            return emit(context.output, engine::Engine::envelope([&] { return context.engine.discover({{"what", "devices"}}); }));
+            return emit(context.output, engine::Engine::envelope([&] { return context.engine.discover({{"what", "devices"}}); }),
+                        render_profiles);
         }
 
     }  // namespace
 
     std::vector<Command> read_commands() {
         return {
-            {"devices", "List configured device profiles", "usage: forti devices", {}, run_devices},
+            {"devices", "List configured device profiles (short for `forti profile list`)",
+             "usage: forti devices\n\nLists the configured profiles; the default is marked with *.\n", {}, run_devices},
             {"discover", "Find resources and show their attributes",
              "usage: forti discover [search]            list resources matching a search\n"
              "       forti discover <resource>          show a resource's attributes\n"

@@ -94,7 +94,7 @@ public:
 {"what": "resources", "query": "addr", "kind": "table|singleton|monitor", "start": 0, "count": 50}
 {"what": "resource", "resource": "firewall/address", "fields": ["name","type"], "live": false}
                                                        // live=true merges device ?action=schema (cached per FortiOS version)
-{"what": "capabilities", "profile": "home"}            // device identity, version vs SDK schema version, writes allowed?
+{"what": "capabilities", "profile": "home"}            // device identity, version vs SDK schema version, mode
 
 // read
 {"resource": "firewall/address", "key": "LAN", "filter": ["type==ipmask"], "fields": ["name","subnet"],
@@ -146,7 +146,7 @@ public:
   included). State: `$XDG_STATE_HOME/forti` or `~/.local/state/forti` (plans, approvals, audit log).
   Cache: `$XDG_CACHE_HOME/forti` (live schemas). Never derived from the working directory.
 - `config.json` (0600, dir 0700) holds profiles: host, port, vdom, ca_bundle, client_cert path,
-  resolve_ip, timeouts, `writes` (default **false**), and a credential *reference*, never a secret.
+  resolve_ip, timeouts, `mode` (default **read-only**), and a credential *reference*, never a secret.
 - Secret sources, in order: OS store (macOS Keychain via Security.framework: service `forti`, account
   `<profile>/api-key`); file `credentials/<profile>.token` (0600); `env` (variable name stored, not
   the value); `command` (argv, git-credential style). The P12 password uses the same mechanism.
@@ -154,39 +154,69 @@ public:
   Self-signed devices use `ca_bundle` or `resolve_ip`.
 - Secrets never appear in argv, output, logs, plans, audit records, MCP client config, or project files.
 
-## Mutation safety model
+## Operating modes and mutation safety
 
-1. **plan** validates every operation against the catalog (resource exists, op supported, fields
-   known and writable, values decode as the SDK type). It reads the current object(s), computes
-   before/after and a field diff, includes the SDK wire body (`to_json(obj, Write::update|create)`),
-   classifies risk, and stores the plan in `state/plans/<id>.json`. `digest` = SHA-256 over canonical
-   JSON of {device identity (profile, host, serial, vdom), operations, before digests}.
-2. **approve** is human only. `forti plan approve <id>` shows the diff and requires an interactive
-   terminal (`/dev/tty`, not stdin) where the person types the plan's confirmation code. On macOS,
-   critical plans also need LocalAuthentication (Touch ID or password). It writes an approval record
-   bound to the digest (HMAC with a key in the secret store), and it expires (default 15 min). The MCP
-   server has **no** approve tool and never writes approvals.
-3. **apply** takes only a plan id. It refuses when: the approval is missing, expired or for another
-   digest; the profile is not write-enabled; the device identity differs; or any re-read before-digest
-   differs (`stale_plan`). It runs operations in order with no retries (the SDK never retries
-   post-send). It re-reads after each one to verify. It stops at the first failure and records each
-   operation as `applied | verified | failed | outcome_unknown | not_attempted`. Every attempt is
-   appended to `state/audit.jsonl`.
-4. **Risk tiers.** `low` (objects inert unless referenced: addresses, services, schedules, profiles,
-   lists); `elevated` (policies, VIPs, NAT pools, user and auth objects, monitor actions); `critical`
-   (system interface, admin, api-user, accprofile, global, HA, VDOM, router/*, zones, DNS, NTP,
-   certificates, management access). Critical plans need a fresh config backup taken by the engine
-   (`monitor/system/config/backup`, stored 0600 under state) before apply. The approval prompt must
-   confirm an out-of-band recovery path (console or other admin access).
+**The FortiOS account's privileges are the primary authorization boundary.** A profile's `mode` is the
+operator's policy on top of that boundary. It is chosen in `forti configure`, persists in config.json, and
+cannot be changed through MCP:
 
-Discovering a capability never authorizes it: `discover` reports `operations` and `risk` per resource.
-Execution policy lives in the profile (`writes`) and the approval record.
+| mode | plan | apply |
+|---|---|---|
+| `read-only` (default) | yes (preview and validation are reads) | refused: `policy_denied` |
+| `guarded` | yes | only with a human approval of that plan's digest (`forti plan approve <id>`, CLI only) |
+| `autonomous` | yes | yes, with no interactive approval; every safeguard below still applies |
+
+There are no passphrases, TTY ceremonies or biometric prompts (maintainer decision). Autonomous mode
+is meant for capable agents doing real administration. Its risks are documented plainly: the agent can
+do anything the FortiOS API account may do.
+
+Automatic safeguards (every mode that writes):
+
+1. **Plan** validates every operation against the catalog and the SDK types (resource exists,
+   operation supported, attributes known and writable, values decode). It reads the current objects
+   and computes before/after, a field diff, the exact SDK wire body and the risk tier. The plan is
+   stored at `state/plans/<id>.json` (0600). `digest` = SHA-256 over canonical JSON of {device
+   identity, operations, before digests}. Planning never mutates the device.
+2. **Apply** takes only `{plan_id}`. It recomputes the digest (tamper check) and checks the device
+   serial, then re-reads every before-state (`stale_plan` on drift). It executes in order with no
+   retries (the SDK never retries after send) and verifies each operation by re-reading. It stops at the
+   first failure. Per-operation status: `verified | applied_unverified | failed | outcome_unknown |
+   not_attempted`. Results are `partial_failure` / `outcome_unknown` with the full execution record. An
+   HTTP failure is never assumed to mean "nothing changed".
+3. **Recovery aids, not guaranteed recovery.**
+   - Every apply writes a generated **rollback plan** (inverse operations from the recorded
+     before-state).
+   - Critical plans take a **pre-change config backup** through forti-api's raw download (G9
+     upstream). It is stored only under `state/backups/` (0600 file, 0700 dir, never a shared temp
+     dir), never logged, and never included in output.
+   - After each **critical**-risk operation, a fresh `fortiapi::Client` probes management
+     connectivity (`monitor/system/status`). On failure, execution stops with
+     `management_connectivity_lost`, the rollback plan id, the backup reference and the before-state.
+
+   **Limitation, stated in docs and output:** the rollback plan and the backup both need a working
+   management path to the device. They are not independent recovery. Forti never claims it can
+   recover from a management lockout. That needs an independently executable mechanism (e.g. a
+   device-side auto-revert) or a verified alternate management path (console, out-of-band
+   interface), which the operator must provide.
+4. **Audit and redaction.** Every apply is appended to `state/audit.jsonl` (0600). Sensitive
+   attributes (passwords, PSKs, secrets, keys, tokens; plus the live schema's `password` type) are
+   redacted in diffs, output, audit records and error details. Stored plan files keep real values
+   because apply needs them, so they are 0600.
+5. **Risk tiers** are reported by `discover` and `plan`:
+   - `low`: objects inert unless referenced
+   - `elevated`: policies, VIPs, users, VPN, most `system/*`, monitor actions
+   - `critical`: management access, routing, interfaces, admins, HA, VDOMs, global settings
+
+   Tiers drive the connectivity probe and the audit emphasis, not interactive gates.
+
+Discovering a capability never authorizes it. Execution policy is the profile mode plus the FortiOS
+account.
 
 ## MCP surface (forti-mcp)
 
 Four tools, mirroring the engine: `forti_discover`, `forti_read`, `forti_plan`, `forti_apply`.
-`forti_apply` returns `approval_required` with the exact `forti plan approve <id>` command for the
-human. Responses are bounded (default 50 items and 48 KiB of JSON, with `next_start` continuation).
+In guarded mode `forti_apply` returns `approval_required` with the exact `forti plan approve <id>`
+command for the human. In autonomous mode it executes. MCP can never change the mode or approve. Responses are bounded (default 50 items and 48 KiB of JSON, with `next_start` continuation).
 Field schemas are returned selectively (`fields`). No arbitrary SSH/CLI execution, ever: REST only.
 Protocol: JSON-RPC 2.0 over stdio, newline-delimited; `initialize`, `tools/list`, `tools/call`,
 `ping`, and notifications. stdout carries protocol only; logs go to stderr without secrets.

@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,10 +32,14 @@ namespace forti::engine {
         approval_required,  // apply without a valid human approval
         policy_denied,      // the profile or risk policy forbids the operation
         partial_failure,    // apply stopped part-way
+        management_connectivity_lost,   // apply stopped: the management probe after a critical change failed
         outcome_unknown,    // a mutation may or may not have reached the device
     };
 
     std::string_view to_string(Code code);
+
+    // Inverse of to_string; nullopt for an unknown name.
+    std::optional<Code> parse_code(std::string_view name);
 
     // Process exit status for the CLI (architecture.md, "Error codes and CLI exit codes").
     int exit_code(Code code);

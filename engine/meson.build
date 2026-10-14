@@ -17,25 +17,30 @@ foreach k : range(shards)
 endforeach
 
 engine_sources = files(
+    'src/approval.cpp',
     'src/catalog.cpp',
     'src/engine.cpp',
     'src/error.cpp',
+    'src/plan.cpp',
+    'src/plan_store.cpp',
     'src/policy.cpp',
     'src/profile.cpp',
     'src/secrets.cpp',
+    'src/sha256.cpp',
 )
+
+engine_deps = [forti_api_dep]
+if host_machine.system() == 'darwin'
+    engine_sources += files('src/keychain_macos.cpp')
+    engine_deps += dependency('appleframeworks', modules : ['Security', 'CoreFoundation'])
+endif
 
 engine_lib = static_library('forti-engine', engine_sources,
                             cpp_args : ['-DFORTI_SHARDS=@0@'.format(shards)],
                             include_directories : engine_inc,
-                            dependencies : forti_api_dep,
+                            dependencies : engine_deps,
                             link_with : shard_libs,
                             implicit_include_directories : false)
-
-engine_deps = [forti_api_dep]
-if host_machine.system() == 'darwin'
-    engine_deps += dependency('appleframeworks', modules : ['Security', 'CoreFoundation'])
-endif
 
 forti_engine_dep = declare_dependency(include_directories : engine_inc,
                                       link_with : engine_lib,

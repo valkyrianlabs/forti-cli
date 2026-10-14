@@ -9,7 +9,7 @@ namespace forti::cli {
     using engine::Failure;
 
     OptionSpec global_options() {
-        return {{"profile", "vdom"}, {"json", "help"}, {{'p', "profile"}, {'h', "help"}}};
+        return {{"profile", "vdom"}, {"json", "help", "no-color"}, {{'p', "profile"}, {'h', "help"}}};
     }
 
     std::size_t to_count(std::string_view name, const std::string& text) {
@@ -24,11 +24,21 @@ namespace forti::cli {
         return emit(context.output, engine::Engine::envelope(operation), render);
     }
 
+    const std::vector<CommandGroup>& command_groups() {
+        static const std::vector<CommandGroup> groups = {
+            {"setup", setup_commands()},
+            {"read", read_commands()},
+            {"change", plan_commands()},
+            {"integrations", install_commands()},
+        };
+        return groups;
+    }
+
     const std::vector<Command>& commands() {
         static const std::vector<Command> table = [] {
             std::vector<Command> all;
-            for (auto group: {setup_commands, read_commands, plan_commands, install_commands})
-                for (auto& command: group()) all.push_back(std::move(command));
+            for (const auto& group: command_groups())
+                for (const auto& command: group.commands) all.push_back(command);
             return all;
         }();
         return table;
