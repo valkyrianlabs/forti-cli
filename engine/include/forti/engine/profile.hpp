@@ -114,8 +114,12 @@ namespace forti::engine {
 
     // <config>/credentials/<account with '/' → '.'>, mode 0600, directory 0700.
     std::shared_ptr<SecretStore> file_secret_store(const Paths& paths);
-    // macOS: the login Keychain (service "forti"); elsewhere: file_secret_store.
+    // macOS: the login Keychain (service "forti"); elsewhere: file_secret_store. FORTI_SECRET_STORE=file
+    // or =keychain overrides the choice (throws Failure(config) for any other value).
     std::shared_ptr<SecretStore> default_secret_store(const Paths& paths);
+    // macOS Keychain generic passwords under `service`. Constructing it touches nothing; get/put/erase
+    // throw Failure(config) with a hint when the keychain is locked or cannot prompt. Elsewhere: throws.
+    std::shared_ptr<SecretStore> keychain_secret_store(std::string service = "forti");
     // In-memory, for tests and embedding.
     std::shared_ptr<SecretStore> memory_secret_store();
 

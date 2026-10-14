@@ -73,4 +73,40 @@ namespace forti::cli {
         return out;
     }
 
+    std::vector<std::string> split_command(std::string_view text) {
+        std::vector<std::string> argv;
+        std::string word;
+        bool in_word = false;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            char c = text[i];
+            if (c == ' ' || c == '\t' || c == '\n') {
+                if (in_word) argv.push_back(std::move(word));
+                word.clear();
+                in_word = false;
+            } else if (c == '\'') {
+                in_word = true;
+                auto end = text.find('\'', i + 1);
+                if (end == std::string_view::npos) throw Failure(Code::usage, "unterminated ' in command");
+                word.append(text.substr(i + 1, end - i - 1));
+                i = end;
+            } else if (c == '"') {
+                in_word = true;
+                for (++i;; ++i) {
+                    if (i >= text.size()) throw Failure(Code::usage, "unterminated \" in command");
+                    if (text[i] == '"') break;
+                    if (text[i] == '\\' && i + 1 < text.size() && (text[i + 1] == '"' || text[i + 1] == '\\')) ++i;
+                    word += text[i];
+                }
+            } else if (c == '\\' && i + 1 < text.size()) {
+                in_word = true;
+                word += text[++i];
+            } else {
+                in_word = true;
+                word += c;
+            }
+        }
+        if (in_word) argv.push_back(std::move(word));
+        return argv;
+    }
+
 }  // namespace forti::cli
