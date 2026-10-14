@@ -38,6 +38,8 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 SERIAL = "FGT60FTK20000000"
 VERSION = "v7.4.8"
 BUILD = 2795
+# In every configuration backup the mock serves, so tests can prove backups never reach any output.
+BACKUP_MARKER = "mock-backup-content-7d1e"
 
 
 def have_openssl() -> bool:
@@ -368,6 +370,11 @@ class MockFortiOS:
         with self.lock:
             self.faults.append(Fault("error", "POST", api_prefix, True, status, times))
 
+    def fail_request(self, method: str | None, api_prefix: str, status: int = 403, times: int = 1) -> None:
+        """Answer matching requests with a FortiOS error envelope and do nothing else."""
+        with self.lock:
+            self.faults.append(Fault("fail", method, api_prefix, False, status, times))
+
     def fail_status_after_write(self) -> None:
         """Once a write arrives, every later monitor/system/status request is dropped until cleared."""
         with self.lock:
@@ -481,6 +488,8 @@ class _Handler(BaseHTTPRequestHandler):
         if not authorized:
             return self._reply(record, 401, mock.envelope(method, api, 401))
 
+        if failure := mock._take_fault("fail", method, api):
+            return self._reply(record, failure.status, mock.envelope(method, api, failure.status, error=-37))
         if method != "GET":
             mock._arm_status_faults()
         drop = mock._take_fault("drop", method, api)
@@ -645,7 +654,8 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "system/config/backup":
             text = (f"#config-version=FGT60F-7.4.8-FW-build{mock.build}-250101:opmode=0:vdom=0:user=api\n"
                     "#conf_file_ver=1\n#buildno=2795\n#global_vdom=1\nconfig system global\n"
-                    f"    set hostname \"{mock.device.singletons['system/global'].get('hostname', '')}\"\nend\n")
+                    f"    set hostname \"{mock.device.singletons['system/global'].get('hostname', '')}\"\n"
+                    f"    set post-login-banner \"{BACKUP_MARKER}\"\nend\n")
             return 200, text, "text/plain"
         if method == "GET" and path in mock.monitors:
             return 200, mock.envelope(method, api, results=mock.monitors[path]()), "application/json"

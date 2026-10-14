@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mock-fortios"))
 from harness import API_KEY, KEY_VAR, Sandbox, binary, require_tools  # noqa: E402
+from mock_fortios import BACKUP_MARKER  # noqa: E402
 
 FORTI = ""
 
@@ -39,9 +40,12 @@ class CliTest(unittest.TestCase):
         self.mock = self.sb.mock
 
     def tearDown(self) -> None:
-        # The API key never appears in any output or any file the binaries wrote.
+        # The API key never appears in any output or any file the binaries wrote; configuration
+        # backups never appear in any output or in the audit log.
         for text in self.outputs + [self.sb.all_files_text()]:
             self.assertNotIn(API_KEY, text)
+        for text in self.outputs + [json.dumps(self.sb.audit())]:
+            self.assertNotIn(BACKUP_MARKER, text)
 
     def forti(self, *args: str, input: str | None = None, expect: int | None = 0):  # type: ignore[no-untyped-def]
         result = self.sb.forti(*args, input=input)
@@ -359,6 +363,41 @@ class Autonomous(CliTest):
         self.mock.error_after_create("cmdb/firewall/address", status=500)
         ops = self.json_of("apply", planned["id"], expect=8)["error"]["details"]["operations"]
         self.assertEqual([op.get("key") for op in ops], ["web", "second"])
+
+    def test_critical_plan_takes_a_private_backup_first(self) -> None:
+        planned = self.plan({"op": "update", "resource": "system/global", "set": {"hostname": "fw-new"}})["data"]
+        self.assertEqual(planned["risk"], "critical")
+        self.mock.clear_requests()
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertEqual(applied["operations"][0]["status"], "verified")
+        self.assertTrue(applied["operations"][0]["management_probe"]["ok"])
+        self.assertEqual(applied["backup"]["status"], "saved", applied["backup"])
+        calls = [(r.method, r.api) for r in self.mock.requests]
+        backup_at = calls.index(("GET", "monitor/system/config/backup"))
+        self.assertLess(backup_at, calls.index(("PUT", "cmdb/system/global")), "the backup precedes the change")
+        self.assertEqual(self.mock.requests[backup_at].query, [("scope", "global")])
+        files = list((self.sb.state / "backups").iterdir())
+        self.assertEqual([f.name for f in files], [f"{planned['id']}.conf"])
+        self.assertEqual(stat.S_IMODE(os.stat(files[0]).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.sb.state / "backups").st_mode), 0o700)
+        content = files[0].read_text()
+        self.assertTrue(content.startswith("#config-version="))
+        self.assertIn('set hostname "fw-mock"', content, "the backup holds the before-state")
+        self.assertIn(BACKUP_MARKER, content)
+        self.assertEqual(self.sb.audit()[-1]["backup"], "saved")
+
+    def test_failed_backup_refuses_a_critical_plan(self) -> None:
+        planned = self.plan({"op": "update", "resource": "system/global", "set": {"hostname": "fw-new"}})["data"]
+        self.mock.fail_request("GET", "monitor/system/config/backup", status=403)
+        self.mock.clear_requests()
+        refused = self.json_of("apply", planned["id"], expect=7)
+        self.assertEqual(refused["error"]["code"], "policy_denied")
+        self.assertEqual(refused["error"]["details"]["reason"], "backup_failed")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.mock.singleton("system/global")["hostname"], "fw-mock")
+        self.assertFalse(any((self.sb.state / "backups").glob("*")) if (self.sb.state / "backups").exists() else False,
+                         "no partial backup file is left behind")
+        self.assertEqual(self.sb.audit()[-1]["error"]["reason"], "backup_failed")
 
     def test_management_probe_failure_stops_a_critical_apply(self) -> None:
         planned = self.plan({"op": "update", "resource": "system/global", "set": {"hostname": "fw-new"}},
