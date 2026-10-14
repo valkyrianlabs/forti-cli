@@ -6,8 +6,8 @@
 // after send, re-reading each object to verify it. Around that it writes a rollback plan, probes
 // management connectivity after critical-risk operations, and appends a redacted audit record.
 //
-// Recovery aids are not guaranteed recovery: the rollback plan (and, once forti-api gap G9 lands, the
-// config backup) needs a working management path. Recovering from a management lockout needs an
+// Recovery aids are not guaranteed recovery: the rollback plan and the pre-change config backup of
+// critical plans both need a working management path. Recovering from a management lockout needs an
 // independent path the operator provides (console, out-of-band interface, device-side auto-revert).
 //
 
@@ -15,6 +15,7 @@
 #include "plan_store.hpp"
 #include "policy.hpp"
 #include "session.hpp"
+#include "sha256.hpp"
 
 #include <forti/engine/engine.hpp>
 
@@ -25,6 +26,10 @@
 #include <format>
 #include <map>
 #include <set>
+
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace forti::engine {
 
@@ -441,9 +446,10 @@ namespace forti::engine {
             data["mode"] = to_string(profile.mode);
             data["notes"] = mode_notes(profile, id);
             if (detail::plan_risk(plan) == Risk::critical)
-                data["notes"].push_back(std::format("critical risk: apply probes management connectivity after each "
-                                                    "critical operation; no pre-change config backup is taken yet "
-                                                    "(forti-api gap G9). {}", recovery_limitation));
+                data["notes"].push_back(std::format("critical risk: apply first saves a configuration backup "
+                                                    "(state/backups/{}.conf, owner-only) and probes management "
+                                                    "connectivity after each critical operation. {}", id,
+                                                    recovery_limitation));
             data["apply"] = std::format("forti apply {}", id);
             if (profile.mode == Mode::guarded) data["approve"] = std::format("forti plan approve {}", id);
             return ok(std::move(data), {{"profile", profile.name}, {"vdom", vdom}});
@@ -456,13 +462,67 @@ namespace forti::engine {
 
     namespace {
 
-        // The seam for the pre-change config backup of critical plans. forti-api has no raw download
-        // yet (gap G9): Client throws DecodeError on a non-JSON 2xx, so nothing is fetched. When the
-        // SDK's download lands, this writes <state>/backups/<plan id>.conf (0600 in a 0700 dir) and
-        // returns its reference. The backup is sensitive: never logged, never in output.
-        json pre_change_backup(const Paths&, const Profile&, const json&) {
-            return {{"status", "unavailable"},
-                    {"reason", "forti-api gap G9: no raw config download in the SDK yet"}};
+        // The device's full configuration, taken before a critical-risk plan runs. Streamed through the
+        // SDK's bounded download straight into <state>/backups/<plan id>.conf (0600, directory 0700): never
+        // buffered whole, logged, or echoed. A recovery *aid*: restoring it needs a working management
+        // path, exactly like the rollback plan (architecture.md, "Recovery aids, not guaranteed recovery").
+        //
+        // Throws Failure(policy_denied) when the backup cannot be taken: a critical plan does not run
+        // without it unless the profile opts out (backup_before_critical: false).
+        json pre_change_backup(fortiapi::Client& client, const Paths& paths, const Profile& profile, const std::string& id) {
+            if (!profile.backup_before_critical)
+                return {{"status", "skipped"}, {"reason", "backup_before_critical is false in the profile"}};
+            constexpr std::size_t max_bytes = 256u << 20;
+            auto dir = paths.state / "backups";
+            ensure_private_dir(paths.state);
+            ensure_private_dir(dir);
+            auto file = dir / (id + ".conf");
+            auto partial = dir / (id + ".conf.partial");
+            ::unlink(partial.c_str());   // a leftover from a crashed attempt at this same plan
+            int fd = ::open(partial.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+            if (fd < 0) throw Failure(Code::config, std::format("cannot create {}", partial.string()));
+
+            detail::Sha256 hash;
+            std::string head;   // the first line, to recognize a FortiOS configuration
+            auto fail = [&](const std::string& why) -> Failure {
+                ::close(fd);
+                ::unlink(partial.c_str());
+                return Failure(Code::policy_denied,
+                               std::format("pre-change configuration backup failed: {}. A critical plan does not run "
+                                           "without one; fix the cause (the API account needs read access to the "
+                                           "configuration backup) or set \"backup_before_critical\": false in profile {}",
+                                           why, profile.name),
+                               {{"plan_id", id}, {"reason", "backup_failed"}});
+            };
+            try {
+                fortiapi::DownloadOptions options;
+                options.max_bytes = max_bytes;
+                options.sink = [&](std::string_view chunk) {
+                    if (head.size() < 64) head.append(chunk.substr(0, 64 - head.size()));
+                    hash.update(chunk);
+                    for (std::size_t written = 0; written < chunk.size();) {
+                        ssize_t n = ::write(fd, chunk.data() + written, chunk.size() - written);
+                        if (n < 0 && errno == EINTR) continue;
+                        if (n <= 0) throw std::runtime_error("cannot write the backup file");
+                        written += static_cast<std::size_t>(n);
+                    }
+                };
+                auto download = fortiapi::Monitor::download("system/config/backup", fortiapi::Query().set("scope", "global"),
+                                                             options, client);
+                if (!head.starts_with("#config-version=")) throw fail("the device did not return a configuration file");
+                if (::fsync(fd) != 0) throw fail("cannot flush the backup file");
+                ::close(fd);
+                if (::rename(partial.c_str(), file.c_str()) != 0) {
+                    ::unlink(partial.c_str());
+                    throw Failure(Code::config, std::format("cannot store {}", file.string()));
+                }
+                return {{"status", "saved"}, {"path", file.string()}, {"bytes", download.bytes},
+                        {"sha256", detail::hex(hash.finish())}};
+            } catch (const Failure&) {
+                throw;
+            } catch (...) {
+                throw fail(translate(std::current_exception()).what());
+            }
         }
 
         struct Executed {
@@ -674,7 +734,7 @@ namespace forti::engine {
                               {{"plan_id", id}, {"reason", "device_serial"}});
 
             json backup = nullptr;
-            if (risk == Risk::critical) backup = pre_change_backup(paths, profile, plan);
+            if (risk == Risk::critical) backup = pre_change_backup(client, paths, profile, id);
 
             // Committed: the plan can never run again (an atomic marker: of two concurrent applies only
             // one gets past this line), and a guarded approval is used up.

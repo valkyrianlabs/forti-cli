@@ -116,6 +116,7 @@ namespace forti::engine {
         if (!resolve_ip.empty()) out["resolve_ip"] = resolve_ip;
         if (connect_timeout_ms != 5000) out["connect_timeout_ms"] = connect_timeout_ms;
         if (timeout_ms != 30000) out["timeout_ms"] = timeout_ms;
+        if (!backup_before_critical) out["backup_before_critical"] = false;
         return out;
     }
 
@@ -149,6 +150,7 @@ namespace forti::engine {
             profile.mode = parse_mode(get_or<std::string>(json, "mode", "read-only"));
             profile.connect_timeout_ms = get_or<unsigned>(json, "connect_timeout_ms", 5000);
             profile.timeout_ms = get_or<unsigned>(json, "timeout_ms", 30000);
+            profile.backup_before_critical = get_or<bool>(json, "backup_before_critical", true);
             profile.api_key = json.contains("api_key") ? SecretRef::from_json(json["api_key"])
                                                        : SecretRef{SecretRef::Source::store, {}, {}};
             if (json.contains("cert_password")) profile.cert_password = SecretRef::from_json(json["cert_password"]);
