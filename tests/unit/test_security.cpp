@@ -310,6 +310,7 @@ TEST_F(Engine, RebootIsCriticalAndFollowedByAManagementProbe) {
     EXPECT_EQ(planned["data"]["risk"], "critical");
 
     transport->reply(200, fake::envelope({{"hostname", "fw01"}}));   // apply: device identity
+    transport->reply_raw(200, "#config-version=FGT60F-7.4.8\nconfig system global\nend\n");   // pre-change backup
     transport->reply(200, written());                                   // the POST
     transport->fail(7, true);                                           // probe: CURLE_COULDNT_CONNECT
     transport->fail(7, true);                                           // probe retry (retries = 1)
@@ -319,4 +320,51 @@ TEST_F(Engine, RebootIsCriticalAndFollowedByAManagementProbe) {
     // Honest about recovery: never claims it can recover from a lockout.
     std::string message = result["error"]["message"];
     EXPECT_NE(message.find("not independent recovery"), std::string::npos);
+}
+
+// ---- S-15: the pre-change backup (critical plans) never reaches output or the audit log ----
+
+TEST_F(Engine, BackupContentsStayInTheBackupFile) {
+    const std::string marker = "set password ENC SECRETMARKER123";
+    const std::string backup = "#config-version=FGT60F-7.4.8\nconfig system admin\n    edit admin\n        " + marker + "\nend\n";
+    transport->reply(200, fake::envelope({{"hostname", "fw01"}}));
+    json planned = plan({{"operations", {{{"op", "action"}, {"resource", "monitor/system/os/reboot"}, {"body", json::object()}}}}});
+    ASSERT_TRUE(planned["ok"]) << planned.dump();
+    std::string id = planned["data"]["id"];
+    transport->reply(200, fake::envelope({{"hostname", "fw01"}}));
+    transport->reply_raw(200, backup);
+    transport->reply(200, written());
+    transport->reply(200, fake::envelope({{"hostname", "fw01"}}));   // probe ok
+    json result = apply(id);
+    ASSERT_TRUE(result["ok"]) << result.dump();
+    EXPECT_EQ(result.dump().find("SECRETMARKER"), std::string::npos);
+
+    std::ifstream audit(paths.state / "audit.jsonl");
+    std::stringstream log;
+    log << audit.rdbuf();
+    EXPECT_EQ(log.str().find("SECRETMARKER"), std::string::npos);
+
+    fs::path file = paths.state / "backups" / (id + ".conf");
+    struct stat info{};
+    ASSERT_EQ(::stat(file.c_str(), &info), 0);
+    EXPECT_EQ(static_cast<unsigned>(info.st_mode & 0777), 0600u);
+    ASSERT_EQ(::stat(file.parent_path().c_str(), &info), 0);
+    EXPECT_EQ(static_cast<unsigned>(info.st_mode & 0777), 0700u);
+    for (const auto& entry: fs::directory_iterator(file.parent_path()))
+        EXPECT_EQ(entry.path().string().find(".partial"), std::string::npos) << entry.path();
+}
+
+TEST_F(Engine, FailedBackupRefusesBeforeAnyWriteAndLeavesNoPartialFile) {
+    transport->reply(200, fake::envelope({{"hostname", "fw01"}}));
+    json planned = plan({{"operations", {{{"op", "action"}, {"resource", "monitor/system/os/reboot"}, {"body", json::object()}}}}});
+    ASSERT_TRUE(planned["ok"]);
+    std::string id = planned["data"]["id"];
+    transport->reply(200, fake::envelope({{"hostname", "fw01"}}));
+    transport->reply_raw(200, "<html>login page</html>");   // not a configuration
+    json result = apply(id);
+    EXPECT_EQ(result["error"]["code"], "policy_denied") << result.dump();
+    EXPECT_EQ(writes(), 0u);
+    EXPECT_FALSE(fs::exists(paths.state / "plans" / (id + ".applied")));   // can be retried
+    if (fs::exists(paths.state / "backups"))
+        for (const auto& entry: fs::directory_iterator(paths.state / "backups")) ADD_FAILURE() << entry.path();
 }

@@ -477,8 +477,10 @@ namespace forti::engine {
             ensure_private_dir(paths.state);
             ensure_private_dir(dir);
             auto file = dir / (id + ".conf");
-            auto partial = dir / (id + ".conf.partial");
-            ::unlink(partial.c_str());   // a leftover from a crashed attempt at this same plan
+            // Per process: two concurrent applies of one plan (only one passes mark_applied later) must not
+            // unlink or rename each other's half-written file.
+            auto partial = dir / std::format("{}.conf.partial.{}", id, ::getpid());
+            ::unlink(partial.c_str());   // a leftover from a crashed attempt that had this pid
             int fd = ::open(partial.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
             if (fd < 0) throw Failure(Code::config, std::format("cannot create {}", partial.string()));
 
