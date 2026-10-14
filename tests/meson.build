@@ -21,4 +21,13 @@ if gtest_dep.found()
                            dependencies : [forti_cli_dep, gtest_dep],
                            implicit_include_directories : false),
          suite : 'unit')
+
+    # src/install: .mcp.json and config.toml edits, and the client adapters against fake
+    # `claude`/`codex` scripts (no real client, no real home directory).
+    test('install', executable('installTests',
+                               'install/test_files.cpp',
+                               'install/test_adapters.cpp',
+                               dependencies : [forti_install_dep, gtest_dep],
+                               implicit_include_directories : false),
+         suite : 'unit', timeout : 120)
 endif
