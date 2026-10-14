@@ -48,7 +48,7 @@ namespace forti::engine::detail {
     // before digests, wire bodies and risk).
     std::string plan_digest(const json& plan);
 
-    // Plan ids: [A-Za-z0-9-]{1,64}. Throws Failure(usage).
+    // Plan ids: forti::engine::plan_id_pattern. Throws Failure(usage).
     void validate_plan_id(std::string_view id);
     std::string new_plan_id(Clock::time_point time);
 
@@ -63,6 +63,8 @@ namespace forti::engine::detail {
     Risk parse_risk(std::string_view text);
 
     bool plan_applied(const Paths& paths, std::string_view id);
+    // Creates <id>.applied atomically (O_CREAT|O_EXCL). Throws Failure(policy_denied, reason
+    // "already_applied") when it exists: two concurrent applies of one plan cannot both proceed.
     void mark_applied(const Paths& paths, std::string_view id, Clock::time_point time);
 
     // ---- Approvals (guarded mode) ----

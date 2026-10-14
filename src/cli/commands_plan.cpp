@@ -322,8 +322,8 @@ namespace forti::cli {
             if (context.output.format == Format::text && !envelope.value("ok", false)) {
                 const json& details = envelope["error"].contains("details") ? envelope["error"]["details"] : json();
                 if (details.is_object() && details.contains("operations")) render_record(*context.output.err, style_for(STDERR_FILENO), details);
-                if (details.is_object() && details.contains("approve"))
-                    *context.output.err << "approve with: " << details["approve"].get<std::string>() << "\n";
+                if (details.is_object() && details.contains("approve_command"))
+                    *context.output.err << "approve with: " << details["approve_command"].get<std::string>() << "\n";
             }
             return emit(context.output, envelope, [&](std::ostream& out, const json& data, const json&) {
                 out << style.bold(std::format("Applied plan {}", data.value("plan_id", ""))) << std::format(

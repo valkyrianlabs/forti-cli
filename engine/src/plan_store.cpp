@@ -2,10 +2,12 @@
 #include "sha256.hpp"
 
 #include <forti/engine/catalog.hpp>
+#include <forti/engine/engine.hpp>
 #include <forti/engine/error.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <ctime>
 #include <format>
@@ -16,6 +18,16 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+namespace forti::engine {
+
+    bool valid_plan_id(std::string_view id) {
+        if (id.size() < 12 || id.size() > 32) return false;
+        if (!std::isalnum(static_cast<unsigned char>(id.front()))) return false;
+        return std::ranges::all_of(id, [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
+    }
+
+}  // namespace forti::engine
 
 namespace forti::engine::detail {
 
@@ -39,7 +51,7 @@ namespace forti::engine::detail {
 
         [[noreturn]] void refuse_approval(std::string_view id, std::string_view reason, const std::string& message) {
             throw Failure(Code::approval_required, message,
-                          {{"plan_id", id}, {"reason", reason}, {"approve", std::format("forti plan approve {}", id)}});
+                          {{"plan_id", id}, {"reason", reason}, {"approve_command", std::format("forti plan approve {}", id)}});
         }
 
         fs::path plans_dir(const Paths& paths) { return paths.state / "plans"; }
@@ -92,9 +104,9 @@ namespace forti::engine::detail {
     // ---- ids and files ----
 
     void validate_plan_id(std::string_view id) {
-        bool valid = !id.empty() && id.size() <= 64;
-        for (char c: id) valid = valid && (std::isalnum(static_cast<unsigned char>(c)) || c == '-');
-        if (!valid) throw Failure(Code::usage, std::format("invalid plan id \"{}\"", id));
+        if (!valid_plan_id(id))
+            throw Failure(Code::usage, std::format("invalid plan id \"{}\" (expected {})", id, plan_id_pattern),
+                          {{"pattern", plan_id_pattern}});
     }
 
     std::string new_plan_id(Clock::time_point time) {
@@ -160,8 +172,19 @@ namespace forti::engine::detail {
 
     void mark_applied(const Paths& paths, std::string_view id, Clock::time_point time) {
         validate_plan_id(id);
-        write_private_file(plans_dir(paths) / (std::string(id) + ".applied"),
-                           json{{"plan_id", id}, {"applied_at", iso8601(time)}}.dump() + "\n");
+        fs::path marker = plans_dir(paths) / (std::string(id) + ".applied");
+        // O_EXCL makes this the one gate: of two concurrent applies of a plan, exactly one creates it.
+        int fd = ::open(marker.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0) {
+            if (errno == EEXIST)
+                throw Failure(Code::policy_denied, std::format("plan {} was already applied; a plan runs at most once", id),
+                              {{"plan_id", id}, {"reason", "already_applied"}});
+            throw Failure(Code::config, std::format("cannot write {}", marker.string()));
+        }
+        std::string text = json{{"plan_id", id}, {"applied_at", iso8601(time)}}.dump() + "\n";
+        bool written = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
+        ::close(fd);
+        if (!written) throw Failure(Code::config, std::format("cannot write {}", marker.string()));
     }
 
     // ---- approvals ----

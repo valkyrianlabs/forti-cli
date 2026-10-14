@@ -342,9 +342,9 @@ namespace forti::engine {
         }
 
         json make_plan(json device, json operations, detail::Clock::time_point time, std::string kind,
-                       std::string rollback_of = {}) {
+                       std::string rollback_of = {}, std::string id = {}) {
             json plan = {{"format", detail::plan_format},
-                         {"id", detail::new_plan_id(time)},
+                         {"id", id.empty() ? detail::new_plan_id(time) : std::move(id)},
                          {"kind", std::move(kind)},
                          {"created_at", detail::iso8601(time)},
                          {"device", std::move(device)},
@@ -360,6 +360,8 @@ namespace forti::engine {
         // Error details and messages may echo a value; never let a sensitive one out.
         Failure redacted_failure(const Failure& failure) {
             json details = detail::redact(failure.details());
+            // Top-level "key" in engine details is the object's name (a table key), not an attribute.
+            if (auto it = failure.details().find("key"); it != failure.details().end()) details["key"] = *it;
             std::string message = failure.what();
             if (auto it = failure.details().find("attribute"); it != failure.details().end() && it->is_string() &&
                                                                  detail::sensitive_name(it->get<std::string>()))
@@ -520,7 +522,10 @@ namespace forti::engine {
         }
 
         // Writes the rollback plan for the operations that may have changed the device (reverse order).
-        json write_rollback(const Paths& paths, const json& plan, const std::vector<Executed>& executed) {
+        // `id` set: rewrite that (provisional) rollback plan in place, or remove it when nothing needs
+        // undoing.
+        json write_rollback(const Paths& paths, const json& plan, const std::vector<Executed>& executed,
+                            const std::string& id = {}, bool provisional = false) {
             json operations = json::array();
             json skipped = json::array();
             const json& ops = plan["operations"];
@@ -549,11 +554,19 @@ namespace forti::engine {
             }
             json out = {{"skipped", std::move(skipped)}};
             if (operations.empty()) {
+                if (!id.empty()) {
+                    std::error_code ignored;
+                    std::filesystem::remove(detail::plan_file(paths, id), ignored);
+                }
                 out["plan_id"] = nullptr;
                 return out;
             }
             json rollback = make_plan(plan["device"], std::move(operations), detail::Clock::now(), "rollback",
-                                      plan["id"].get<std::string>());
+                                      plan["id"].get<std::string>(), id);
+            if (provisional) {
+                rollback["provisional"] = true;   // informational, outside the digest
+                out["provisional"] = true;
+            }
             detail::save_plan(paths, rollback);
             out["plan_id"] = rollback["id"];
             out["apply"] = std::format("forti apply {}", rollback["id"].get<std::string>());
@@ -673,9 +686,22 @@ namespace forti::engine {
             json backup = nullptr;
             if (risk == Risk::critical) backup = pre_change_backup(paths, profile, plan);
 
-            // Committed: the plan can never run again, and a guarded approval is used up.
+            // Committed: the plan can never run again (an atomic marker: of two concurrent applies only
+            // one gets past this line), and a guarded approval is used up.
             detail::mark_applied(paths, id, now);
             if (profile.mode == Mode::guarded) detail::consume_approval(paths, id, now);
+
+            // A provisional rollback plan exists before the first mutation, so a crash mid-apply still
+            // leaves one: every operation counts as possibly applied, with its post-state unknown (no
+            // before-digest checks). It is rewritten in place once the outcome is known.
+            std::vector<Executed> assumed(ops.size());
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                assumed[i].sent = assumed[i].changed = true;
+                assumed[i].key = ops[i].value("key", "");
+            }
+            json provisional = write_rollback(paths, plan, assumed, {}, true);
+            std::string rollback_id = provisional["plan_id"].is_string() ? provisional["plan_id"].get<std::string>() : "";
+            event["rollback_plan"] = provisional["plan_id"];
 
             std::vector<Executed> executed(ops.size());
             std::optional<std::size_t> lost_at;
@@ -811,7 +837,8 @@ namespace forti::engine {
                 }
             }
 
-            json rollback = write_rollback(paths, plan, executed);
+            json rollback = rollback_id.empty() ? write_rollback(paths, plan, executed)
+                                                : write_rollback(paths, plan, executed, rollback_id);
             json records = json::array();
             json audit_ops = json::array();
             std::size_t verified = 0, unverified = 0;

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #include <sys/stat.h>
 
@@ -296,7 +297,8 @@ TEST_F(PlanTest, GuardedApplyNeedsASingleUseApproval) {
     json result = apply(id);
     EXPECT_EQ(result["error"]["code"], "approval_required");
     EXPECT_EQ(result["error"]["details"]["reason"], "missing");
-    EXPECT_EQ(result["error"]["details"]["approve"], "forti plan approve " + id);
+    EXPECT_EQ(result["error"]["details"]["approve_command"], "forti plan approve " + id);
+    EXPECT_EQ(result["error"]["details"]["plan_id"], id);
 
     json approval = approve(id);
     ASSERT_TRUE(approval["ok"]) << approval.dump();
@@ -400,6 +402,7 @@ TEST_F(PlanTest, StalePlansAreRefusedBeforeAnyWrite) {
     json result = apply(id);
     EXPECT_EQ(result["error"]["code"], "stale_plan");
     EXPECT_EQ(result["error"]["details"]["reason"], "before_changed");
+    EXPECT_EQ(result["error"]["details"]["key"], "LAN");   // an object name, not a secret
     EXPECT_EQ(writes(), 0u);
     // Not consumed: nothing ran, so the plan is not marked applied.
     EXPECT_FALSE(engine::detail::plan_applied(paths, id));
@@ -648,11 +651,144 @@ TEST_F(PlanTest, ListAndShowReportState) {
     EXPECT_EQ(shown["data"]["state"]["state"], "approved");
     EXPECT_EQ(shown["data"]["operations"][0]["before"]["comment"], "old");
     EXPECT_EQ(engine::Engine::envelope([&] { return engine::show_plan(*sut, "../../etc/passwd"); })["error"]["code"], "usage");
-    EXPECT_EQ(engine::Engine::envelope([&] { return engine::show_plan(*sut, "nope"); })["error"]["code"], "not_found");
+    EXPECT_EQ(engine::Engine::envelope([&] { return engine::show_plan(*sut, "20200101-000000-000000"); })["error"]["code"],
+              "not_found");
 }
 
 TEST_F(PlanTest, ApplyAcceptsOnlyAPlanId) {
     json result = engine::Engine::envelope([&] { return sut->apply({{"plan_id", "x"}, {"operations", json::array()}}); });
     EXPECT_EQ(result["error"]["code"], "usage");
-    EXPECT_EQ(apply("missing-plan")["error"]["code"], "not_found");
+    EXPECT_EQ(apply("20200101-000000-000000")["error"]["code"], "not_found");
+    for (auto id: {"short", "-20200101-000000", "20200101-000000-ABCDEF", "20200101_000000_0000", "../../etc/passwd-x",
+                   "20200101-000000-000000-000000-0000"})
+        EXPECT_EQ(apply(id)["error"]["code"], "usage") << id;
+    EXPECT_TRUE(engine::valid_plan_id("20261014-153012-a1b2c3"));
+}
+
+namespace {
+
+    // Delegates to a FakeTransport and calls `hook` before each mutating request: lets a test look at
+    // the state directory at the moment a write leaves.
+    class Hooked final : public fortiapi::Transport {
+    public:
+        std::shared_ptr<fake::FakeTransport> inner;
+        std::function<void(const fortiapi::HttpRequest&)> hook;
+
+        fortiapi::HttpResponse perform(const fortiapi::HttpRequest& request) override {
+            if (request.method != fortiapi::Method::Get && hook) hook(request);
+            return inner->perform(request);
+        }
+    };
+
+}  // namespace
+
+TEST_F(PlanTest, ARollbackPlanExistsBeforeTheFirstWriteAndIsFinalizedAfter) {
+    auto hooked = std::make_shared<Hooked>();
+    hooked->inner = transport;
+    auto options = fake::options(transport, Mode::autonomous);
+    options.paths = paths;
+    options.transport = [hooked](const fortiapi::Config&) -> std::shared_ptr<fortiapi::Transport> { return hooked; };
+    sut = std::make_unique<engine::Engine>(options);
+
+    transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+    json planned = plan({{"operations", {{{"op", "update"}, {"resource", "firewall/address"}, {"key", "LAN"}, {"set", {{"comment", "new"}}}},
+                                         {{"op", "create"}, {"resource", "firewall/policy"},
+                                          {"object", {{"policyid", 0}, {"name", "allow-web"}, {"action", "accept"}}}}}}});
+    ASSERT_TRUE(planned["ok"]) << planned.dump();
+    std::string id = planned["data"]["id"];
+
+    std::vector<json> seen;   // the rollback plans on disk when each write leaves
+    hooked->hook = [&](const fortiapi::HttpRequest&) {
+        for (const auto& entry: fs::directory_iterator(paths.state / "plans")) {
+            if (entry.path().extension() != ".json") continue;
+            json stored = json::parse(slurp(entry.path()));
+            if (stored.value("kind", "") == "rollback") seen.push_back(stored);
+        }
+    };
+    transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+    transport->reply(200, written("LAN"));
+    transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "new"}})})));
+    transport->reply(200, written(7));   // the device assigns policyid 7
+    transport->reply(200, fake::envelope(json::array({{{"policyid", 7}, {"name", "allow-web"}, {"action", "accept"}}})));
+    json result = apply(id);
+    ASSERT_TRUE(result["ok"]) << result.dump();
+
+    // Before the first write: provisional, covering what the plan alone can invert.
+    ASSERT_EQ(seen.size(), 2u);
+    const json& provisional = seen.front();
+    EXPECT_TRUE(provisional.value("provisional", false));
+    EXPECT_EQ(provisional["rollback_of"], id);
+    ASSERT_EQ(provisional["operations"].size(), 1u);   // the create's key is not known yet
+    EXPECT_EQ(provisional["operations"][0]["set"], json({{"comment", "old"}}));
+    EXPECT_TRUE(provisional["operations"][0]["before_digest"].is_null());
+    EXPECT_EQ(engine::detail::load_plan(paths, provisional["id"].get<std::string>())["id"], provisional["id"]);
+
+    // After: the same id, finalized with the device-assigned key.
+    std::string rollback_id = result["data"]["rollback"]["plan_id"];
+    EXPECT_EQ(json(rollback_id), provisional["id"]);
+    json final_plan = engine::detail::load_plan(paths, rollback_id);
+    EXPECT_FALSE(final_plan.contains("provisional"));
+    ASSERT_EQ(final_plan["operations"].size(), 2u);
+    EXPECT_EQ(final_plan["operations"][0]["op"], "delete");
+    EXPECT_EQ(final_plan["operations"][0]["key"], "7");
+    EXPECT_EQ(final_plan["operations"][1]["op"], "update");
+    EXPECT_TRUE(final_plan["operations"][1]["before_digest"].is_string());
+    EXPECT_EQ(audit_lines().back()["rollback_plan"], json(rollback_id));
+}
+
+TEST_F(PlanTest, NeverAttemptedOperationsLeaveTheRollbackPlan) {
+    std::string id = plan_comment();
+    transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+    transport->fail(7, true).fail(7, true).fail(7, true);
+    json result = apply(id);
+    EXPECT_EQ(result["error"]["code"], "partial_failure");
+    // The provisional rollback was written, then removed: nothing reached the device.
+    for (const auto& entry: fs::directory_iterator(paths.state / "plans"))
+        if (entry.path().extension() == ".json") EXPECT_NE(json::parse(slurp(entry.path())).value("kind", ""), "rollback");
+}
+
+TEST_F(PlanTest, TheAppliedMarkerIsAnAtomicGate) {
+    std::string id = plan_comment();
+    engine::detail::mark_applied(paths, id, engine::detail::Clock::now());
+    try {
+        engine::detail::mark_applied(paths, id, engine::detail::Clock::now());
+        ADD_FAILURE() << "a second marker was created";
+    } catch (const engine::Failure& failure) {
+        EXPECT_EQ(failure.code(), engine::Code::policy_denied);
+        EXPECT_EQ(failure.details()["reason"], "already_applied");
+    }
+}
+
+TEST_F(PlanTest, ConcurrentAppliesOfOnePlanRunItOnce) {
+    std::string id = plan_comment();
+    constexpr int runners = 4;
+    std::vector<std::shared_ptr<fake::FakeTransport>> transports;
+    std::vector<std::unique_ptr<engine::Engine>> engines;
+    for (int i = 0; i < runners; ++i) {
+        auto own = std::make_shared<fake::FakeTransport>();
+        own->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+        own->reply(200, written("LAN"));
+        own->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "new"}})})));
+        auto options = fake::options(own, Mode::autonomous);
+        options.paths = paths;
+        transports.push_back(own);
+        engines.push_back(std::make_unique<engine::Engine>(options));
+    }
+    std::vector<json> results(runners);
+    std::vector<std::thread> threads;
+    for (int i = 0; i < runners; ++i)
+        threads.emplace_back([&, i] {
+            results[i] = engine::Engine::envelope([&] { return engines[i]->apply({{"plan_id", id}}); });
+        });
+    for (auto& thread: threads) thread.join();
+    int applied = 0, refused = 0;
+    std::size_t puts = 0;
+    for (int i = 0; i < runners; ++i) {
+        if (results[i]["ok"]) ++applied;
+        else if (results[i]["error"]["details"].value("reason", "") == "already_applied") ++refused;
+        for (const auto& request: transports[i]->requests) puts += request.method == fortiapi::Method::Put;
+    }
+    EXPECT_EQ(applied, 1);
+    EXPECT_EQ(refused, runners - 1);
+    EXPECT_EQ(puts, 1u);
 }
