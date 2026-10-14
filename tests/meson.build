@@ -20,6 +20,7 @@ if gtest_dep.found()
                            'unit/test_cli.cpp',
                            'unit/test_setup.cpp',
                            'unit/test_keychain.cpp',
+                           'unit/test_cli_security.cpp',
                            include_directories : include_directories('support'),
                            dependencies : [forti_cli_dep, gtest_dep],
                            implicit_include_directories : false),

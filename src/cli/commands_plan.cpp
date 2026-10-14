@@ -271,7 +271,8 @@ namespace forti::cli {
             if (context.output.format == Format::text && !args.flag("yes") && ::isatty(STDOUT_FILENO) == 1) {
                 json shown = engine::Engine::envelope([&] { return engine::show_plan(context.engine, id); });
                 if (!shown.value("ok", false)) return emit(context.output, shown);
-                render_plan(*context.output.out, style, shown["data"]);
+                // The person approving reads this: escape anything that could redraw the terminal.
+                render_plan(*context.output.out, style, printable_json(shown["data"]));
                 *context.output.out << "\nApprove plan " << id << "? [y/N] " << std::flush;
                 std::string answer;
                 if (!std::getline(std::cin, answer) || !(answer == "y" || answer == "Y" || answer == "yes")) {
@@ -321,9 +322,10 @@ namespace forti::cli {
             // A stopped apply still carries its execution record: show it before the error.
             if (context.output.format == Format::text && !envelope.value("ok", false)) {
                 const json& details = envelope["error"].contains("details") ? envelope["error"]["details"] : json();
-                if (details.is_object() && details.contains("operations")) render_record(*context.output.err, style_for(STDERR_FILENO), details);
-                if (details.is_object() && details.contains("approve_command"))
-                    *context.output.err << "approve with: " << details["approve_command"].get<std::string>() << "\n";
+                if (details.is_object() && details.contains("operations"))
+                    render_record(*context.output.err, style_for(STDERR_FILENO), printable_json(details));
+                if (details.is_object() && details.contains("approve_command") && details["approve_command"].is_string())
+                    *context.output.err << "approve with: " << printable(details["approve_command"].get<std::string>()) << "\n";
             }
             return emit(context.output, envelope, [&](std::ostream& out, const json& data, const json&) {
                 out << style.bold(std::format("Applied plan {}", data.value("plan_id", ""))) << std::format(
