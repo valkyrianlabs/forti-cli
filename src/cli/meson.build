@@ -1,6 +1,10 @@
 cli_sources = files(
     'args.cpp',
     'commands.cpp',
+    'commands_install.cpp',
+    'commands_plan.cpp',
+    'commands_read.cpp',
+    'commands_setup.cpp',
     'main.cpp',
     'output.cpp',
 )

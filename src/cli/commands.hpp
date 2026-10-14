@@ -11,6 +11,7 @@
 
 #include <forti/engine/engine.hpp>
 
+#include <functional>
 #include <string_view>
 #include <vector>
 
@@ -32,7 +33,17 @@ namespace forti::cli {
     // Options every command accepts.
     OptionSpec global_options();
 
+    // Every command, in help order. Assembled from one function per workstream so each command
+    // group lives in its own file.
     const std::vector<Command>& commands();
+
+    std::vector<Command> setup_commands();     // commands_setup.cpp: configure, doctor, profiles
+    std::vector<Command> read_commands();      // commands_read.cpp: devices, discover, get
+    std::vector<Command> plan_commands();      // commands_plan.cpp: plan, apply
+    std::vector<Command> install_commands();   // commands_install.cpp: install, mcp
+
+    // Runs an engine operation and emits its envelope (text or --json); returns the exit status.
+    int run_engine(Context& context, const std::function<nlohmann::json()>& operation, const Renderer& render = {});
 
     // Integer option value; throws Failure(usage).
     std::size_t to_count(std::string_view name, const std::string& text);
