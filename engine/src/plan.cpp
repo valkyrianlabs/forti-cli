@@ -362,6 +362,12 @@ namespace forti::engine {
             json details = detail::redact(failure.details());
             // Top-level "key" in engine details is the object's name (a table key), not an attribute.
             if (auto it = failure.details().find("key"); it != failure.details().end()) details["key"] = *it;
+            // So is each operation's "key" in an apply's execution record: the record must still say which
+            // objects a stopped apply touched.
+            if (auto ops = failure.details().find("operations"); ops != failure.details().end() && ops->is_array())
+                for (std::size_t i = 0; i < ops->size() && i < details["operations"].size(); ++i)
+                    if (auto key = (*ops)[i].find("key"); (*ops)[i].is_object() && key != (*ops)[i].end())
+                        details["operations"][i]["key"] = *key;
             std::string message = failure.what();
             if (auto it = failure.details().find("attribute"); it != failure.details().end() && it->is_string() &&
                                                                  detail::sensitive_name(it->get<std::string>()))

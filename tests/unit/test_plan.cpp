@@ -485,6 +485,10 @@ TEST_F(PlanTest, ApiErrorStopsWithPartialFailure) {
     EXPECT_EQ(ops[1]["error"]["details"]["fortios_error"], -651);
     EXPECT_FALSE(ops[1].contains("changed_after_failure"));
     EXPECT_EQ(ops[2]["status"], "not_attempted");
+    // Object names are not secrets: the record of a stopped apply says which objects it touched.
+    EXPECT_EQ(ops[0]["key"], "a");
+    EXPECT_EQ(ops[1]["key"], "b");
+    EXPECT_EQ(ops[2]["key"], "c");
     EXPECT_EQ(writes(), 2u);
     // The rollback undoes only what changed: operation 1.
     std::string rollback = result["error"]["details"]["rollback"]["plan_id"];
