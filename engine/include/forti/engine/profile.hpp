@@ -63,6 +63,7 @@ namespace forti::engine {
         SecretRef api_key;         // default: Source::store
         SecretRef cert_password;   // default: none
         Mode mode = Mode::read_only;
+        bool backup_before_critical = true;   // critical-risk plans take a config backup first (refused if it fails)
         unsigned connect_timeout_ms = 5000;
         unsigned timeout_ms = 30000;
 

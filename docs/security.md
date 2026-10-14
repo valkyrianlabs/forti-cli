@@ -8,6 +8,7 @@
 | API keys and certificate passwords (secret-store source) | macOS: login Keychain (service `forti`). Elsewhere: `credentials/` | Keychain ACL; or 0600 files that forti refuses to read when group or others can access them |
 | API keys (env / command source) | not stored | only the variable name or the command's argv is saved |
 | Plans, approvals, audit log | state directory | 0600 |
+| Pre-change configuration backups (critical plans) | `state/backups/<plan id>.conf` | 0600 file in a 0700 directory, streamed to disk (never buffered whole), never logged or printed |
 
 Secrets never appear in arguments, output, logs, plans, audit records, error messages or the MCP
 client configuration. `forti profile show` and `forti doctor` report where a key comes from and
@@ -46,15 +47,28 @@ These safeguards apply in every mode that writes, autonomous included:
 - execution in order without retries, stopping at the first failure, with each change verified by
   re-reading it;
 - a generated rollback plan and an audit record (`audit.jsonl`) for every apply;
-- after a critical-risk change (management access, routing, interfaces, admins, HA, VDOMs, global
-  settings), a fresh connection probe that stops execution if management connectivity is lost.
+- before a critical-risk plan (management access, routing, interfaces, admins, HA, VDOMs, global
+  settings), a full configuration backup. If the backup cannot be taken, the plan does not run.
+  The profile setting `"backup_before_critical": false` turns this off;
+- after each critical-risk change, a fresh connection probe that stops execution if management
+  connectivity is lost.
+
+**Recovery aids are not guaranteed recovery.** The rollback plan and the configuration backup both
+need a working management path to the device. If a change cuts off management access, forti cannot
+undo it. You need an independent path: the console port, an out-of-band management interface, or a
+device-side automatic revert. Plan for that before letting an agent change critical settings.
+
+A configuration backup holds the device's complete configuration, including FortiOS-encrypted
+secrets. Treat it like a credential: keep the state directory on an encrypted disk (FileVault or
+LUKS), and delete backups you no longer need (`rm ~/.local/state/forti/backups/<plan id>.conf`).
 
 ### Choosing autonomous mode
 
 Autonomous mode suits a capable agent doing real administration where approving every plan would
 defeat the purpose. With it, **the agent can do anything the FortiOS API account may do**, including
-changes that cut off your own management access. The safeguards above make changes visible,
-verified and reversible, but they do not limit what may be changed. That limit is the account:
+changes that cut off your own management access. The safeguards above make changes visible
+and verified, and reversible while the management path works, but they do not limit what may be
+changed. That limit is the account:
 
 - Give the API user an admin profile that grants only what the agent manages (for example
   read-write on firewall objects and policy, read-only on system). Avoid `super_admin`.
