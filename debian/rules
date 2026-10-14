@@ -1,0 +1,29 @@
+#!/usr/bin/make -f
+# forti (forti-cli) against the system forti-api (libforti-api-dev): --wrap-mode=nodownload keeps the
+# subprojects/forti-api.wrap fallback from ever fetching sources during a package build, so a missing
+# or too-old libforti-api-dev fails the build instead of silently vendoring another SDK.
+#
+# Release profile (.claude/context/release.md, "Build profile"): debhelper configures meson with
+# buildtype=plain and dpkg-buildflags (hardening on), so the size optimization meson.build sets for
+# its own release builds is applied here as -Os in place of dpkg's -O2, and NDEBUG explicitly
+# (b_ndebug=if-release does not fire for buildtype=plain). meson.build adds -ffunction-sections
+# -fdata-sections -Wl,--gc-sections for non-debug ELF builds. debhelper strips into forti-cli-dbgsym.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_CXXFLAGS_MAINT_STRIP = -O2
+export DEB_CXXFLAGS_MAINT_APPEND = -Os
+
+include /usr/share/dpkg/architecture.mk
+
+%:
+	dh $@ --buildsystem=meson
+
+override_dh_auto_configure:
+	dh_auto_configure -- --wrap-mode=nodownload -Db_ndebug=true \
+		-Dtests=$(if $(filter nocheck,$(DEB_BUILD_OPTIONS) $(DEB_BUILD_PROFILES)),disabled,enabled)
+
+# The network-free suite only (there is no other today; this keeps it that way if one is added).
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	meson test -C obj-$(DEB_HOST_GNU_TYPE) --suite unit --print-errorlogs
+endif

@@ -1,0 +1,82 @@
+# vl-release repository contract: https://github.com/valkyrianlabs/vl-release
+# `vlr help config` documents every key. Release CI (.github/workflows/release.yml) only calls `vlr`
+# commands. How to cut a release and what it needs: .claude/context/release.md.
+schema_version = 1
+
+[tool]
+requires = ">=0.5,<1"
+
+[project]
+name = "forti-cli"
+package = "forti-cli"
+repository = "valkyrianlabs/forti-cli"
+
+[version]
+canonical = "VERSION"
+targets = [{ kind = "meson", path = "meson.build" }]
+
+[release]
+branch = "main"
+
+[debian]
+distribution = "unstable"
+urgency = "medium"
+maintainer = "Cooper Larson <cooper@valkyrianlabs.com>"
+# build-deb copies the work tree, not a Git commit: never let credentials, local tooling state or a
+# co-development forti-api checkout (subprojects/forti-api) into the build tree. The package builds
+# against the system libforti-api-dev (debian/rules: --wrap-mode=nodownload).
+# dpkg-buildpackage defaults to one job; -J4 lets debhelper run four (each engine shard TU needs ~2 GB
+# with GCC, and the CI container is capped at 12 GB).
+build_command = ["dpkg-buildpackage", "-us", "-uc", "-b", "-J4"]
+build_excludes = [".env", ".certs", ".idea", ".claude", ".agents", ".DS_Store", ".cache", "subprojects/forti-api", "compile_commands.json"]
+
+[[debian.packages]]
+name = "forti-cli"
+# One architecture per package contract (vl-release 0.5): amd64 only until vl-release accepts one
+# .deb per architecture of the same package (.claude/context/release.md, "Multi-architecture").
+architecture = "amd64"
+required_paths = [
+  "usr/bin/forti",
+  "usr/share/man/man1/forti.1.gz",
+  "usr/share/doc/forti-cli/copyright",
+]
+# An executable package: the engine is internal and static, so no headers, libraries or pkg-config
+# files ship; and never credentials or certificates.
+forbidden_paths = [
+  "usr/include/*",
+  "usr/lib/*.a",
+  "usr/lib/*.so*",
+  "usr/lib/*pkgconfig/*",
+  "usr/share/pkgconfig/*",
+  "*.env",
+  "*/.env",
+  "*.p12",
+  "*.pfx",
+  "*.pem",
+  "*.cer",
+  "*.crt",
+  "*.key",
+  "*.token",
+]
+
+# The ValkyrianLabs APT repository (Nexus). Upload URL and credentials come from the org-level
+# NEXUS_APT_REPO variable and NEXUS_USER / NEXUS_PASSWORD secrets; RELEASE_PUBLISH_MODE=nexus enables
+# uploads (.github/workflows/release.yml).
+[publish.apt]
+repository_url = "https://apt.valkyrianlabs.com"
+suite = "stable"
+components = ["main"]
+architectures = ["amd64"]
+
+# The Homebrew formula builds from this reproducible archive of the prepared tree (tracked files
+# only). It needs no vendored dependency: forti-api comes from the forti-api formula
+# (--wrap-mode=nodownload), so subprojects/ carries only the wrap file, exactly as in Git.
+[source_archive]
+name = "{package}-{version}.tar.gz"
+exclude = [".claude", ".agents"]
+
+[homebrew]
+formula = "packaging/homebrew/forti-cli.rb"
+tap = "valkyrianlabs/homebrew-tap"
+tap_path = "Formula/forti-cli.rb"
+source = "release-asset"
