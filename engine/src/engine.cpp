@@ -8,6 +8,7 @@
 #include <forti_api/monitor.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <fstream>
 #include <set>
@@ -109,7 +110,12 @@ namespace forti::engine {
             static constexpr std::array reserved = {"vdom", "filter", "format", "start", "count", "action",
                                                     "access_token", "skip", "with_meta"};
             for (auto param = it->begin(); param != it->end(); ++param) {
-                if (std::ranges::find(reserved, std::string_view(param.key())) != reserved.end())
+                // Compared case-insensitively and without surrounding blanks: whether FortiOS folds the
+                // case of parameter names is not documented, so "Action" must not slip past "action".
+                std::string name;
+                for (char c: param.key())
+                    if (c != ' ' && c != '\t') name += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (name.empty() || std::ranges::find(reserved, std::string_view(name)) != reserved.end())
                     throw Failure(Code::usage, std::format("query parameter \"{}\" cannot be set through params", param.key()));
                 const auto& value = param.value();
                 if (value.is_string()) query.set(param.key(), value.get<std::string>());

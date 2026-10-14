@@ -331,16 +331,6 @@ namespace forti::engine {
             return resource;
         }
 
-        std::string summarize(const json& operations, const json& device, Risk risk) {
-            std::map<std::string, int> counts;
-            for (const auto& op: operations) ++counts[op.value("op", "")];
-            std::string parts;
-            for (const char* op: {"create", "update", "delete", "action"})
-                if (counts[op]) parts += std::format("{}{} {}", parts.empty() ? "" : ", ", counts[op], op);
-            return std::format("{} operation{} on {} ({}): {}; risk {}", operations.size(), operations.size() == 1 ? "" : "s",
-                               device.value("profile", ""), device.value("host", ""), parts, detail::to_string(risk));
-        }
-
         json make_plan(json device, json operations, detail::Clock::time_point time, std::string kind,
                        std::string rollback_of = {}, std::string id = {}) {
             json plan = {{"format", detail::plan_format},
@@ -352,7 +342,7 @@ namespace forti::engine {
             if (!rollback_of.empty()) plan["rollback_of"] = rollback_of;
             Risk risk = detail::plan_risk(plan);
             plan["risk"] = detail::to_string(risk);
-            plan["summary"] = summarize(plan["operations"], plan["device"], risk);
+            plan["summary"] = detail::summarize(plan);
             plan["digest"] = detail::plan_digest(plan);
             return plan;
         }
@@ -750,6 +740,16 @@ namespace forti::engine {
                     if (!error.before_send())
                         done.record["note"] = "the request may have reached the device; its effect is unknown";
                     stop = true;
+                } catch (const fortiapi::DecodeError&) {
+                    // The device answered 2xx, so the request was accepted, but the reply could not be
+                    // read: the effect is unknown, not "failed".
+                    done.changed = true;
+                    done.status = "outcome_unknown";
+                    done.record["sent"] = true;
+                    done.record["error"] = redacted_failure(translate(std::current_exception())).to_json();
+                    done.record["note"] = "the device accepted the request (HTTP 2xx) but its reply could not be "
+                                          "decoded; its effect is unknown";
+                    stop = true;
                 } catch (...) {
                     done.status = "failed";
                     done.changed = done.sent;   // until the re-read below says otherwise
@@ -826,7 +826,9 @@ namespace forti::engine {
                 done.record["status"] = done.status;
 
                 // Management connectivity after a critical change that may have reached the device.
-                if (done.sent && resource.kind != Kind::monitor && detail::risk_of(resource) == Risk::critical) {
+                // Monitor actions included: a critical one (reboot, restore, upgrade) is exactly when the
+                // management path is most likely gone.
+                if (done.sent && detail::risk_of(resource) == Risk::critical) {
                     json result = probe(options_, *secrets_, profile, device.value("serial", ""), vdom);
                     done.record["management_probe"] = result;
                     if (!result.value("ok", false)) {

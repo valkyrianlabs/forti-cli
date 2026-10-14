@@ -3,6 +3,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <fstream>
 #include <map>
@@ -43,17 +44,40 @@ namespace forti::engine {
 
             std::optional<std::string> get(std::string_view account) override {
                 auto path = file(account);
+                // Open first, then check what was opened (fstat): no window between the check and the
+                // read in which the file could be swapped. O_NOFOLLOW refuses a symlink; O_NONBLOCK keeps
+                // a FIFO planted in its place from blocking the open.
+                int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+                if (fd < 0) {
+                    if (errno == ENOENT) return std::nullopt;
+                    if (errno == ELOOP)
+                        throw Failure(Code::config, std::format("{} is a symbolic link; the credential file must be a "
+                                                                "regular file", path.string()));
+                    throw Failure(Code::config, std::format("cannot open {}: {}", path.string(), std::strerror(errno)));
+                }
+                struct Closer {
+                    int fd;
+                    ~Closer() { ::close(fd); }
+                } closer{fd};
                 struct stat info{};
-                if (::lstat(path.c_str(), &info) != 0) return std::nullopt;
-                if (!S_ISREG(info.st_mode))
+                if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode))
                     throw Failure(Code::config, std::format("{} is not a regular file", path.string()));
+                if (info.st_uid != ::geteuid())
+                    throw Failure(Code::config, std::format("{} is owned by another user", path.string()));
                 if (info.st_mode & (S_IRWXG | S_IRWXO))
                     throw Failure(Code::config, std::format("{} is readable by other users; run chmod 600 on it",
                                                             path.string()));
-                std::ifstream in(path);
-                std::stringstream text;
-                text << in.rdbuf();
-                return trim_line(text.str());
+                std::string text;
+                char buffer[4096];
+                for (ssize_t n; (n = ::read(fd, buffer, sizeof buffer)) != 0;) {
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        throw Failure(Code::config, std::format("cannot read {}", path.string()));
+                    }
+                    text.append(buffer, static_cast<std::size_t>(n));
+                    if (text.size() > 65536) throw Failure(Code::config, std::format("{} is too large", path.string()));
+                }
+                return trim_line(std::move(text));
             }
 
             void put(std::string_view account, std::string_view secret) override {
@@ -91,21 +115,35 @@ namespace forti::engine {
         };
 
         // Runs argv (no shell) and returns the first line of stdout. stderr is inherited so helper
-        // prompts (e.g. a password manager unlock) reach the user.
+        // prompts (e.g. a password manager unlock) reach the user; helpers that ask for input do so on
+        // /dev/tty. stdin is /dev/null: in forti-mcp, stdin is the JSON-RPC stream, and a helper that
+        // read it would swallow protocol messages. Only fds 0-2 are inherited (no plan files, sockets
+        // or the MCP protocol descriptor).
         std::string run_command(const std::vector<std::string>& argv, std::string_view account) {
             int pipe_fds[2];
             if (::pipe(pipe_fds) != 0) throw Failure(Code::config, "cannot create a pipe for the credential command");
+            ::fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC);
             posix_spawn_file_actions_t actions;
             posix_spawn_file_actions_init(&actions);
+            posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
             posix_spawn_file_actions_adddup2(&actions, pipe_fds[1], STDOUT_FILENO);
-            posix_spawn_file_actions_addclose(&actions, pipe_fds[0]);
             posix_spawn_file_actions_addclose(&actions, pipe_fds[1]);
+            posix_spawnattr_t attributes;
+            posix_spawnattr_init(&attributes);
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+            // macOS: only descriptors named by a file action survive, so stderr is named explicitly.
+            posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+            posix_spawn_file_actions_addinherit_np(&actions, STDERR_FILENO);
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+            posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+#endif
             std::vector<char*> args;
             for (const auto& arg: argv) args.push_back(const_cast<char*>(arg.c_str()));
             args.push_back(nullptr);
             pid_t pid = 0;
-            int spawned = ::posix_spawnp(&pid, args[0], &actions, nullptr, args.data(), environ);
+            int spawned = ::posix_spawnp(&pid, args[0], &actions, &attributes, args.data(), environ);
             posix_spawn_file_actions_destroy(&actions);
+            posix_spawnattr_destroy(&attributes);
             ::close(pipe_fds[1]);
             if (spawned != 0) {
                 ::close(pipe_fds[0]);

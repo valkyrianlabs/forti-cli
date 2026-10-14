@@ -90,6 +90,8 @@ namespace forti::engine::detail {
     // A copy with every sensitive attribute's value (at any depth) replaced by "<redacted>". Apply it to
     // attribute-bearing JSON only (objects, diffs, wire bodies, error details), not to whole records.
     json redact(const json& value, const std::set<std::string, std::less<>>& extra = {});
+    // "2 operations on lab (fortigate.test): 1 create, 1 update; risk elevated", from digest-covered fields.
+    std::string summarize(const json& plan);
     // A plan as shown to people and agents: before/after objects (only with `full`), diffs and wire
     // bodies redacted. The stored file keeps real values, because apply needs them.
     json plan_view(const json& plan, bool full = false);
