@@ -46,6 +46,31 @@ namespace forti::engine::detail {
                 std::string_view("cmdb/log"),                std::string_view("cmdb/authentication/"),
         };
 
+        // Monitor actions that can restart the device, replace its configuration or firmware, or cut a
+        // management path: critical, so apply probes management connectivity after them. The rest stay
+        // elevated (forti-api gap G6: monitor side effects are not catalogued). Routes from the 7.4.8
+        // GUI catalog (forti-api codegen/catalog/7.4.8/gui-api.json) plus the documented firmware and HA
+        // endpoints. A prefix ending in '/' or '-' covers everything below it.
+        constexpr std::array critical_monitor_prefixes = {
+                std::string_view("monitor/system/os/"),                 // reboot, shutdown
+                std::string_view("monitor/system/config/restore"),
+                std::string_view("monitor/system/config/reload"),
+                std::string_view("monitor/system/config/revert"),
+                std::string_view("monitor/system/config-revision/"),
+                std::string_view("monitor/system/firmware/"),           // upgrade
+                std::string_view("monitor/system/factory-reset"),
+                std::string_view("monitor/system/change-password"),
+                std::string_view("monitor/system/admin/change-vdom-mode"),
+                std::string_view("monitor/system/disconnect-admins/"),
+                std::string_view("monitor/system/ha-"),                 // ha-peer, ha-checksums, ...
+                std::string_view("monitor/system/interface/"),
+                std::string_view("monitor/system/vmlicense/"),          // a license upload reboots a VM
+                std::string_view("monitor/system/certificate/"),
+                std::string_view("monitor/vpn/ike/clear"),
+                std::string_view("monitor/vpn/ssl/delete"),
+                std::string_view("monitor/firewall/session/close-all"),
+        };
+
         bool matches(std::string_view path, std::string_view prefix) {
             if (!path.starts_with(prefix)) return false;
             if (prefix.ends_with('/') || prefix.ends_with('.')) return true;
@@ -76,7 +101,15 @@ namespace forti::engine::detail {
     }
 
     Risk risk_of(const Resource& resource) {
-        if (resource.kind == Kind::monitor) return Risk::elevated;
+        if (resource.kind == Kind::monitor) {
+            for (std::string_view prefix: critical_monitor_prefixes) {
+                if (!resource.path.starts_with(prefix)) continue;
+                if (prefix.ends_with('/') || prefix.ends_with('-') || resource.path.size() == prefix.size() ||
+                    resource.path[prefix.size()] == '/')
+                    return Risk::critical;
+            }
+            return Risk::elevated;
+        }
         auto has = [&](const auto& prefixes) {
             return std::ranges::any_of(prefixes, [&](std::string_view prefix) { return matches(resource.path, prefix); });
         };

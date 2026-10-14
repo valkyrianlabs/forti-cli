@@ -10,9 +10,21 @@
 | Plans, approvals, audit log | state directory | 0600 |
 | Pre-change configuration backups (critical plans) | `state/backups/<plan id>.conf` | 0600 file in a 0700 directory, streamed to disk (never buffered whole), never logged or printed |
 
-Secrets never appear in arguments, output, logs, plans, audit records, error messages or the MCP
-client configuration. `forti profile show` and `forti doctor` report where a key comes from and
-whether it resolves, never its value. `forti configure` refuses a key as an argument value.
+forti's own credentials (API keys, certificate passwords) never appear in arguments, output, logs,
+plans, audit records, error messages or the MCP client configuration. `forti profile show` and
+`forti doctor` report where a key comes from and whether it resolves, never its value.
+`forti configure` refuses a key as an argument value.
+
+Device secrets are a different matter. Plan diffs, wire previews, audit records and error details
+redact attributes whose names mark them as secret (password, psk, secret, private-key, key-string,
+api-key, `*-key`, ...; checked against every attribute the FortiOS 7.4.8 schema types as a password).
+**Reads are not redacted:** `forti get` and `forti_read` return objects as FortiOS sends them, and
+FortiOS includes stored secrets in its encrypted form (`ENC ...`). Admin passwords are hashes, but
+pre-shared keys and RADIUS/LDAP/TACACS+ secrets are reversibly encrypted, by default with a key built
+into FortiOS (CVE-2019-6693) unless `private-data-encryption` is enabled on the device. Treat those
+values as secrets: through MCP they reach the AI model and its provider. Narrow reads of
+`system/admin`, `vpn.ipsec/*`, `user/*` and similar with `fields`. Stored plan files keep the real
+values they will write (apply needs them), which is why they are 0600.
 
 ## TLS is always verified
 
@@ -80,3 +92,20 @@ changed. That limit is the account:
 
 `guarded` is a middle ground: the agent prepares and validates changes and a person approves each
 plan. `read-only` is the default and suits monitoring, auditing and planning.
+
+### What a mode does and does not stop
+
+A mode governs what the **forti-mcp tools** can do: nothing an MCP client sends can change a mode,
+approve a plan, or apply a plan in a read-only profile. A mode is not a barrier against software
+running as your user account. An agent that can also run shell commands as you (Claude Code's Bash
+tool, Codex's shell) could run `forti plan approve` or `forti configure --mode autonomous`, or edit
+`config.json` and the approval files, exactly as you can. forti uses no passphrase or
+terminal-only approval, by design. For guarded mode to mean "a person approved this":
+
+- keep the client's shell permission prompts on for `forti` commands, or deny them outright (Claude
+  Code: `"permissions": {"deny": ["Bash(forti plan approve:*)", "Bash(forti configure:*)",
+  "Bash(forti profile:*)"]}` in your settings);
+- read the plan (`forti plan show <id>`, which `forti plan approve` prints first) before you approve it.
+
+The installed agent skill tells agents never to approve plans or change modes, but that instruction
+is not enforcement. The FortiOS account's privileges remain the boundary that holds in every case.

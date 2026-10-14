@@ -168,8 +168,20 @@ namespace forti::cli {
             return text;
         }
 
+        void render_plans_raw(std::ostream& out, const std::vector<inst::TargetPlan>& plans, const inst::Context& context,
+                              bool show_actions);
+
+        // Messages quote entries read from project files (.mcp.json, .codex/config.toml) that a
+        // repository controls: escape terminal controls, keep the line structure.
         void render_plans(std::ostream& out, const std::vector<inst::TargetPlan>& plans, const inst::Context& context,
                           bool show_actions) {
+            std::ostringstream text;
+            render_plans_raw(text, plans, context, show_actions);
+            out << printable(text.str(), true);
+        }
+
+        void render_plans_raw(std::ostream& out, const std::vector<inst::TargetPlan>& plans, const inst::Context& context,
+                              bool show_actions) {
             for (const auto& plan: plans) {
                 out << std::format("{} ({}): {}", plan.target.client->display_name(), inst::to_string(plan.target.scope),
                                    plan.state);

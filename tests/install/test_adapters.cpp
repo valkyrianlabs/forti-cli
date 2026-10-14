@@ -362,7 +362,8 @@ TEST_F(Adapters, LocateFortiMcp) {
 }
 
 TEST_F(Adapters, ProfileNamesAreValidated) {
-    EXPECT_NO_THROW(validate_profile_name("lab-1.home_2"));
+    EXPECT_NO_THROW(validate_profile_name("lab-1_home_2"));
+    EXPECT_THROW(validate_profile_name("lab.home"), forti::engine::Failure);   // forti-mcp would refuse it
     EXPECT_THROW(validate_profile_name("--version"), forti::engine::Failure);
     EXPECT_THROW(validate_profile_name("a b"), forti::engine::Failure);
     EXPECT_THROW(validate_profile_name(""), forti::engine::Failure);

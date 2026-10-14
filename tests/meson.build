@@ -7,6 +7,7 @@ if gtest_dep.found()
                             'unit/test_read.cpp',
                             'unit/test_profiles.cpp',
                             'unit/test_plan.cpp',
+                            'unit/test_security.cpp',
                             # test_plan.cpp also checks engine internals (SHA-256 vectors, digests, redaction).
                             include_directories : include_directories('support', '../engine/src'),
                             dependencies : [forti_engine_dep, gtest_dep],
@@ -19,6 +20,7 @@ if gtest_dep.found()
                            'unit/test_cli.cpp',
                            'unit/test_setup.cpp',
                            'unit/test_keychain.cpp',
+                           'unit/test_cli_security.cpp',
                            include_directories : include_directories('support'),
                            dependencies : [forti_cli_dep, gtest_dep],
                            implicit_include_directories : false),
@@ -29,6 +31,7 @@ if gtest_dep.found()
     test('install', executable('installTests',
                                'install/test_files.cpp',
                                'install/test_adapters.cpp',
+                               'install/test_install_security.cpp',
                                dependencies : [forti_install_dep, gtest_dep],
                                implicit_include_directories : false),
          suite : 'unit', timeout : 120)

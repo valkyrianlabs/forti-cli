@@ -1,7 +1,9 @@
 #include <forti/engine/error.hpp>
 #include <forti/engine/profile.hpp>
 
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <fstream>
 #include <sstream>
@@ -30,7 +32,13 @@ namespace forti::engine {
 
         // $<override> | $<xdg>/forti | ~/<fallback>/forti
         fs::path locate(const char* override_var, const char* xdg_var, const char* fallback) {
-            if (auto value = env(override_var); !value.empty()) return value;
+            if (auto value = env(override_var); !value.empty()) {
+                // A relative override would make the profiles, credentials and modes depend on the
+                // working directory (a project directory an agent or a repository controls).
+                if (!fs::path(value).is_absolute())
+                    throw Failure(Code::config, std::format("{} must be an absolute path, not \"{}\"", override_var, value));
+                return value;
+            }
             if (auto value = env(xdg_var); !value.empty() && fs::path(value).is_absolute()) return fs::path(value) / "forti";
             return home() / fallback / "forti";
         }
@@ -191,11 +199,40 @@ namespace forti::engine {
 
     ProfileSet ProfileStore::load() const {
         auto file = paths_.config_file();
-        std::ifstream in(file);
-        if (!in) return {};
-        std::stringstream text;
-        text << in.rdbuf();
-        auto json = nlohmann::json::parse(text.str(), nullptr, false);
+        // config.json decides each profile's mode and may name a credential command that forti runs:
+        // refuse one that another user owns or can write (like OpenSSH's StrictModes), checked on the
+        // descriptor that is then read.
+        int fd = ::open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0) {
+            if (errno == ENOENT || errno == ENOTDIR) return {};
+            throw Failure(Code::config, std::format("cannot read {}: {}", file.string(), std::strerror(errno)));
+        }
+        struct Closer {
+            int fd;
+            ~Closer() { ::close(fd); }
+        } closer{fd};
+        struct stat info{};
+        if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode))
+            throw Failure(Code::config, std::format("{} is not a regular file", file.string()));
+        if (info.st_uid != ::geteuid())
+            throw Failure(Code::config, std::format("{} is owned by another user", file.string()));
+        if (info.st_mode & (S_IWGRP | S_IWOTH))
+            throw Failure(Code::config, std::format("{} is writable by other users; run chmod 600 on it", file.string()));
+        struct stat dir{};
+        if (::stat(paths_.config.c_str(), &dir) == 0 && (dir.st_mode & (S_IWGRP | S_IWOTH)) && !(dir.st_mode & S_ISVTX))
+            throw Failure(Code::config, std::format("{} is writable by other users; run chmod 700 on it",
+                                                    paths_.config.string()));
+        std::string text;
+        char buffer[8192];
+        for (ssize_t n; (n = ::read(fd, buffer, sizeof buffer)) != 0;) {
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                throw Failure(Code::config, std::format("cannot read {}", file.string()));
+            }
+            text.append(buffer, static_cast<std::size_t>(n));
+            if (text.size() > (16u << 20)) throw Failure(Code::config, std::format("{} is too large", file.string()));
+        }
+        auto json = nlohmann::json::parse(text, nullptr, false);
         if (json.is_discarded()) throw Failure(Code::config, std::format("{}: not valid JSON", file.string()));
         return ProfileSet::from_json(json);
     }

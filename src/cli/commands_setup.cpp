@@ -1008,7 +1008,7 @@ namespace forti::cli {
                                        {"details", data}}}};
             if (context.output.format == Format::json) return emit(context.output, failure);
             emit(context.output, engine::ok(data), render_checks);
-            *context.output.err << std::format("forti: doctor: {}\n", failure["error"]["message"].get<std::string>());
+            *context.output.err << std::format("forti: doctor: {}\n", printable(failure["error"]["message"].get<std::string>()));
             return exit_status(first_code);
         }
 

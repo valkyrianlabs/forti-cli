@@ -1,4 +1,5 @@
 #include "ops.hpp"
+#include "plan_store.hpp"
 #include "policy.hpp"
 #include "session.hpp"
 
@@ -8,6 +9,7 @@
 #include <forti_api/monitor.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <fstream>
 #include <set>
@@ -109,7 +111,12 @@ namespace forti::engine {
             static constexpr std::array reserved = {"vdom", "filter", "format", "start", "count", "action",
                                                     "access_token", "skip", "with_meta"};
             for (auto param = it->begin(); param != it->end(); ++param) {
-                if (std::ranges::find(reserved, std::string_view(param.key())) != reserved.end())
+                // Compared case-insensitively and without surrounding blanks: whether FortiOS folds the
+                // case of parameter names is not documented, so "Action" must not slip past "action".
+                std::string name;
+                for (char c: param.key())
+                    if (c != ' ' && c != '\t') name += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (name.empty() || std::ranges::find(reserved, std::string_view(name)) != reserved.end())
                     throw Failure(Code::usage, std::format("query parameter \"{}\" cannot be set through params", param.key()));
                 const auto& value = param.value();
                 if (value.is_string()) query.set(param.key(), value.get<std::string>());
@@ -229,6 +236,7 @@ namespace forti::engine {
                     throw Failure(Code::usage, std::format("{}: no live schema (monitor endpoints have none)", resource.name()));
                 const Profile& profile = this->profile(text(request, "profile"));
                 live = resource.ops->schema(client(profile));
+                detail::check_reply_depth(live, resource.name());
             }
             auto live_child = [&](std::string_view name) -> json {
                 if (!live.is_object()) return nullptr;
@@ -272,6 +280,7 @@ namespace forti::engine {
         if (what == "capabilities") {
             const Profile& profile = this->profile(text(request, "profile"));
             json body = client(profile).get(fortiapi::Monitor::path("system/status"));
+            detail::check_reply_depth(body, "monitor/system/status");
             json device = device_meta(body);
             if (auto results = body.find("results"); results != body.end() && results->is_object())
                 for (const char* key: {"hostname", "model", "model_name", "model_number"})
@@ -304,6 +313,7 @@ namespace forti::engine {
         }
 
         std::string key = text(request, "key");
+        if (!key.empty()) detail::validate_key(key, resource.name());
         if (!key.empty() && resource.kind != Kind::table)
             throw Failure(Code::usage, std::format("{} is a {}: it has no keyed objects", resource.name(), to_string(resource.kind)));
 
@@ -344,6 +354,7 @@ namespace forti::engine {
         json body;
         try {
             body = client(profile).get(api_path, query);
+            detail::check_reply_depth(body, api_path);
         } catch (const fortiapi::ApiError& error) {
             if (key.empty() || !error.not_found()) throw;
             throw Failure(Code::not_found, std::format("{} \"{}\" not found", resource.name(), key),

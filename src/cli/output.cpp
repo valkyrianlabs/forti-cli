@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <format>
 #include <iostream>
@@ -155,6 +156,63 @@ namespace forti::cli {
 
     }  // namespace
 
+    std::string printable(std::string_view text, bool keep_newlines) {
+        std::string out;
+        out.reserve(text.size());
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            auto c = static_cast<unsigned char>(text[i]);
+            if (c < 0x20 || c == 0x7F) {
+                if (c == '\n' && keep_newlines) out += '\n';
+                else if (c == '\n') out += "\\n";
+                else if (c == '\t') out += "\\t";
+                else if (c == '\r') out += "\\r";
+                else out += std::format("\\x{:02x}", c);
+                continue;
+            }
+            // Multi-byte sequences: U+0080-U+009F (C1, e.g. 8-bit CSI), U+061C, U+200E-U+200F,
+            // U+2028-U+202E, U+2066-U+2069. Input is valid UTF-8 (it came through a JSON parser);
+            // anything else passes through byte by byte.
+            std::uint32_t cp = 0;
+            std::size_t length = 0;
+            if (c >= 0xC2 && c <= 0xDF && i + 1 < text.size()) {
+                cp = ((c & 0x1Fu) << 6) | (static_cast<unsigned char>(text[i + 1]) & 0x3Fu);
+                length = 2;
+            } else if (c >= 0xE0 && c <= 0xEF && i + 2 < text.size()) {
+                cp = ((c & 0x0Fu) << 12) | ((static_cast<unsigned char>(text[i + 1]) & 0x3Fu) << 6) |
+                     (static_cast<unsigned char>(text[i + 2]) & 0x3Fu);
+                length = 3;
+            }
+            bool control = length != 0 && ((cp >= 0x80 && cp <= 0x9F) || cp == 0x061C || cp == 0x200E || cp == 0x200F ||
+                                           (cp >= 0x2028 && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069));
+            if (control) {
+                out += std::format("\\u{:04x}", cp);
+                i += length - 1;
+                continue;
+            }
+            out += static_cast<char>(c);
+        }
+        return out;
+    }
+
+    json printable_json(const json& value) {
+        if (value.is_string()) {
+            const auto& text = value.get_ref<const std::string&>();
+            std::string safe = printable(text);
+            return safe == text ? value : json(std::move(safe));
+        }
+        if (value.is_array()) {
+            json out = json::array();
+            for (const auto& item: value) out.push_back(printable_json(item));
+            return out;
+        }
+        if (value.is_object()) {
+            json out = json::object();
+            for (auto it = value.begin(); it != value.end(); ++it) out[printable(it.key())] = printable_json(it.value());
+            return out;
+        }
+        return value;
+    }
+
     std::size_t display_width(std::string_view text) {
         std::size_t width = 0;
         for (char c: text)
@@ -289,11 +347,15 @@ namespace forti::cli {
         return engine::exit_code(engine::parse_code(code).value_or(engine::Code::internal));
     }
 
-    int emit(const Output& output, const json& envelope, const Renderer& render) {
-        bool ok = envelope.value("ok", false);
+    int emit(const Output& output, const json& raw, const Renderer& render) {
+        bool ok = raw.value("ok", false);
         if (output.format == Format::json) {
-            *output.out << envelope.dump(2) << "\n";
-        } else if (ok) {
+            *output.out << raw.dump(2) << "\n";   // JSON escapes control characters itself
+            return ok ? 0 : exit_status(raw.contains("error") ? raw["error"].value("code", "internal") : "internal");
+        }
+        // Text for a terminal: nothing from the device or a plan reaches it unescaped.
+        json envelope = printable_json(raw);
+        if (ok) {
             Scope scope(output.color, output.width);
             const auto& data = envelope.contains("data") ? envelope["data"] : json();
             const auto& meta = envelope.contains("meta") ? envelope["meta"] : json::object();
@@ -309,7 +371,14 @@ namespace forti::cli {
                 *output.err << "  did you mean: " << scalar(details["suggestions"]) << "\n";
             if (details.contains("cli_error") && !details["cli_error"].empty())
                 *output.err << "  FortiOS: " << scalar(details["cli_error"]) << "\n";
-            std::string hint = details.contains("hint") ? scalar(details["hint"]) : generic_hint(code, message);
+            // forti's own hints may span lines: only their newlines survive.
+            static const json none;
+            const json& raw_error = raw.contains("error") && raw["error"].is_object() ? raw["error"] : none;
+            const json& raw_details = raw_error.contains("details") ? raw_error["details"] : none;
+            std::string hint = details.contains("hint")
+                               ? (raw_details.is_object() && raw_details.contains("hint") && raw_details["hint"].is_string()
+                                  ? printable(raw_details["hint"].get<std::string>(), true) : scalar(details["hint"]))
+                               : generic_hint(code, message);
             if (!hint.empty()) *output.err << styled("  hint:", Style::cyan) << " " << hint << "\n";
         }
         return ok ? 0 : exit_status(envelope.contains("error") ? envelope["error"].value("code", "internal") : "internal");

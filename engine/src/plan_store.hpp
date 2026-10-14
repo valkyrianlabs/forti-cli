@@ -90,9 +90,30 @@ namespace forti::engine::detail {
     // A copy with every sensitive attribute's value (at any depth) replaced by "<redacted>". Apply it to
     // attribute-bearing JSON only (objects, diffs, wire bodies, error details), not to whole records.
     json redact(const json& value, const std::set<std::string, std::less<>>& extra = {});
+    // "2 operations on lab (fortigate.test): 1 create, 1 update; risk elevated", from digest-covered fields.
+    std::string summarize(const json& plan);
     // A plan as shown to people and agents: before/after objects (only with `full`), diffs and wire
     // bodies redacted. The stored file keeps real values, because apply needs them.
     json plan_view(const json& plan, bool full = false);
+
+    // ---- Object keys ----
+
+    // A table key becomes one URL path segment. The SDK percent-encodes everything but unreserved
+    // characters, '.' included, so a key of "." or ".." stays a dot segment, and libcurl removes dot
+    // segments: DELETE cmdb/firewall/address/. is sent as DELETE cmdb/firewall/address/ (the whole
+    // table), ".." reaches the parent. False for those (and for empty keys).
+    [[nodiscard]] bool addressable_key(std::string_view key);
+    // Throws Failure(usage) unless addressable_key(key).
+    void validate_key(std::string_view key, std::string_view where);
+
+    // ---- Device replies ----
+
+    // FortiOS replies nest a handful of levels. nlohmann's parser is iterative but its copy constructor
+    // and dump() recurse, so a reply nested thousands deep (a hostile or broken device) would overflow
+    // the stack the first time the engine copies it. Checked iteratively, right after the SDK returns
+    // and before any copy: Failure(api) beyond `limit` levels.
+    inline constexpr std::size_t max_reply_depth = 256;
+    void check_reply_depth(const json& body, std::string_view what, std::size_t limit = max_reply_depth);
 
     // ---- Audit ----
 
