@@ -33,9 +33,16 @@ namespace forti::cli {
     // Options every command accepts.
     OptionSpec global_options();
 
-    // Every command, in help order. Assembled from one function per workstream so each command
-    // group lives in its own file.
-    const std::vector<Command>& commands();
+    // Commands under a heading in `forti --help`.
+    struct CommandGroup {
+        std::string_view title;
+        std::vector<Command> commands;
+    };
+
+    // Every command, grouped and in help order. Assembled from one function per workstream so each
+    // command group lives in its own file.
+    const std::vector<CommandGroup>& command_groups();
+    const std::vector<Command>& commands();   // the groups, flattened
 
     std::vector<Command> setup_commands();     // commands_setup.cpp: configure, doctor, profiles
     std::vector<Command> read_commands();      // commands_read.cpp: devices, discover, get

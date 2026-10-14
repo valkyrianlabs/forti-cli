@@ -1,17 +1,46 @@
 #include "output.hpp"
 
+#include <forti/engine/catalog.hpp>
 #include <forti/engine/error.hpp>
 
 #include <algorithm>
+#include <charconv>
+#include <cstdlib>
 #include <format>
+#include <iostream>
 #include <map>
 #include <ostream>
+#include <utility>
+
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 namespace forti::cli {
 
     namespace {
 
-        std::string scalar(const nlohmann::json& value) {
+        using json = nlohmann::json;
+
+        // What the renderer currently writing may use. Set by emit() around each render; the
+        // Renderer signature stays (data, meta) so renderers in other command files keep working.
+        struct Active {
+            bool color = false;
+            std::size_t width = 0;
+        };
+        Active active;
+
+        struct Scope {
+            Active saved = active;
+            Scope(bool color, std::size_t width) { active = {color, width}; }
+            ~Scope() { active = saved; }
+            Scope(const Scope&) = delete;
+            Scope& operator=(const Scope&) = delete;
+        };
+
+        constexpr std::size_t max_cell = 40;   // a cell wider than this is clipped even without a TTY
+        constexpr std::size_t min_cell = 12;   // shrinking to fit the terminal stops here
+
+        std::string scalar(const json& value) {
             if (value.is_string()) return value.get<std::string>();
             if (value.is_null()) return "";
             if (value.is_array()) {
@@ -26,90 +55,293 @@ namespace forti::cli {
             return value.dump();
         }
 
-        std::string clip(std::string text, std::size_t width) {
-            if (text.size() <= width) return text;
-            return text.substr(0, width - 1) + "…";
+        // Cuts at a code point boundary so the result is at most `width` columns, "…" included.
+        std::string clip(const std::string& text, std::size_t width) {
+            if (display_width(text) <= width) return text;
+            if (width == 0) return "";
+            std::string out;
+            std::size_t columns = 0;
+            for (std::size_t i = 0; i < text.size();) {
+                std::size_t length = 1;
+                auto lead = static_cast<unsigned char>(text[i]);
+                if (lead >= 0xF0) length = 4;
+                else if (lead >= 0xE0) length = 3;
+                else if (lead >= 0xC0) length = 2;
+                if (columns + 1 >= width) break;
+                out.append(text, i, length);
+                ++columns;
+                i += length;
+            }
+            return out + "…";
         }
 
-        void table(std::ostream& out, const nlohmann::json& rows) {
-            // Columns: keys in first-seen order, scalar-ish only, at most 8.
+        std::string pad(const std::string& text, std::size_t width) {
+            std::size_t shown = display_width(text);
+            return shown >= width ? text : text + std::string(width - shown, ' ');
+        }
+
+        // The column that names a row: the resource's catalog key when the meta says which resource
+        // this is, else the first familiar identifier.
+        std::string identity_column(const std::vector<std::string>& columns, const json& meta) {
+            if (meta.is_object() && meta.contains("resource") && meta["resource"].is_string())
+                if (const auto* resource = engine::Catalog::instance().find(meta["resource"].get<std::string>()))
+                    if (!resource->key.empty() && std::ranges::find(columns, resource->key) != columns.end())
+                        return resource->key;
+            for (const char* name: {"name", "resource", "policyid", "key", "id", "seq-num", "mkey"})
+                if (std::ranges::find(columns, name) != columns.end()) return name;
+            return {};
+        }
+
+        // Display order: the identifying column, then `preferred` (--fields as given), then the rest
+        // (alphabetical: that is how the JSON object stores them).
+        void order(std::vector<std::string>& columns, const json& meta, const std::vector<std::string>& preferred) {
+            std::vector<std::string> ordered;
+            auto take = [&](const std::string& name) {
+                if (std::ranges::find(columns, name) != columns.end() && std::ranges::find(ordered, name) == ordered.end())
+                    ordered.push_back(name);
+            };
+            if (auto id = identity_column(columns, meta); !id.empty()) take(id);
+            for (const auto& name: preferred) take(name);
+            for (const auto& name: columns) take(name);
+            columns = std::move(ordered);
+        }
+
+        // FortiOS bookkeeping attributes: hidden in text output, kept in --json.
+        bool bookkeeping(std::string_view key) { return key == "q_origin_key"; }
+
+        std::vector<std::string> preferred_columns;   // set by table_renderer around render_auto
+
+        void table(std::ostream& out, const json& rows, const json& meta) {
+            // Columns: keys in first-seen order, scalar-ish only, the identifying one first.
+            // q_origin_key is FortiOS' internal copy of the key and only adds width.
             std::vector<std::string> columns;
             for (const auto& row: rows) {
                 if (!row.is_object()) continue;
                 for (auto it = row.begin(); it != row.end(); ++it) {
-                    if (it.value().is_object()) continue;
-                    if (std::ranges::find(columns, it.key()) == columns.end() && columns.size() < 8) columns.push_back(it.key());
+                    if (it.value().is_object() || bookkeeping(it.key())) continue;
+                    if (std::ranges::find(columns, it.key()) == columns.end()) columns.push_back(it.key());
                 }
             }
             if (columns.empty()) {
                 out << rows.dump(2) << "\n";
                 return;
             }
-            std::vector<std::size_t> widths;
-            for (const auto& column: columns) {
-                std::size_t width = column.size();
-                for (const auto& row: rows)
-                    if (row.is_object() && row.contains(column)) width = std::max(width, std::min<std::size_t>(scalar(row[column]).size(), 40));
-                widths.push_back(width);
-            }
-            for (std::size_t c = 0; c < columns.size(); ++c) out << std::format("{:<{}}  ", columns[c], widths[c]);
-            out << "\n";
+            order(columns, meta, preferred_columns);
+            std::vector<std::vector<std::string>> cells;
             for (const auto& row: rows) {
-                for (std::size_t c = 0; c < columns.size(); ++c) {
-                    std::string cell = row.is_object() && row.contains(columns[c]) ? scalar(row[columns[c]]) : "";
-                    out << std::format("{:<{}}  ", clip(cell, 40), widths[c]);
-                }
-                out << "\n";
+                std::vector<std::string> line;
+                for (const auto& column: columns)
+                    line.push_back(row.is_object() && row.contains(column) ? scalar(row[column]) : "");
+                cells.push_back(std::move(line));
             }
+            print_table(out, columns, cells);
+        }
+
+        std::string generic_hint(std::string_view code, std::string_view message) {
+            if (code == "config")
+                return message.find("forti configure") != std::string_view::npos ? "" : "run `forti doctor` to check the configuration";
+            if (code == "connection")
+                return "run `forti doctor`; a TLS failure needs --ca-bundle or --resolve-ip (`forti configure`). "
+                       "Certificate verification cannot be disabled";
+            if (code == "auth")
+                return "the device rejected the API key. forti does not retry (FortiOS locks the API user out after "
+                       "repeated failures): check the key, the API user's trusted hosts and its admin profile";
+            if (code == "unknown_resource") return "`forti discover <search>` lists resources";
+            if (code == "usage") return "see `forti --help` or `forti <command> --help`";
+            if (code == "policy_denied" && message.find("read-only") != std::string_view::npos)
+                return "profiles are read-only by default; enable writes with `forti configure --profile NAME --writes`";
+            return "";
         }
 
     }  // namespace
 
-    void render_auto(std::ostream& out, const nlohmann::json& data, const nlohmann::json& meta) {
+    std::size_t display_width(std::string_view text) {
+        std::size_t width = 0;
+        for (char c: text)
+            if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++width;
+        return width;
+    }
+
+    std::string styled(std::string_view text, Style style) {
+        if (!active.color) return std::string(text);
+        const char* code = "";
+        switch (style) {
+            case Style::bold: code = "1"; break;
+            case Style::dim: code = "2"; break;
+            case Style::red: code = "31"; break;
+            case Style::green: code = "32"; break;
+            case Style::yellow: code = "33"; break;
+            case Style::cyan: code = "36"; break;
+        }
+        return std::format("\x1b[{}m{}\x1b[0m", code, text);
+    }
+
+    void print_table(std::ostream& out, const std::vector<std::string>& columns,
+                     const std::vector<std::vector<std::string>>& rows) {
+        std::vector<std::size_t> widths;
+        for (std::size_t c = 0; c < columns.size(); ++c) {
+            std::size_t width = display_width(columns[c]);
+            for (const auto& row: rows)
+                if (c < row.size()) width = std::max(width, std::min(display_width(row[c]), max_cell));
+            widths.push_back(width);
+        }
+        // Fit the terminal: shrink the widest columns down to min_cell, then drop trailing columns.
+        std::size_t shown = columns.size();
+        if (active.width > 0) {
+            auto total = [&] {
+                std::size_t sum = 0;
+                for (std::size_t c = 0; c < shown; ++c) sum += widths[c] + 2;
+                return sum;
+            };
+            while (total() > active.width) {
+                auto widest = std::max_element(widths.begin(), widths.begin() + static_cast<std::ptrdiff_t>(shown));
+                if (*widest > min_cell) {
+                    std::size_t excess = total() - active.width;
+                    *widest = *widest > min_cell + excess ? *widest - excess : min_cell;
+                    continue;
+                }
+                if (shown == 1) break;
+                --shown;
+            }
+        }
+        std::string header;
+        for (std::size_t c = 0; c < shown; ++c)
+            header += (c ? "  " : "") + (c + 1 < shown ? pad(columns[c], widths[c]) : columns[c]);
+        out << styled(header, Style::bold) << "\n";
+        for (const auto& row: rows) {
+            std::string line;
+            for (std::size_t c = 0; c < shown; ++c) {
+                std::string cell = clip(c < row.size() ? row[c] : "", widths[c]);
+                line += (c ? "  " : "") + (c + 1 < shown ? pad(cell, widths[c]) : cell);
+            }
+            out << line << "\n";
+        }
+        if (shown < columns.size())
+            out << styled(std::format("(+{} column{}: --fields or --json)", columns.size() - shown,
+                                      columns.size() - shown == 1 ? "" : "s"),
+                          Style::dim)
+                << "\n";
+    }
+
+    void render_auto(std::ostream& out, const json& data, const json& meta) {
         if (data.is_array()) {
             if (data.empty()) out << "(no results)\n";
-            else table(out, data);
-            if (meta.contains("next_start"))
-                out << std::format("… more results: --start {}\n", meta["next_start"].get<std::size_t>());
+            else if (std::ranges::all_of(data, [](const json& row) { return row.is_object(); })) table(out, data, meta);
+            else for (const auto& item: data) out << scalar(item) << "\n";
+            if (meta.is_object() && meta.contains("next_start"))
+                out << styled(std::format("… more results: --start {}", meta["next_start"].get<std::size_t>()), Style::dim)
+                    << "\n";
+            if (meta.is_object() && meta.value("truncated", false))
+                out << styled(std::format("… showing {} of {} (use --count)", data.size(), meta.value("total", data.size())),
+                              Style::dim)
+                    << "\n";
         } else if (data.is_object()) {
+            std::vector<std::string> keys;
+            for (auto it = data.begin(); it != data.end(); ++it)
+                if (!bookkeeping(it.key())) keys.push_back(it.key());
+            order(keys, meta, preferred_columns);
             std::size_t width = 0;
-            for (auto it = data.begin(); it != data.end(); ++it) width = std::max(width, it.key().size());
-            for (auto it = data.begin(); it != data.end(); ++it) {
-                const auto& value = it.value();
+            for (const auto& key: keys) width = std::max(width, display_width(key));
+            for (const auto& key: keys) {
+                const auto& value = data[key];
                 bool nested = value.is_object() || (value.is_array() && !value.empty() && value.front().is_object() &&
                                                     !(value.front().size() <= 2 && value.front().contains("name")));
-                out << std::format("{:<{}}  {}\n", it.key(), width, nested ? value.dump() : scalar(value));
+                out << styled(pad(key, width), Style::bold) << "  " << (nested ? value.dump() : scalar(value)) << "\n";
             }
         } else out << scalar(data) << "\n";
     }
 
-    int emit(const Output& output, const nlohmann::json& envelope, const Renderer& render) {
-        bool ok = envelope.value("ok", false);
-        if (output.format == Format::json) {
-            *output.out << envelope.dump(2) << "\n";
-        } else if (ok) {
-            const auto& data = envelope.contains("data") ? envelope["data"] : nlohmann::json();
-            const auto& meta = envelope.contains("meta") ? envelope["meta"] : nlohmann::json::object();
-            (render ? render : render_auto)(*output.out, data, meta);
-        } else {
-            const auto& error = envelope["error"];
-            *output.err << "forti: " << error.value("message", "error") << "\n";
-            if (error.contains("details")) {
-                const auto& details = error["details"];
-                if (details.contains("suggestions") && !details["suggestions"].empty())
-                    *output.err << "  did you mean: " << scalar(details["suggestions"]) << "\n";
-                if (details.contains("hint")) *output.err << "  hint: " << scalar(details["hint"]) << "\n";
+    Renderer table_renderer(std::vector<std::string> columns) {
+        return [columns = std::move(columns)](std::ostream& out, const json& data, const json& meta) {
+            auto saved = std::exchange(preferred_columns, columns);
+            try {
+                render_auto(out, data, meta);
+            } catch (...) {
+                preferred_columns = std::move(saved);
+                throw;
             }
+            preferred_columns = std::move(saved);
+        };
+    }
+
+    void render_profiles(std::ostream& out, const json& data, const json& meta) {
+        if (!data.is_array() || data.empty()) {
+            out << "no device profiles (run `forti configure`)\n";
+            return;
         }
-        if (ok) return 0;
+        std::string fallback = meta.is_object() ? meta.value("default_profile", "") : "";
+        if (fallback.empty() && data.size() == 1) fallback = data.front().value("name", "");
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& profile: data) {
+            std::string name = profile.value("name", "");
+            std::string port = profile.contains("port") ? scalar(profile["port"]) : "";
+            rows.push_back({name == fallback ? name + " *" : name,
+                            profile.value("host", "") + (port.empty() || port == "443" ? "" : ":" + port),
+                            profile.value("vdom", ""),
+                            profile.value("mode", "read-only"),
+                            profile.contains("api_key") ? scalar(profile["api_key"]) : ""});
+        }
+        print_table(out, {"profile", "host", "vdom", "mode", "api key"}, rows);
+        out << styled("* default profile", Style::dim) << "\n";
+    }
+
+    int exit_status(std::string_view code) {
         static const std::map<std::string, engine::Code, std::less<>> codes = [] {
             std::map<std::string, engine::Code, std::less<>> map;
             for (int c = 0; c <= static_cast<int>(engine::Code::outcome_unknown); ++c)
                 map.emplace(engine::to_string(static_cast<engine::Code>(c)), static_cast<engine::Code>(c));
             return map;
         }();
-        auto it = codes.find(envelope["error"].value("code", "internal"));
+        auto it = codes.find(code);
         return engine::exit_code(it == codes.end() ? engine::Code::internal : it->second);
+    }
+
+    int emit(const Output& output, const json& envelope, const Renderer& render) {
+        bool ok = envelope.value("ok", false);
+        if (output.format == Format::json) {
+            *output.out << envelope.dump(2) << "\n";
+        } else if (ok) {
+            Scope scope(output.color, output.width);
+            const auto& data = envelope.contains("data") ? envelope["data"] : json();
+            const auto& meta = envelope.contains("meta") ? envelope["meta"] : json::object();
+            (render ? render : render_auto)(*output.out, data, meta);
+        } else {
+            Scope scope(output.err_color, 0);
+            const auto& error = envelope.contains("error") && envelope["error"].is_object() ? envelope["error"] : json::object();
+            std::string code = error.value("code", "internal");
+            std::string message = error.value("message", "error");
+            *output.err << styled("forti: error:", Style::red) << " " << message << "\n";
+            const json details = error.contains("details") && error["details"].is_object() ? error["details"] : json::object();
+            if (details.contains("suggestions") && !details["suggestions"].empty())
+                *output.err << "  did you mean: " << scalar(details["suggestions"]) << "\n";
+            if (details.contains("cli_error") && !details["cli_error"].empty())
+                *output.err << "  FortiOS: " << scalar(details["cli_error"]) << "\n";
+            std::string hint = details.contains("hint") ? scalar(details["hint"]) : generic_hint(code, message);
+            if (!hint.empty()) *output.err << styled("  hint:", Style::cyan) << " " << hint << "\n";
+        }
+        return ok ? 0 : exit_status(envelope.contains("error") ? envelope["error"].value("code", "internal") : "internal");
+    }
+
+    Output terminal_output() {
+        Output output{.out = &std::cout, .err = &std::cerr};
+        if (const char* format = std::getenv("FORTI_OUTPUT"); format && std::string_view(format) == "json")
+            output.format = Format::json;
+        // https://no-color.org: any non-empty NO_COLOR disables color; TERM=dumb cannot show it.
+        const char* no_color = std::getenv("NO_COLOR");
+        const char* term = std::getenv("TERM");
+        bool may_color = !(no_color && *no_color) && !(term && std::string_view(term) == "dumb");
+        output.color = may_color && ::isatty(STDOUT_FILENO);
+        output.err_color = may_color && ::isatty(STDERR_FILENO);
+        if (::isatty(STDOUT_FILENO)) {
+            winsize size{};
+            if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0) output.width = size.ws_col;
+            else if (const char* columns = std::getenv("COLUMNS")) {
+                std::string_view text(columns);
+                std::from_chars(text.data(), text.data() + text.size(), output.width);
+            }
+            if (output.width == 0) output.width = 80;
+        }
+        return output;
     }
 
 }  // namespace forti::cli

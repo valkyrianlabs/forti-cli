@@ -328,7 +328,15 @@ namespace forti::engine {
         add_params(query, request);
 
         std::string api_path = key.empty() ? resource.path : fortiapi::path(resource.path, key);
-        json body = client(profile).get(api_path, query);
+        json body;
+        try {
+            body = client(profile).get(api_path, query);
+        } catch (const fortiapi::ApiError& error) {
+            if (key.empty() || !error.not_found()) throw;
+            throw Failure(Code::not_found, std::format("{} \"{}\" not found", resource.name(), key),
+                          {{"resource", resource.name()}, {"key", key}, {"method", "GET"}, {"path", error.path()},
+                           {"http_status", error.http_status()}});
+        }
         json results = body.contains("results") ? std::move(body["results"]) : json();
 
         json meta = {{"resource", resource.name()}, {"profile", profile.name}, {"device", device_meta(body)}};

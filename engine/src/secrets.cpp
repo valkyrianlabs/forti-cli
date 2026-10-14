@@ -134,9 +134,28 @@ namespace forti::engine {
 
     std::shared_ptr<SecretStore> memory_secret_store() { return std::make_shared<MemorySecretStore>(); }
 
+#ifndef __APPLE__
+    std::shared_ptr<SecretStore> keychain_secret_store(std::string) {
+        throw Failure(Code::config, "the macOS Keychain is not available on this platform",
+                      {{"hint", "unset FORTI_SECRET_STORE (the 0600 file store is the default here)"}});
+    }
+#endif
+
+    // FORTI_SECRET_STORE=file|keychain overrides the platform default, e.g. on a Mac reached over SSH
+    // where the login keychain is locked. Linux uses the file store; libsecret (Secret Service) is a
+    // possible later backend, deferred because it adds a runtime dependency and needs a session bus.
     std::shared_ptr<SecretStore> default_secret_store(const Paths& paths) {
-        // TODO(phase 2, CLI experience): macOS Keychain backend (Security.framework).
+        const char* choice = std::getenv("FORTI_SECRET_STORE");
+        std::string_view name = choice ? choice : "";
+        if (name == "file") return file_secret_store(paths);
+        if (name == "keychain") return keychain_secret_store();
+        if (!name.empty())
+            throw Failure(Code::config, std::format("FORTI_SECRET_STORE must be \"file\" or \"keychain\", not \"{}\"", name));
+#ifdef __APPLE__
+        return keychain_secret_store();
+#else
         return file_secret_store(paths);
+#endif
     }
 
     std::string resolve_secret(const SecretRef& ref, std::string_view account, SecretStore& store) {

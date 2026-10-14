@@ -39,6 +39,12 @@ namespace forti::cli {
     // Splits "a,b,c" (empty items dropped).
     std::vector<std::string> split_list(std::string_view text);
 
+    // Splits a command line into argv the way a POSIX shell splits words: whitespace separates,
+    // '…' is literal, "…" honours \" and \\, a backslash outside quotes escapes the next character.
+    // No expansion of any kind: the result is run without a shell. Throws Failure(usage) on an
+    // unterminated quote.
+    std::vector<std::string> split_command(std::string_view text);
+
 }  // namespace forti::cli
 
 #endif  // FORTI_CLI_ARGS_HPP
