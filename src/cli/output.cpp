@@ -286,14 +286,7 @@ namespace forti::cli {
     }
 
     int exit_status(std::string_view code) {
-        static const std::map<std::string, engine::Code, std::less<>> codes = [] {
-            std::map<std::string, engine::Code, std::less<>> map;
-            for (int c = 0; c <= static_cast<int>(engine::Code::outcome_unknown); ++c)
-                map.emplace(engine::to_string(static_cast<engine::Code>(c)), static_cast<engine::Code>(c));
-            return map;
-        }();
-        auto it = codes.find(code);
-        return engine::exit_code(it == codes.end() ? engine::Code::internal : it->second);
+        return engine::exit_code(engine::parse_code(code).value_or(engine::Code::internal));
     }
 
     int emit(const Output& output, const json& envelope, const Renderer& render) {

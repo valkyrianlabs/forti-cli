@@ -25,6 +25,19 @@ namespace forti::engine {
         return "internal";
     }
 
+    std::optional<Code> parse_code(std::string_view name) {
+        // Every enumerator, listed once: adding a Code without listing it here fails the
+        // ErrorCodes.RoundTrip test, not silently maps it to `internal`.
+        static constexpr Code all[] = {Code::internal, Code::usage, Code::config, Code::connection, Code::auth,
+                                       Code::not_found, Code::unknown_resource, Code::validation, Code::api,
+                                       Code::stale_plan, Code::approval_required, Code::policy_denied,
+                                       Code::partial_failure, Code::management_connectivity_lost,
+                                       Code::outcome_unknown};
+        for (Code code: all)
+            if (to_string(code) == name) return code;
+        return std::nullopt;
+    }
+
     int exit_code(Code code) {
         switch (code) {
             case Code::internal: return 1;

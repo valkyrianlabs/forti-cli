@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -36,6 +37,9 @@ namespace forti::engine {
     };
 
     std::string_view to_string(Code code);
+
+    // Inverse of to_string; nullopt for an unknown name.
+    std::optional<Code> parse_code(std::string_view name);
 
     // Process exit status for the CLI (architecture.md, "Error codes and CLI exit codes").
     int exit_code(Code code);

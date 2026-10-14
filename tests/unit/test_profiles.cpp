@@ -93,3 +93,13 @@ TEST(Secrets, ResolutionNamesTheSourceNeverTheValue) {
     EXPECT_EQ(resolve_secret({SecretRef::Source::command, {}, {"printf", "from-command\\nignored"}}, "a", *store),
               "from-command");
 }
+
+TEST(ErrorCodes, RoundTrip) {
+    for (int c = 0; c <= static_cast<int>(Code::outcome_unknown) + 4; ++c) {
+        auto name = to_string(static_cast<Code>(c));
+        if (name == "internal" && c != 0) continue;   // past the last enumerator
+        ASSERT_EQ(parse_code(name), static_cast<Code>(c)) << name;
+    }
+    EXPECT_EQ(exit_code(*parse_code("management_connectivity_lost")), 8);
+    EXPECT_FALSE(parse_code("nope"));
+}
