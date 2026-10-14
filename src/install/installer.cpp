@@ -89,7 +89,8 @@ namespace forti::install {
         }
 
         TargetPlan start(const Target& target, const Context& context) {
-            TargetPlan plan{.target = target};
+            TargetPlan plan;
+            plan.target = target;
             plan.skill_path = target.client->supports(target.scope) ? target.client->skill_file(target.scope, context) : fs::path();
             if (!target.client->supports(target.scope)) {
                 plan.state = "unsupported";
