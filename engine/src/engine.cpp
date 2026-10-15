@@ -1,6 +1,7 @@
 #include "ops.hpp"
 #include "plan_store.hpp"
 #include "policy.hpp"
+#include "request.hpp"
 #include "session.hpp"
 
 #include <forti/engine/engine.hpp>
@@ -21,62 +22,12 @@ namespace forti::engine {
 
         using json = nlohmann::json;
 
-        // Requests are strict: an unknown key is an error, so a misspelled option never silently
-        // changes what a read returns or what a plan does.
-        void allow_keys(const json& request, std::initializer_list<std::string_view> allowed, std::string_view op) {
-            if (!request.is_object()) throw Failure(Code::usage, std::format("{}: the request must be a JSON object", op));
-            std::vector<std::string> unknown;
-            for (auto it = request.begin(); it != request.end(); ++it)
-                if (std::ranges::find(allowed, std::string_view(it.key())) == allowed.end()) unknown.push_back(it.key());
-            if (!unknown.empty()) {
-                std::string list;
-                for (const auto& key: unknown) list += (list.empty() ? "" : ", ") + key;
-                throw Failure(Code::usage, std::format("{}: unknown request field(s): {}", op, list),
-                              {{"unknown", unknown}, {"allowed", allowed}});
-            }
-        }
-
-        std::string text(const json& request, const char* key, std::string fallback = {}) {
-            auto it = request.find(key);
-            if (it == request.end() || it->is_null()) return fallback;
-            if (it->is_string()) return it->get<std::string>();
-            if (it->is_number_integer()) return it->dump();
-            throw Failure(Code::usage, std::format("\"{}\" must be a string", key));
-        }
-
-        std::size_t number(const json& request, const char* key, std::size_t fallback) {
-            auto it = request.find(key);
-            if (it == request.end() || it->is_null()) return fallback;
-            if (!it->is_number_unsigned() && !(it->is_number_integer() && it->get<long long>() >= 0))
-                throw Failure(Code::usage, std::format("\"{}\" must be a non-negative integer", key));
-            return it->get<std::size_t>();
-        }
-
-        std::vector<std::string> strings(const json& request, const char* key) {
-            auto it = request.find(key);
-            if (it == request.end() || it->is_null()) return {};
-            if (it->is_string()) return {it->get<std::string>()};
-            if (!it->is_array()) throw Failure(Code::usage, std::format("\"{}\" must be a string or an array of strings", key));
-            std::vector<std::string> out;
-            for (const auto& item: *it) {
-                if (!item.is_string()) throw Failure(Code::usage, std::format("\"{}\" must contain only strings", key));
-                out.push_back(item.get<std::string>());
-            }
-            return out;
-        }
-
-        bool flag(const json& request, const char* key) {
-            auto it = request.find(key);
-            if (it == request.end() || it->is_null()) return false;
-            if (!it->is_boolean()) throw Failure(Code::usage, std::format("\"{}\" must be true or false", key));
-            return it->get<bool>();
-        }
-
-        void validate_vdom(std::string_view vdom) {
-            bool valid = vdom.size() <= 31;
-            for (char c: vdom) valid = valid && (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.');
-            if (!valid) throw Failure(Code::usage, std::format("invalid VDOM name: {}", vdom));
-        }
+        using detail::allow_keys;
+        using detail::flag;
+        using detail::number;
+        using detail::strings;
+        using detail::text;
+        using detail::validate_vdom;
 
         // The attribute a FortiOS filter clause tests: "name==x", "type!=fqdn", "comment=@test".
         std::string filter_attribute(std::string_view clause) {
@@ -194,7 +145,8 @@ namespace forti::engine {
 
     json Engine::discover(const json& request) {
         allow_keys(request, {"what", "query", "kind", "start", "count", "resource", "fields", "live", "profile"}, "discover");
-        std::string what = text(request, "what", request.contains("resource") ? "resource" : "resources");
+        std::string what = text(request, "what", "discover");
+        if (what.empty()) what = request.contains("resource") ? "resource" : "resources";
 
         if (what == "devices") {
             json list = json::array();

@@ -9,6 +9,7 @@
 //
 
 #include "commands.hpp"
+#include "tty.hpp"
 
 #include <installer.hpp>
 
@@ -33,68 +34,18 @@ namespace forti::cli {
 
         // ---- The terminal ----
 
-        class Tty {
-            std::FILE* file_;
-
-        public:
-            explicit Tty(std::FILE* file) : file_(file) {}
-            ~Tty() { std::fclose(file_); }
-            Tty(const Tty&) = delete;
-            Tty& operator=(const Tty&) = delete;
-
-            static std::unique_ptr<Tty> open() {
-                std::FILE* file = std::fopen("/dev/tty", "r+");
-                return file ? std::make_unique<Tty>(file) : nullptr;
-            }
-
-            void print(std::string_view text) {
-                std::fwrite(text.data(), 1, text.size(), file_);
-                std::fflush(file_);
-            }
-
-            std::string ask(std::string_view prompt) {
-                print(prompt);
-                std::string line;
-                for (int c; (c = std::fgetc(file_)) != EOF && c != '\n';) line += static_cast<char>(c);
-                while (!line.empty() && (line.back() == ' ' || line.back() == '\r')) line.pop_back();
-                while (!line.empty() && line.front() == ' ') line.erase(0, 1);
-                return line;
-            }
-
-            bool confirm(std::string_view question, bool default_yes) {
-                while (true) {
-                    auto answer = ask(std::format("{} [{}] ", question, default_yes ? "Y/n" : "y/N"));
-                    if (answer.empty()) return default_yes;
-                    if (answer == "y" || answer == "Y" || answer == "yes") return true;
-                    if (answer == "n" || answer == "N" || answer == "no") return false;
-                }
-            }
-
-            // Returns the index of the chosen option (1-based numbers on screen).
-            std::size_t choose(std::string_view question, const std::vector<std::string>& options, std::size_t fallback) {
-                print(std::format("{}\n", question));
-                for (std::size_t k = 0; k < options.size(); ++k) print(std::format("  {}) {}\n", k + 1, options[k]));
-                while (true) {
-                    auto answer = ask(std::format("choice [{}]: ", fallback + 1));
-                    if (answer.empty()) return fallback;
-                    std::size_t value = 0;
-                    auto [end, ec] = std::from_chars(answer.data(), answer.data() + answer.size(), value);
-                    if (ec == std::errc() && end == answer.data() + answer.size() && value >= 1 && value <= options.size())
-                        return value - 1;
-                }
-            }
-        };
-
-        struct Mode {
+        struct Interaction {
             bool interactive = false;
             std::unique_ptr<Tty> tty;
         };
 
-        Mode interaction(const Context& context, const Args& args) {
-            Mode mode;
+        Interaction interaction(const Context& context, const Args& args) {
+            Interaction mode;
             if (args.flag("yes") || context.output.format == Format::json || !::isatty(STDIN_FILENO)) return mode;
-            mode.tty = Tty::open();
-            mode.interactive = mode.tty != nullptr;
+            auto tty = std::make_unique<Tty>();
+            if (!tty->available()) return mode;
+            mode.tty = std::move(tty);
+            mode.interactive = true;
             return mode;
         }
 
@@ -206,7 +157,7 @@ namespace forti::cli {
         }
 
         // Shows the plan, asks, executes, validates and reports. Shared by install, repair and uninstall.
-        int run_plans(Context& context, std::vector<inst::TargetPlan>& plans, const inst::Context& install, Mode& mode,
+        int run_plans(Context& context, std::vector<inst::TargetPlan>& plans, const inst::Context& install, Interaction& mode,
                       bool dry_run, json data, const std::optional<inst::fs::path>& forti_mcp) {
             auto& out = *context.output.out;
             bool text = context.output.format == Format::text;
@@ -238,9 +189,9 @@ namespace forti::cli {
             if (mode.interactive) {
                 std::ostringstream preview;
                 render_plans(preview, plans, install, true);
-                mode.tty->print("\n" + preview.str() + "\n");
+                mode.tty->say("\n" + preview.str() + "\n");
                 if (!mode.tty->confirm("Apply these changes?", false)) {
-                    mode.tty->print("Nothing changed.\n");
+                    mode.tty->say("Nothing changed.\n");
                     return 0;
                 }
             }
@@ -277,7 +228,7 @@ namespace forti::cli {
 
             if (mode.interactive) {
                 auto& tty = *mode.tty;
-                tty.print(std::format("forti-mcp: {}\n", forti_mcp->string()));
+                tty.say(std::format("forti-mcp: {}\n", forti_mcp->string()));
                 if (!clients) {
                     auto found = detected_clients(install);
                     if (found.empty()) throw Failure(Code::config, "no supported AI client (claude, codex) was found on PATH");
@@ -290,7 +241,7 @@ namespace forti::cli {
                     if (found.size() > 1) options.emplace_back("all of the above");
                     auto choice = found.size() == 1 ? 0 : tty.choose("Register forti-mcp with:", options, options.size() - 1);
                     clients = choice < found.size() ? std::vector{found[choice]} : found;
-                    if (found.size() == 1) tty.print(std::format("Client: {}\n", found[0]->display_name()));
+                    if (found.size() == 1) tty.say(std::format("Client: {}\n", found[0]->display_name()));
                 }
                 if (!scope) {
                     std::vector<inst::Scope> offered;
@@ -298,7 +249,7 @@ namespace forti::cli {
                         if (std::ranges::any_of(*clients, [&](const auto* client) { return client->supports(s); })) offered.push_back(s);
                     std::vector<std::string> options;
                     for (auto s: offered) options.push_back(scope_label(s));
-                    tty.print(std::format("Project directory: {}\n", install.project_dir.string()));
+                    tty.say(std::format("Project directory: {}\n", install.project_dir.string()));
                     scope = offered[tty.choose("Scope:", options, 0)];
                 }
             }
