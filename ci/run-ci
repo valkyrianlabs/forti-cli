@@ -161,7 +161,10 @@ reap pod
 name="ci-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}-$$"
 name="${name//[^a-zA-Z0-9_.-]/-}"
 pod=""
-limits=(--memory "${CI_MEMORY:-12g}" --pids-limit 16384 --label "ci.run-ci.pid=$$")
+# Memory: CI_MEMORY, else three quarters of the host's RAM (at least 4 GiB), leaving the rest to the host.
+default_memory="$(awk '/^MemTotal:/ {gib = int($2 * 0.75 / 1048576); print (gib < 4 ? 4 : gib) "g"}' /proc/meminfo 2>/dev/null || true)"
+default_memory="${default_memory:-12g}"
+limits=(--memory "${CI_MEMORY:-$default_memory}" --pids-limit 16384 --label "ci.run-ci.pid=$$")
 
 # shellcheck disable=SC2317 # trap handler
 cleanup() {

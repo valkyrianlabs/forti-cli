@@ -7,8 +7,8 @@
 # Nothing here talks to a FortiGate (AGENTS.md). Linux steps run in the disposable CI container
 # (ci/run-ci, ci/Containerfile).
 
-# Parallelism: ninja's default (every core). An unoptimized engine shard needs ~1.1 GB, so all 8 fit
-# in the CI container's 12 GB (ci/run-ci) and the macOS runner's 7 GB at its core count.
+# Parallelism: every core the memory allows (ci/build-jobs: 2.5 GB per job, the engine shards'
+# GCC peak). ci/run-ci gives the container three quarters of the host's RAM.
 name: CI
 
 on:
@@ -52,7 +52,7 @@ jobs:
         run: |
           meson setup build/ci -Dtests=enabled -Dforti-api:tests=disabled --buildtype=plain -Doptimization=0 -Ddebug=false \
             -Dwerror=true -Db_sanitize=address,undefined -Db_lundef=false
-          meson compile -C build/ci
+          meson compile -C build/ci -j "$(ci/build-jobs)"
           UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 meson test -C build/ci --suite unit --suite integration --print-errorlogs
           ci/smoke-test.sh build/ci/src/cli/forti
           ccache --show-stats | head -5
@@ -81,7 +81,7 @@ jobs:
         run: |
           clang++ --version | head -1
           meson setup build -Dtests=enabled -Dforti-api:tests=disabled --buildtype=plain -Doptimization=0 -Ddebug=false -Dwerror=true
-          meson compile -C build
+          meson compile -C build -j "$(ci/build-jobs)"
           meson test -C build --suite unit --suite integration --print-errorlogs
           ci/smoke-test.sh build/src/cli/forti
           ccache --show-stats | head -5
