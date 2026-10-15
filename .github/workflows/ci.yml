@@ -32,11 +32,26 @@ jobs:
   linux:
     name: Build and tests (Ubuntu 24.04, GCC 13, ASan/UBSan)
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && fromJSON('["ubuntu-latest"]') || fromJSON('["self-hosted","Linux","X64","ubuntu-latest-lts"]') }}
+    permissions:
+      contents: read
+      id-token: write   # docs dry-run sync over GitHub OIDC on pushes to main
     defaults:
       run:
         shell: bash ./ci/run-ci bash -euo pipefail {0}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Seconds: the docs package (docs set slug forti-cli, published by release.yml). Pushes to main also send
+      # a dry-run sync over GitHub OIDC (endpoint, slug and trust, no writes); the docs set does not
+      # accept OIDC tokens from pull_request events, so PRs validate only.
+      - name: Docs package
+        env:
+          VL_DOCS_ENDPOINT: ${{ vars.VL_DOCS_ENDPOINT }}
+        run: |
+          pmdocs validate --source forti-cli
+          if [ "${{ github.event_name }}" = push ] && [ -n "$VL_DOCS_ENDPOINT" ]; then
+            pmdocs push --endpoint "$VL_DOCS_ENDPOINT" --source forti-cli --github-oidc --dry-run
+          fi
 
       - name: Toolchain
         run: |
