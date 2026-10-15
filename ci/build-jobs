@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prints how many compile jobs this machine can run at once: every core, unless memory runs out
-# first. The engine's shard TUs are the memory peak (GCC 13: ~1.9 GB at -O0, ~2.3 GB at -O3 with 8
+# first (1 GiB is kept back for everything else). The engine's shard TUs are the memory peak (GCC 13: ~1.9 GB at -O0, ~2.3 GB at -O3 with 8
 # shards; less with the default 10), so each job is budgeted 2.2 GB. Linux reads the container's cgroup limit (ci/run-ci sets
 # one), falling back to MemTotal; macOS reads hw.memsize.
 set -euo pipefail
@@ -13,7 +13,8 @@ else
   memory=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
   if [ "$memory" = max ]; then memory=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) * 1024 )); fi
 fi
-jobs=$((memory / per_job))
+reserve=$((1024 * 1024 * 1024))   # the linker, meson, dpkg and test runners alongside the compilers
+jobs=$(((memory - reserve) / per_job))
 if [ "$jobs" -gt "$cores" ]; then jobs=$cores; fi
 if [ "$jobs" -lt 1 ]; then jobs=1; fi
 echo "$jobs"
