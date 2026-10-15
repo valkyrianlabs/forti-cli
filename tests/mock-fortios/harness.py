@@ -1,6 +1,6 @@
 """Shared fixtures for the real-binary integration tests of forti-cli and forti-mcp.
 
-`Sandbox` owns a temporary directory with FORTI_CONFIG_DIR / FORTI_STATE_DIR / FORTI_CACHE_DIR, a
+`Sandbox` owns a temporary directory with FORTI_HOME, FORTI_CONFIG_DIR / FORTI_STATE_DIR / FORTI_CACHE_DIR, a
 throwaway HOME and XDG directories, and a running `MockFortiOS`. The API key reaches the binaries
 only through an environment-variable reference (`api_key: {"source": "env", ...}`), so no keychain
 or credential file is ever touched. `forti()` runs the CLI; `mcp()` starts a `forti-mcp` session.
@@ -71,6 +71,7 @@ class Sandbox:
         self.env = {
             "PATH": "/usr/bin:/bin",
             "HOME": str(home),
+            "FORTI_HOME": str(self.root / "forti-home"),
             "FORTI_CONFIG_DIR": str(self.config),
             "FORTI_STATE_DIR": str(self.state),
             "FORTI_CACHE_DIR": str(self.cache),

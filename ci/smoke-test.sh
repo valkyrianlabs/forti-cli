@@ -11,7 +11,7 @@ set -euo pipefail
 forti="${1:-forti}"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
-export HOME="$scratch/home" FORTI_CONFIG_DIR="$scratch/config" XDG_STATE_HOME="$scratch/state" XDG_CACHE_HOME="$scratch/cache"
+export HOME="$scratch/home" FORTI_HOME="$scratch/forti"
 mkdir -p "$HOME"
 
 version="$("$forti" --version)"
@@ -31,7 +31,7 @@ status=0
 "$forti" no-such-command > /dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] || { echo "smoke-test: an unknown command exited $status, expected 2" >&2; exit 1; }
 
-if [ -n "$(find "$FORTI_CONFIG_DIR" "$XDG_STATE_HOME" -type f 2>/dev/null)" ]; then
+if [ -n "$(find "$FORTI_HOME" "$HOME" -type f 2>/dev/null)" ]; then
   echo "smoke-test: an offline discover wrote files" >&2
   exit 1
 fi

@@ -56,7 +56,7 @@ namespace {
     struct Fixture : ::testing::Test {
         TempDir dir;
         std::shared_ptr<fake::FakeTransport> transport = std::make_shared<fake::FakeTransport>();
-        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
+        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache", {}};
         engine::Options options;
         std::unique_ptr<engine::Engine> sut;
 
@@ -186,14 +186,14 @@ TEST_F(Fixture, StoredKeyIsNotReleasedToAnotherHost) {
 
 TEST(SecretBinding, UnboundFileStoreSecretsAreRefused) {
     TempDir dir;
-    engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
+    engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache", {}};
     auto store = engine::file_secret_store(paths);
     store->put("home/api-key", "k1", "fw.home:443");
     std::ifstream in(paths.config / "credentials" / "home.api-key");
     std::stringstream text;
     text << in.rdbuf();
     EXPECT_EQ(text.str(), "binding fw.home:443\nk1\n");
-    engine::SecretRef ref{engine::SecretRef::Source::store, {}, {}};
+    engine::SecretRef ref{engine::SecretRef::Source::store, {}, {}, {}};
     EXPECT_EQ(engine::resolve_secret(ref, "home/api-key", *store, "fw.home:443"), "k1");
 
     // The format before binding: the secret alone.
@@ -209,7 +209,7 @@ TEST(SecretBinding, UnboundFileStoreSecretsAreRefused) {
         EXPECT_EQ(std::string(failure.what()).find("k2"), std::string::npos);
     }
     // env and command sources are not bound.
-    EXPECT_EQ(engine::resolve_secret({engine::SecretRef::Source::command, {}, {"printf", "k3"}}, "x", *store, "any:1"), "k3");
+    EXPECT_EQ(engine::resolve_secret({engine::SecretRef::Source::command, {}, {"printf", "k3"}, {}}, "x", *store, "any:1"), "k3");
 }
 
 // ---- S-14: the audit log must be writable before the first mutation ----

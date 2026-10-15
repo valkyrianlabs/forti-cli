@@ -3,11 +3,14 @@ cli_sources = files(
     'app.cpp',
     'args.cpp',
     'commands.cpp',
+    'commands_cert.cpp',
+    'commands_home.cpp',
     'commands_install.cpp',
     'commands_plan.cpp',
     'commands_read.cpp',
     'commands_setup.cpp',
     'output.cpp',
+    'setup_support.cpp',
     'tty.cpp',
 )
 

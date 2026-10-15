@@ -28,6 +28,44 @@ namespace forti::engine {
             return text;
         }
 
+        // Reads a secret file: a regular file (not a symlink) owned by this user, with no group or other
+        // access. nullopt when it does not exist. Opens first, then checks what was opened (fstat): no
+        // window between the check and the read in which the file could be swapped. O_NOFOLLOW refuses a
+        // symlink; O_NONBLOCK keeps a FIFO planted in its place from blocking the open.
+        std::optional<std::string> read_owner_only_file(const fs::path& path) {
+            int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+            if (fd < 0) {
+                if (errno == ENOENT) return std::nullopt;
+                if (errno == ELOOP)
+                    throw Failure(Code::config, std::format("{} is a symbolic link; the credential file must be a "
+                                                            "regular file", path.string()));
+                throw Failure(Code::config, std::format("cannot open {}: {}", path.string(), std::strerror(errno)));
+            }
+            struct Closer {
+                int fd;
+                ~Closer() { ::close(fd); }
+            } closer{fd};
+            struct stat info{};
+            if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode))
+                throw Failure(Code::config, std::format("{} is not a regular file", path.string()));
+            if (info.st_uid != ::geteuid())
+                throw Failure(Code::config, std::format("{} is owned by another user", path.string()));
+            if (info.st_mode & (S_IRWXG | S_IRWXO))
+                throw Failure(Code::config, std::format("{} is readable by other users; run chmod 600 on it",
+                                                        path.string()));
+            std::string text;
+            char buffer[4096];
+            for (ssize_t n; (n = ::read(fd, buffer, sizeof buffer)) != 0;) {
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    throw Failure(Code::config, std::format("cannot read {}", path.string()));
+                }
+                text.append(buffer, static_cast<std::size_t>(n));
+                if (text.size() > 65536) throw Failure(Code::config, std::format("{} is too large", path.string()));
+            }
+            return text;
+        }
+
         class FileSecretStore final : public SecretStore {
             fs::path dir_;
 
@@ -45,49 +83,17 @@ namespace forti::engine {
             // File format: "binding <host:port>\n<secret>\n". A file without the binding line (or any
             // other first line) is read as unbound, which resolve_secret refuses.
             std::optional<StoredSecret> get(std::string_view account) override {
-                auto path = file(account);
-                // Open first, then check what was opened (fstat): no window between the check and the
-                // read in which the file could be swapped. O_NOFOLLOW refuses a symlink; O_NONBLOCK keeps
-                // a FIFO planted in its place from blocking the open.
-                int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-                if (fd < 0) {
-                    if (errno == ENOENT) return std::nullopt;
-                    if (errno == ELOOP)
-                        throw Failure(Code::config, std::format("{} is a symbolic link; the credential file must be a "
-                                                                "regular file", path.string()));
-                    throw Failure(Code::config, std::format("cannot open {}: {}", path.string(), std::strerror(errno)));
-                }
-                struct Closer {
-                    int fd;
-                    ~Closer() { ::close(fd); }
-                } closer{fd};
-                struct stat info{};
-                if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode))
-                    throw Failure(Code::config, std::format("{} is not a regular file", path.string()));
-                if (info.st_uid != ::geteuid())
-                    throw Failure(Code::config, std::format("{} is owned by another user", path.string()));
-                if (info.st_mode & (S_IRWXG | S_IRWXO))
-                    throw Failure(Code::config, std::format("{} is readable by other users; run chmod 600 on it",
-                                                            path.string()));
-                std::string text;
-                char buffer[4096];
-                for (ssize_t n; (n = ::read(fd, buffer, sizeof buffer)) != 0;) {
-                    if (n < 0) {
-                        if (errno == EINTR) continue;
-                        throw Failure(Code::config, std::format("cannot read {}", path.string()));
-                    }
-                    text.append(buffer, static_cast<std::size_t>(n));
-                    if (text.size() > 65536) throw Failure(Code::config, std::format("{} is too large", path.string()));
-                }
+                auto text = read_owner_only_file(file(account));
+                if (!text) return std::nullopt;
                 constexpr std::string_view prefix = "binding ";
-                if (text.starts_with(prefix)) {
-                    auto newline = text.find('\n');
+                if (text->starts_with(prefix)) {
+                    auto newline = text->find('\n');
                     if (newline != std::string::npos) {
-                        std::string binding = trim_line(text.substr(prefix.size(), newline - prefix.size()));
-                        return StoredSecret{trim_line(text.substr(newline + 1)), std::move(binding)};
+                        std::string binding = trim_line(text->substr(prefix.size(), newline - prefix.size()));
+                        return StoredSecret{trim_line(text->substr(newline + 1)), std::move(binding)};
                     }
                 }
-                return StoredSecret{trim_line(std::move(text)), {}};
+                return StoredSecret{trim_line(std::move(*text)), {}};
             }
 
             void put(std::string_view account, std::string_view secret, std::string_view binding) override {
@@ -234,6 +240,12 @@ namespace forti::engine {
                 break;
             case SecretRef::Source::command:
                 secret = run_command(ref.command, account);
+                break;
+            case SecretRef::Source::file:
+                // Not bound, like env and command: the reference names the file, and the file store's
+                // ownership and mode rules apply to it.
+                if (auto text = read_owner_only_file(ref.path)) secret = trim_line(std::move(*text));
+                else throw Failure(Code::config, std::format("{} (credential for {}) does not exist", ref.path, account));
                 break;
         }
         if (secret.empty()) throw Failure(Code::config, std::format("the credential for {} is empty", account));

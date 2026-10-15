@@ -9,6 +9,7 @@
 //
 
 #include "commands.hpp"
+#include "setup_support.hpp"
 #include "tty.hpp"
 
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include <fstream>
 #include <iostream>
 #include <ostream>
+#include <tuple>
 
 #include <arpa/inet.h>
 #include <signal.h>
@@ -110,17 +112,6 @@ namespace forti::cli {
             } catch (const Failure& failure) {
                 throw Failure(Code::usage, failure.what(), {{"hint", "--mode read-only | guarded | autonomous"}});
             }
-        }
-
-        std::string describe_source(const SecretRef& ref, std::string_view store_kind) {
-            switch (ref.source) {
-                case SecretRef::Source::none: return "none";
-                case SecretRef::Source::store:
-                    return store_kind == "keychain" ? "macOS Keychain" : std::format("{} store", store_kind);
-                case SecretRef::Source::env: return std::format("environment variable {}", ref.env);
-                case SecretRef::Source::command: return std::format("command `{}`", ref.command.empty() ? "" : ref.command[0]);
-            }
-            return "none";
         }
 
         // ---- connection advice (configure and doctor) ----
@@ -257,30 +248,51 @@ namespace forti::cli {
             PendingStore* secrets = nullptr;
         };
 
-        // Applies one credential option family (api-key / cert-password) to `ref`.
+        // An owner-only secret file (SecretRef source "file"), as an absolute path. The engine checks it
+        // again on every read; checking now reports a loose mode while the operator is at the keyboard.
+        std::string private_file(std::string_view option, const std::string& text) {
+            std::error_code error;
+            fs::path path = fs::absolute(text, error).lexically_normal();
+            struct stat info{};
+            if (error || ::lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode))
+                throw Failure(Code::config, std::format("--{}: no such regular file: {}", option, text));
+            if (info.st_uid != ::geteuid())
+                throw Failure(Code::config, std::format("--{}: {} is owned by another user", option, path.string()));
+            if (info.st_mode & (S_IRWXG | S_IRWXO))
+                throw Failure(Code::config, std::format("--{}: {} is readable by other users", option, path.string()),
+                              {{"hint", std::format("chmod 600 {}", shell_quote(path.string()))}});
+            return path.string();
+        }
+
+        // Applies one credential option family (api-key / cert-password) to `ref`. --cert-password-file
+        // exists for the certificate password only (forti cert create writes such a file).
         void credential_options(const Context& context, const Args& args, std::string_view family, SecretRef& ref,
                                 const std::string& account, PendingStore& secrets) {
             std::string stdin_flag = std::format("{}-stdin", family), env = std::format("{}-env", family),
-                        command = std::format("{}-command", family);
-            int given = args.flag(stdin_flag) + args.value(env).has_value() + args.value(command).has_value();
+                        command = std::format("{}-command", family), file = std::format("{}-file", family);
+            int given = args.flag(stdin_flag) + args.value(env).has_value() + args.value(command).has_value() +
+                        args.value(file).has_value();
             if (given > 1)
-                throw Failure(Code::usage, std::format("pass only one of --{0}-stdin, --{0}-env and --{0}-command", family));
+                throw Failure(Code::usage, std::format("pass only one of --{0}-stdin, --{0}-env and --{0}-command{1}", family,
+                                                       family == "cert-password" ? " and --cert-password-file" : ""));
             if (args.flag(stdin_flag)) {
-                ref = {SecretRef::Source::store, {}, {}};
+                ref = {SecretRef::Source::store, {}, {}, {}};
                 secrets.stage(account, read_stdin_secret(context, family == "api-key" ? "API key" : "certificate password"));
             } else if (auto name = args.value(env)) {
                 validate_env_name(*name);
-                ref = {SecretRef::Source::env, *name, {}};
+                ref = {SecretRef::Source::env, *name, {}, {}};
             } else if (auto line = args.value(command)) {
                 auto argv = split_command(*line);
                 if (argv.empty()) throw Failure(Code::usage, std::format("--{} is empty", command));
-                ref = {SecretRef::Source::command, {}, std::move(argv)};
+                ref = {SecretRef::Source::command, {}, std::move(argv), {}};
+            } else if (auto path = args.value(file)) {
+                ref = {SecretRef::Source::file, {}, {}, private_file(file, *path)};
             }
         }
 
         bool interactive_requested(const Args& args) {
             for (const char* name: {"host", "port", "vdom", "ca-bundle", "client-cert", "resolve-ip", "api-key-env",
-                                    "api-key-command", "cert-password-env", "cert-password-command", "mode"})
+                                    "api-key-command", "cert-password-env", "cert-password-command", "cert-password-file", "mode"})
                 if (args.value(name)) return false;
             for (const char* name: {"api-key-stdin", "cert-password-stdin", "default"})
                 if (args.flag(name)) return false;
@@ -371,7 +383,7 @@ namespace forti::cli {
                 p.client_cert = path == "-" ? "" : readable_file("client-cert", path);
             });
 
-            std::string store = describe_source({SecretRef::Source::store, {}, {}}, context.engine.secrets().kind());
+            std::string store = describe_source({SecretRef::Source::store, {}, {}, {}}, context.engine.secrets().kind());
             tty.say(std::format("\nWhere should forti get the API key?\n"
                                 "  1) store it in the {} (you type it now, hidden)\n"
                                 "  2) read an environment variable each time\n"
@@ -385,7 +397,7 @@ namespace forti::cli {
                                 context.engine.secrets().get(p.api_key_account());
                     std::string key = tty.ask(have ? "API key (Enter keeps the stored key)" : "API key", "", true);
                     if (key.empty() && !have) continue;
-                    p.api_key = {SecretRef::Source::store, {}, {}};
+                    p.api_key = {SecretRef::Source::store, {}, {}, {}};
                     if (!key.empty()) draft.secrets->stage(p.api_key_account(), key);
                     break;
                 }
@@ -397,23 +409,34 @@ namespace forti::cli {
                         tty.say(std::format("  {}\n", failure.what()));
                         continue;
                     }
-                    p.api_key = {SecretRef::Source::env, name, {}};
+                    p.api_key = {SecretRef::Source::env, name, {}, {}};
                     break;
                 }
                 if (choice == "3") {
-                    std::string line = tty.ask("Command (run without a shell; quotes group words)");
+                    std::string line = tty.ask("Command (run without a shell; quotes group words)",
+                                               p.api_key.source == SecretRef::Source::command ? shell_join(p.api_key.command) : "");
                     auto argv = split_command(line);
                     if (argv.empty()) continue;
-                    p.api_key = {SecretRef::Source::command, {}, std::move(argv)};
+                    p.api_key = {SecretRef::Source::command, {}, std::move(argv), {}};
                     break;
                 }
             }
             if (!p.client_cert.empty()) {
-                if (tty.confirm("Does the client certificate have a password?", p.cert_password.source != SecretRef::Source::none)) {
-                    std::string password = tty.ask("Certificate password (stored in the secret store)", "", true);
-                    if (!password.empty()) {
-                        p.cert_password = {SecretRef::Source::store, {}, {}};
-                        draft.secrets->stage(p.cert_password_account(), password);
+                bool had = p.cert_password.source != SecretRef::Source::none;
+                if (tty.confirm("Does the client certificate have a password?", had)) {
+                    // Enter keeps the current source (a client.pass file from `forti cert create`, a stored
+                    // password, a variable or a command); a typed password goes to the secret store.
+                    std::string label = had ? std::format("Certificate password (Enter keeps the {})",
+                                                          describe_source(p.cert_password, context.engine.secrets().kind()))
+                                            : std::string("Certificate password (stored in the secret store)");
+                    for (;;) {
+                        std::string password = tty.ask(label, "", true);
+                        if (password.empty() && !had) continue;
+                        if (!password.empty()) {
+                            p.cert_password = {SecretRef::Source::store, {}, {}, {}};
+                            draft.secrets->stage(p.cert_password_account(), password);
+                        }
+                        break;
                     }
                 } else p.cert_password = {};
             } else p.cert_password = {};
@@ -472,6 +495,7 @@ namespace forti::cli {
             line("mode", profile.value("mode", "read-only"));
             if (data.contains("schema_note")) out << styled("  note: ", Style::yellow) << data["schema_note"].get<std::string>() << "\n";
             if (data.contains("notice")) out << "\n" << data["notice"].get<std::string>();
+            if (data.contains("home_note")) out << styled("  note: ", Style::yellow) << data["home_note"].get<std::string>() << "\n";
             out << "\nNext: `forti doctor`, then `forti get monitor/system/status`.\n";
         }
 
@@ -542,6 +566,9 @@ namespace forti::cli {
                     store.erase(profile.cert_password_account());
             }
             set.profiles.insert_or_assign(profile.name, profile);
+            // The forti home holds more than config.json (state, certs): create it private even when
+            // FORTI_CONFIG_DIR puts the configuration elsewhere. A pre-0.2 setup keeps its locations.
+            if (!paths.home.empty() && !paths.legacy) engine::ensure_private_dir(paths.home);
             // The first profile (or the first after the default was removed) becomes the default.
             if (draft.make_default || set.default_profile.empty() || !set.profiles.contains(set.default_profile))
                 set.default_profile = profile.name;
@@ -554,6 +581,9 @@ namespace forti::cli {
             result["verified"] = !args.flag("skip-check") && result.contains("device");
             if (profile.mode == Mode::autonomous && draft.previous.mode != Mode::autonomous && !tty)
                 result["notice"] = autonomous_notice;
+            if (paths.legacy)
+                result["home_note"] = std::format("this is a pre-0.2 setup ({}); `forti home migrate` moves it into {}",
+                                                  display_path(paths.config), display_path(paths.home));
             return emit(context.output, engine::ok(std::move(result), {{"profile", profile.name}}), render_configured);
         }
 
@@ -581,6 +611,246 @@ namespace forti::cli {
                 throw Failure(Code::config, std::format("no profile named \"{}\"", name),
                               {{"hint", "`forti profile list` shows the configured profiles"}});
             return it->second;
+        }
+
+        // ---- profile set / rename / copy ----
+
+        constexpr std::string_view settable_keys =
+                "host, port, vdom, ca_bundle, client_cert, resolve_ip, connect_timeout_ms, timeout_ms, "
+                "backup_before_critical, mode";
+
+        // The CLI validators name options (--host); `profile set` names keys (host).
+        template<typename F>
+        void as_key(std::string_view key, F&& validate) {
+            try {
+                validate();
+            } catch (const Failure& failure) {
+                std::string message = failure.what();
+                std::string option = "--" + std::string(key);
+                std::ranges::replace(option, '_', '-');
+                for (std::size_t at; (at = message.find(option)) != std::string::npos;) message.replace(at, option.size(), key);
+                json details = failure.details();
+                if (details.is_object() && details.value("hint", "").find("--") != std::string::npos)
+                    details["hint"] = std::format("forti profile set NAME {}=VALUE (forti profile --help)", key);
+                throw Failure(failure.code(), message, details);
+            }
+        }
+
+        bool parse_bool(std::string_view key, std::string_view text) {
+            if (text == "true" || text == "yes" || text == "on" || text == "1") return true;
+            if (text == "false" || text == "no" || text == "off" || text == "0") return false;
+            throw Failure(Code::usage, std::format("{} must be true or false, not \"{}\"", key, text));
+        }
+
+        // Applies key=value to the profile's config.json form; Profile::from_json then validates the whole
+        // profile exactly as loading config.json would. An empty value restores the default (or clears).
+        void apply_setting(json& config, const std::string& key, const std::string& value) {
+            auto clear_or = [&](auto&& set) {
+                if (value.empty()) config.erase(key);
+                else set();
+            };
+            if (key == "host") as_key(key, [&] { validate_host(value); config["host"] = value; });
+            else if (key == "port") clear_or([&] { as_key(key, [&] { config["port"] = parse_port(value); }); });
+            else if (key == "vdom") clear_or([&] { as_key(key, [&] { validate_vdom(value); config["vdom"] = value; }); });
+            else if (key == "ca_bundle") clear_or([&] { as_key(key, [&] { config["ca_bundle"] = readable_file("ca_bundle", value); }); });
+            else if (key == "client_cert") {
+                clear_or([&] { as_key(key, [&] { config["client_cert"] = readable_file("client_cert", value); }); });
+                if (value.empty()) config.erase("cert_password");   // a password belongs to the certificate
+            } else if (key == "resolve_ip") clear_or([&] { as_key(key, [&] { validate_ip(value); config["resolve_ip"] = value; }); });
+            else if (key == "connect_timeout_ms" || key == "timeout_ms")
+                clear_or([&] {
+                    std::size_t ms = to_count(key, value);
+                    if (ms == 0 || ms > 3'600'000) throw Failure(Code::usage, std::format("{} must be between 1 and 3600000", key));
+                    config[key] = ms;
+                });
+            else if (key == "backup_before_critical") clear_or([&] { config[key] = parse_bool(key, value); });
+            else if (key == "mode") as_key(key, [&] { config["mode"] = engine::to_string(parse_mode_option(value)); });
+            else throw Failure(Code::usage, std::format("unknown profile setting \"{}\"", key),
+                               {{"hint", std::format("settable: {}; secrets go through forti configure", settable_keys)}});
+        }
+
+        // Re-binds a profile's stored secrets to its new host:port, when they were bound to the old one.
+        // One bound elsewhere stays as it is (doctor reports it): re-binding must not launder it.
+        json rebind_secrets(engine::SecretStore& store, const Profile& before, const Profile& after) {
+            json rebound = json::array();
+            if (before.secret_binding() == after.secret_binding()) return rebound;
+            for (auto [ref, account]: {std::pair{&after.api_key, after.api_key_account()},
+                                       std::pair{&after.cert_password, after.cert_password_account()}}) {
+                if (ref->source != SecretRef::Source::store) continue;
+                if (auto stored = store.get(account); stored && stored->binding == before.secret_binding()) {
+                    store.put(account, stored->secret, after.secret_binding());
+                    rebound.push_back(account);
+                }
+            }
+            return rebound;
+        }
+
+        int profile_set(Context& context, const Args& args, ProfileStore& profiles) {
+            if (args.positional.size() < 3)
+                throw Failure(Code::usage, "usage: forti profile set NAME key=value...", {{"hint", std::format("keys: {}", settable_keys)}});
+            ProfileSet set = profiles.load();
+            const std::string& name = args.positional[1];
+            Profile& profile = existing(set, name);
+            Profile before = profile;
+            json config = profile.to_json();
+            json changed = json::object();
+            for (std::size_t k = 2; k < args.positional.size(); ++k) {
+                const std::string& pair = args.positional[k];
+                auto equals = pair.find('=');
+                if (equals == std::string::npos || equals == 0)
+                    throw Failure(Code::usage, std::format("expected key=value, not \"{}\"", pair), {{"hint", std::format("keys: {}", settable_keys)}});
+                std::string key = pair.substr(0, equals);
+                std::ranges::replace(key, '-', '_');
+                std::string value = trim(pair.substr(equals + 1));
+                json old = config.contains(key) ? config[key] : json(nullptr);
+                apply_setting(config, key, value);
+                changed[key] = {{"from", old}, {"to", config.contains(key) ? config[key] : json(nullptr)}};
+            }
+            Profile after = Profile::from_json(name, config);
+            json rebound = rebind_secrets(context.engine.secrets(), before, after);
+            profile = after;
+            profiles.save(set);
+            json data = {{"profile", name}, {"changed", changed}, {"secrets_rebound", rebound}};
+            if (after.mode == Mode::autonomous && before.mode != Mode::autonomous) data["notice"] = autonomous_notice;
+            return emit(context.output, engine::ok(std::move(data), {{"profile", name}}), [](std::ostream& out, const json& data, const json&) {
+                out << std::format("Profile {}:\n", data.value("profile", ""));
+                auto show = [](const json& value) { return value.is_null() ? std::string("(default)") : value.is_string() ? value.get<std::string>() : value.dump(); };
+                for (auto it = data["changed"].begin(); it != data["changed"].end(); ++it)
+                    out << std::format("  {:<24} {} → {}\n", it.key(), show(it.value()["from"]), show(it.value()["to"]));
+                for (const auto& account: data["secrets_rebound"])
+                    out << std::format("  re-bound the stored secret {} to the new address\n", account.get<std::string>());
+                if (data.contains("notice")) out << "\n" << data["notice"].get<std::string>();
+            });
+        }
+
+        // `path` moved from below `from` to below `to`; unchanged when it is not below `from`.
+        std::string relocate(const std::string& path, const fs::path& from, const fs::path& to) {
+            if (!path_within(path, from)) return path;
+            return (to / fs::path(path).lexically_normal().lexically_relative(from.lexically_normal())).lexically_normal().string();
+        }
+
+        int profile_rename(Context& context, const Args& args, ProfileStore& profiles) {
+            if (args.positional.size() != 3) throw Failure(Code::usage, "usage: forti profile rename OLD NEW");
+            const std::string &from = args.positional[1], &to = args.positional[2];
+            engine::validate_profile_name(to);
+            ProfileSet set = profiles.load();
+            Profile old = existing(set, from);
+            if (set.profiles.contains(to)) throw Failure(Code::config, std::format("a profile named \"{}\" already exists", to));
+            const auto& paths = profiles.paths();
+            fs::path certs_from = paths.certs() / from, certs_to = paths.certs() / to;
+            std::error_code error;
+            bool move_certs = fs::exists(certs_from, error);
+            if (move_certs && fs::exists(certs_to, error))
+                throw Failure(Code::config, std::format("{} already exists; nothing was changed", display_path(certs_to)));
+
+            Profile renamed = old;
+            renamed.name = to;
+            // References into certs/<old> follow the directory, in every profile (one may share the certificate).
+            json relocated = json::array();
+            for (auto& [name, profile]: set.profiles) {
+                for (std::string* path: {&profile.ca_bundle, &profile.client_cert, &profile.cert_password.path, &profile.api_key.path}) {
+                    std::string moved = relocate(*path, certs_from, certs_to);
+                    if (moved != *path) {
+                        relocated.push_back({{"profile", name == from ? to : name}, {"from", *path}, {"to", moved}});
+                        *path = moved;
+                    }
+                }
+                if (name == from) {
+                    renamed.ca_bundle = profile.ca_bundle;
+                    renamed.client_cert = profile.client_cert;
+                    renamed.cert_password.path = profile.cert_password.path;
+                    renamed.api_key.path = profile.api_key.path;
+                }
+            }
+
+            // Stored secrets: copy to the new accounts first, delete the old ones only once config.json
+            // names the new profile, so a failure part-way never loses a key.
+            auto& store = context.engine.secrets();
+            std::vector<std::pair<std::string, std::string>> secret_moves;   // old account, new account
+            for (auto [ref, old_account, new_account]: {std::tuple{&old.api_key, old.api_key_account(), renamed.api_key_account()},
+                                                        std::tuple{&old.cert_password, old.cert_password_account(), renamed.cert_password_account()}}) {
+                if (ref->source != SecretRef::Source::store) continue;
+                auto stored = store.get(old_account);
+                if (!stored) continue;
+                // Bound to this profile's device: stays bound to it. Otherwise copied as it is (no laundering).
+                std::string binding = stored->binding == old.secret_binding() ? renamed.secret_binding() : stored->binding;
+                store.put(new_account, stored->secret, binding);
+                secret_moves.emplace_back(old_account, new_account);
+            }
+            auto undo_secrets = [&] {
+                for (const auto& [old_account, new_account]: secret_moves) {
+                    try {
+                        store.erase(new_account);
+                    } catch (const Failure&) {
+                    }
+                }
+            };
+            if (move_certs && ::rename(certs_from.c_str(), certs_to.c_str()) != 0) {
+                undo_secrets();
+                throw Failure(Code::config, std::format("cannot move {} to {}", certs_from.string(), certs_to.string()));
+            }
+            set.profiles.erase(from);
+            set.profiles.emplace(to, renamed);
+            bool was_default = set.default_profile == from;
+            if (was_default) set.default_profile = to;
+            try {
+                profiles.save(set);
+            } catch (...) {
+                if (move_certs) ::rename(certs_to.c_str(), certs_from.c_str());
+                undo_secrets();
+                throw;
+            }
+            json moved_secrets = json::array();
+            for (const auto& [old_account, new_account]: secret_moves) {
+                try {
+                    store.erase(old_account);
+                } catch (const Failure&) {
+                    // The profile already uses the new account; a leftover item is only clutter.
+                }
+                moved_secrets.push_back({{"from", old_account}, {"to", new_account}});
+            }
+            json data = {{"from", from}, {"to", to}, {"default", was_default}, {"secrets_moved", moved_secrets},
+                         {"paths_updated", relocated}};
+            if (move_certs) data["certs"] = {{"from", certs_from.string()}, {"to", certs_to.string()}, {"cn", "forti-" + from}};
+            return emit(context.output, engine::ok(std::move(data), {{"profile", to}}), [](std::ostream& out, const json& data, const json&) {
+                out << std::format("Renamed profile {} to {}{}.\n", data.value("from", ""), data.value("to", ""),
+                                   data.value("default", false) ? " (still the default)" : "");
+                for (const auto& move: data["secrets_moved"])
+                    out << std::format("  stored secret {} → {}\n", move.value("from", ""), move.value("to", ""));
+                if (data.contains("certs")) {
+                    const json& certs = data["certs"];
+                    out << std::format("  certificates {} → {}\n", display_path(certs.value("from", "")), display_path(certs.value("to", "")))
+                        << std::format("  (the certificate keeps CN {}; the FortiGate needs no change)\n", certs.value("cn", ""));
+                }
+                out << "Plans made before the rename name the old profile: plan them again.\n";
+            });
+        }
+
+        int profile_copy(Context& context, const Args& args, ProfileStore& profiles) {
+            if (args.positional.size() != 3) throw Failure(Code::usage, "usage: forti profile copy SOURCE NEW");
+            const std::string &from = args.positional[1], &to = args.positional[2];
+            engine::validate_profile_name(to);
+            ProfileSet set = profiles.load();
+            Profile copy = existing(set, from);
+            if (set.profiles.contains(to)) throw Failure(Code::config, std::format("a profile named \"{}\" already exists", to));
+            // Settings only. The API key reference (and the client certificate with its password) belong
+            // to the source device: the copy gets its own through forti configure and forti cert create.
+            copy.name = to;
+            copy.api_key = {};
+            copy.client_cert.clear();
+            copy.cert_password = {};
+            set.profiles.emplace(to, copy);
+            profiles.save(set);
+            json data = {{"from", from}, {"profile", copy.describe()},
+                         {"not_copied", json::array({"api_key", "client_cert", "cert_password"})},
+                         {"next", std::format("forti configure --profile {}", to)}};
+            return emit(context.output, engine::ok(std::move(data), {{"profile", to}}), [](std::ostream& out, const json& data, const json&) {
+                const json& profile = data["profile"];
+                out << std::format("Copied profile {} to {} (host {}, mode {}).\n", data.value("from", ""), profile.value("name", ""),
+                                   profile.value("host", ""), profile.value("mode", ""))
+                    << "The API key and client certificate were not copied. Point the new profile at its device\n"
+                    << "and give it its key:\n  " << data.value("next", "") << "\n";
+            });
         }
 
         int run_profile(Context& context, const Args& args) {
@@ -672,8 +942,11 @@ namespace forti::cli {
                                 out << ".\n";
                             });
             }
+            if (action == "set") return profile_set(context, args, profiles);
+            if (action == "rename") return profile_rename(context, args, profiles);
+            if (action == "copy") return profile_copy(context, args, profiles);
             throw Failure(Code::usage, std::format("unknown profile action \"{}\"", action),
-                          {{"hint", "forti profile list | show | default | mode | remove"}});
+                          {{"hint", "forti profile list | show | set | rename | copy | default | mode | remove"}});
         }
 
         // ---- doctor ----
@@ -689,9 +962,16 @@ namespace forti::cli {
             }
         };
 
-        unsigned file_mode(const fs::path& path) {
-            struct stat info{};
-            return ::stat(path.c_str(), &info) == 0 ? info.st_mode & 07777 : 0;
+        Check check_home(const engine::Engine& engine) {
+            const auto& paths = engine.options().paths;
+            if (engine.options().profiles) return {"home", "skip", "profiles are supplied by the embedding application", "", ""};
+            if (paths.legacy)
+                return {"home", "warn", std::format("pre-0.2 setup in {}", display_path(paths.config)),
+                        std::format("move it into {} with `forti home migrate`", display_path(paths.home)), ""};
+            if (paths.home.empty()) return {"home", "info", std::format("configuration in {}", display_path(paths.config)), "", ""};
+            std::string message = display_path(paths.home);
+            if (paths.config != paths.home) message += std::format(" (configuration in {})", display_path(paths.config));
+            return {"home", "pass", message, "", ""};
         }
 
         Check check_config(const engine::Engine& engine) {
@@ -748,21 +1028,6 @@ namespace forti::cli {
             std::string message;
             for (const auto& note: notes) message += (message.empty() ? "" : ", ") + note;
             return {"tls_files", "pass", message + " readable", "", ""};
-        }
-
-        std::optional<std::string> find_on_path(std::string_view program) {
-            const char* path = std::getenv("PATH");
-            std::string_view rest = path ? path : "";
-            while (!rest.empty()) {
-                auto colon = rest.find(':');
-                std::string dir(rest.substr(0, colon));
-                rest = colon == std::string_view::npos ? std::string_view() : rest.substr(colon + 1);
-                if (dir.empty()) continue;
-                fs::path candidate = fs::path(dir) / program;
-                std::error_code error;
-                if (fs::is_regular_file(candidate, error) && ::access(candidate.c_str(), X_OK) == 0) return candidate.string();
-            }
-            return std::nullopt;
         }
 
         // Autonomous mode with a super_admin-class account deserves a warning. The key's own API user
@@ -829,6 +1094,7 @@ namespace forti::cli {
                 for (const char* id: ids) checks.push_back({id, "skip", why, "", ""});
             };
 
+            checks.push_back(check_home(engine));
             checks.push_back(check_config(engine));
 
             const Profile* profile = nullptr;
@@ -913,7 +1179,7 @@ namespace forti::cli {
                     checks.push_back(check_privileges(engine, *profile));
             } else skip({"mode"}, "needs a profile");
 
-            if (auto mcp = find_on_path("forti-mcp")) checks.push_back({"mcp", "info", "forti-mcp found at " + *mcp, "", ""});
+            if (auto mcp = find_on_path("forti-mcp")) checks.push_back({"mcp", "info", "forti-mcp found at " + mcp->string(), "", ""});
             else checks.push_back({"mcp", "info", "forti-mcp is not on PATH (needed only for AI clients)", "", ""});
 
             json list = json::array();
@@ -942,15 +1208,18 @@ namespace forti::cli {
     }  // namespace
 
     std::vector<Command> setup_commands() {
-        return {
+        std::vector<Command> commands = {
             {"configure", "Create or update a device profile and verify it",
              "usage: forti configure                              prompt on the terminal\n"
              "       forti configure --profile NAME --host HOST [options] <credential>\n"
              "\n"
              "Creates or updates a profile in config.json and checks it against the device (one read of\n"
              "monitor/system/status). Nothing is saved unless the check passes; an authentication failure is\n"
-             "never retried, because FortiOS locks out an API user after repeated failures. Options not\n"
-             "given keep the profile's current values.\n"
+             "never retried, because FortiOS locks out an API user after repeated failures.\n"
+             "\n"
+             "On an existing profile, the prompts start from its current values (Enter keeps each one),\n"
+             "and with options only the options given change: forti configure --profile fw01 --port 8443.\n"
+             "`forti profile set` changes settings without contacting the device.\n"
              "\n"
              "connection:\n"
              "  --host HOST              FortiGate host name or address (no scheme, no port)\n"
@@ -966,6 +1235,8 @@ namespace forti::cli {
              "  --api-key-command CMD    run CMD (split like a shell, run without one); its first line is the key\n"
              "  --cert-password-stdin | --cert-password-env VAR | --cert-password-command CMD\n"
              "                           the client certificate's password, from the same kinds of source\n"
+             "  --cert-password-file PATH  or from a file only you can read (0600; forti cert create\n"
+             "                           writes one and sets it for you)\n"
              "\n"
              "policy:\n"
              "  --mode MODE              read-only (default), guarded or autonomous\n"
@@ -978,16 +1249,32 @@ namespace forti::cli {
              "      --ca-bundle ~/fw01-ca.pem --api-key-stdin --default\n"
              "  forti configure --profile lab --host 192.0.2.10 --api-key-env FORTI_LAB_KEY --mode guarded\n",
              {{"host", "port", "ca-bundle", "client-cert", "resolve-ip", "api-key-env", "api-key-command",
-               "cert-password-env", "cert-password-command", "mode"},
+               "cert-password-env", "cert-password-command", "cert-password-file", "mode"},
               {"api-key-stdin", "cert-password-stdin", "default", "skip-check"},
               {}},
              run_configure},
-            {"profile", "List, show, select, set the mode of, or remove profiles",
+            {"profile", "List, show, change, rename, copy or remove device profiles",
              "usage: forti profile [list]                     list profiles (same as `forti devices`)\n"
              "       forti profile show [NAME]                one profile and where its secrets come from\n"
+             "       forti profile set NAME key=value...      change settings (no device check)\n"
+             "       forti profile rename OLD NEW             rename, with its secrets and certificates\n"
+             "       forti profile copy SOURCE NEW            a new profile with the same settings, no secrets\n"
              "       forti profile default NAME               make NAME the default profile\n"
              "       forti profile mode [NAME] MODE           read-only, guarded or autonomous\n"
              "       forti profile remove NAME                delete the profile and its stored secrets\n"
+             "\n"
+             "set keys: host, port, vdom, ca_bundle, client_cert, resolve_ip, connect_timeout_ms,\n"
+             "  timeout_ms, backup_before_critical (true|false), mode. An empty value (vdom=) restores\n"
+             "  the default. Values are checked as config.json is; a changed host or port re-binds the\n"
+             "  profile's stored secrets to the new address. Secrets go through `forti configure`.\n"
+             "rename moves the stored secrets (Keychain or file store), <home>/certs/OLD, paths that\n"
+             "  point into it, and the default. copy leaves out the API key and the client certificate:\n"
+             "  run `forti configure --profile NEW` next.\n"
+             "\n"
+             "examples:\n"
+             "  forti profile copy fw01 fw02 && forti profile set fw02 host=fw02.example.net\n"
+             "  forti configure --profile fw02 --api-key-stdin < fw02.key\n"
+             "  forti profile set lab port=8443 vdom=root timeout_ms=60000\n"
              "\n"
              "modes:\n"
              "  read-only    reads only; plans can be previewed, every apply is refused (default)\n"
@@ -1000,6 +1287,7 @@ namespace forti::cli {
              "usage: forti doctor [--profile NAME]\n"
              "\n"
              "Runs ordered checks and reports each as ok, warn, fail, skip or info:\n"
+             "  home        the forti home (warns on a pre-0.2 setup: forti home migrate)\n"
              "  config      configuration directory and file permissions\n"
              "  profile     the selected profile is valid\n"
              "  secrets     the API key (and certificate password) resolve; values are never shown\n"
@@ -1013,6 +1301,8 @@ namespace forti::cli {
              "Exits 0 when nothing failed, otherwise with the exit status of the first failure.\n",
              {}, run_doctor},
         };
+        for (auto&& more: {home_commands(), cert_commands()}) commands.insert(commands.end(), more.begin(), more.end());
+        return commands;
     }
 
 }  // namespace forti::cli

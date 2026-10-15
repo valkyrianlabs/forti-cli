@@ -162,20 +162,26 @@ public:
 
 ## Profiles and credentials
 
-- Config dir: `$FORTI_CONFIG_DIR`, else `$XDG_CONFIG_HOME/forti`, else `~/.config/forti` (macOS
-  included). State: `$XDG_STATE_HOME/forti` or `~/.local/state/forti` (plans, approvals, audit log).
-  Cache: `$XDG_CACHE_HOME/forti` (reserved; live schemas are fetched per request). Never derived from the working directory.
+- One forti home (`Paths`, profile.hpp): `$FORTI_HOME`, else `~/.forti` (0700). It holds `config.json` and
+  `credentials/`, `state/` (plans, approvals, audit log, backups), `cache/` (reserved) and
+  `certs/<profile>/` (`forti cert create`). `$FORTI_CONFIG_DIR`, `$FORTI_STATE_DIR`, `$FORTI_CACHE_DIR`
+  override single locations. A pre-0.2 setup (`$XDG_*_HOME/forti`, else `~/.config/forti`,
+  `~/.local/state/forti`, `~/.cache/forti`) stays in use (`Paths::legacy`) while `~/.forti/config.json`
+  does not exist; `forti home migrate` moves it. Never derived from the working directory.
 - `config.json` (0600, dir 0700) holds profiles: host, port, vdom, ca_bundle, client_cert path,
   resolve_ip, timeouts, `mode` (default **read-only**), and a credential *reference*, never a secret.
 - Secret sources, in order: OS store (macOS Keychain via Security.framework: service `forti`, account
   `<profile>/api-key`); file `credentials/<profile>.api-key` (0600); `env` (variable name stored, not
-  the value); `command` (argv, git-credential style, stdin `/dev/null`, only fds 0-2 inherited). The P12
-  password uses the same mechanism.
+  the value); `command` (argv, git-credential style, stdin `/dev/null`, only fds 0-2 inherited); `file`
+  (absolute path; first line; refused unless a regular file owned by the user with no group/other access,
+  the file store's rules). The P12 password uses the same mechanism; `forti cert create` sets it to
+  `file` `<home>/certs/<profile>/client.pass`, or with `--keychain` to the store.
 - Stored secrets are **bound to the profile's `host:port`**: the Keychain item's `kSecAttrGeneric`, or the
   credential file's first line (`binding host:port`). `resolve_secret` refuses an unbound or
   differently bound secret (`config`, "…belongs to host:port; run forti configure"). This stops another
   config.json that reuses a profile name from sending the key elsewhere. `forti configure` writes the
-  binding and re-binds a kept key when the host or port changes. env/command sources are unbound.
+  binding and re-binds a kept key when the host or port changes (so does `forti profile set`, only for a
+  secret bound to the old address). env/command/file sources are unbound.
 - config.json is refused when owned by another user or writable by group or others; the `FORTI_*_DIR`
   overrides must be absolute. Both executables set `RLIMIT_CORE` to 0 at startup.
 - TLS verification is always on (the SDK hardcodes VERIFYPEER/VERIFYHOST=2). No flag disables it.

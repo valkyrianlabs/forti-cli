@@ -20,6 +20,7 @@ Architecture: any
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
+ openssl,
 Description: FortiOS command-line interface
  forti discovers, reads, plans and applies FortiGate configuration over the
  FortiOS REST API (v2). Every resource of FortiOS 7.4.8 is addressable, with

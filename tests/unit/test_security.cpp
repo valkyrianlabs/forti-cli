@@ -70,7 +70,7 @@ namespace {
     struct Engine : ::testing::Test {
         TempDir dir;
         std::shared_ptr<fake::FakeTransport> transport = std::make_shared<fake::FakeTransport>();
-        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
+        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache", {}};
         std::unique_ptr<engine::Engine> sut;
 
         explicit Engine(Mode mode = Mode::autonomous) {
@@ -145,7 +145,7 @@ TEST(Redaction, LiveSchemaPasswordVariantsAreSensitive) {
 
 TEST(FileSecretStore, RefusesSymlinksForeignModesAndFifos) {
     TempDir dir;
-    engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
+    engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache", {}};
     auto store = engine::file_secret_store(paths);
     fs::path credentials = paths.config / "credentials";
 
@@ -169,7 +169,7 @@ TEST(FileSecretStore, RefusesSymlinksForeignModesAndFifos) {
 
 TEST(CredentialCommand, DoesNotReadTheCallersStdinOrInheritDescriptors) {
     auto store = engine::memory_secret_store();
-    engine::SecretRef ref{engine::SecretRef::Source::command, {}, {}};
+    engine::SecretRef ref{engine::SecretRef::Source::command, {}, {}, {}};
 
     // In forti-mcp, fd 0 is the JSON-RPC stream: a helper must not be able to read it.
     int saved_stdin = ::dup(STDIN_FILENO);
@@ -207,7 +207,7 @@ TEST(Paths, RelativeOverridesAreRefused) {
 
 TEST(ProfileStore, RefusesConfigWritableByOthers) {
     TempDir dir;
-    engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
+    engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache", {}};
     engine::ProfileStore store(paths);
     engine::ProfileSet set;
     engine::Profile lab;
