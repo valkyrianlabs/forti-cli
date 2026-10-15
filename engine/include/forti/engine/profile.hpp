@@ -2,9 +2,19 @@
 // Device profiles and credentials. A profile says where a FortiGate is and how to reach it; it holds
 // references to secrets, never the secrets. Locations never depend on the working directory.
 //
-//   config  $FORTI_CONFIG_DIR | $XDG_CONFIG_HOME/forti | ~/.config/forti   config.json, credentials/
-//   state   $FORTI_STATE_DIR  | $XDG_STATE_HOME/forti  | ~/.local/state/forti   plans/, approvals/, audit.jsonl
-//   cache   $FORTI_CACHE_DIR  | $XDG_CACHE_HOME/forti  | ~/.cache/forti   reserved (live schemas are not cached yet)
+// Everything lives in one directory, the forti home: $FORTI_HOME, else ~/.forti.
+//
+//   <home>/config.json, credentials/   profiles and file-stored secrets   ($FORTI_CONFIG_DIR overrides)
+//   <home>/state/                       plans/, approvals/, audit.jsonl, backups/   ($FORTI_STATE_DIR)
+//   <home>/cache/                       reserved (live schemas are not cached yet)  ($FORTI_CACHE_DIR)
+//   <home>/certs/<profile>/             client certificates made by `forti cert create`
+//
+// The home is also the recommended MCP workspace (`forti install mcp`): an agent started there sees
+// the FortiGate tools, an agent started anywhere else does not.
+//
+// Releases before 0.2 used ~/.config/forti, ~/.local/state/forti and ~/.cache/forti (or the XDG
+// variables). While ~/.forti/config.json does not exist and that older config does, those locations
+// stay in use (`legacy`), so an existing setup keeps working until `forti home migrate` moves it.
 //
 
 #ifndef FORTI_ENGINE_PROFILE_HPP
@@ -24,9 +34,13 @@ namespace forti::engine {
 
     struct Paths {
         std::filesystem::path config, state, cache;
+        std::filesystem::path home;   // the forti home; empty when Paths is built by hand (tests)
+        bool legacy = false;          // config/state/cache are the pre-0.2 XDG locations
 
         static Paths from_env();
         [[nodiscard]] std::filesystem::path config_file() const { return config / "config.json"; }
+        // <home>/certs, or <config>/certs when no home is set.
+        [[nodiscard]] std::filesystem::path certs() const { return (home.empty() ? config : home) / "certs"; }
     };
 
     // Where a secret comes from. The secret itself is never stored in config.json.

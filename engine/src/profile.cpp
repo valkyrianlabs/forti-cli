@@ -24,7 +24,7 @@ namespace forti::engine {
             return value ? value : "";
         }
 
-        fs::path home() {
+        fs::path user_home() {
             std::string dir = env("HOME");
             if (dir.empty()) throw Failure(Code::config, "HOME is not set");
             return dir;
@@ -40,7 +40,7 @@ namespace forti::engine {
                 return value;
             }
             if (auto value = env(xdg_var); !value.empty() && fs::path(value).is_absolute()) return fs::path(value) / "forti";
-            return home() / fallback / "forti";
+            return user_home() / fallback / "forti";
         }
 
         template<typename T>
@@ -52,9 +52,29 @@ namespace forti::engine {
     }  // namespace
 
     Paths Paths::from_env() {
-        return {locate("FORTI_CONFIG_DIR", "XDG_CONFIG_HOME", ".config"),
-                locate("FORTI_STATE_DIR", "XDG_STATE_HOME", ".local/state"),
-                locate("FORTI_CACHE_DIR", "XDG_CACHE_HOME", ".cache")};
+        Paths paths;
+        if (auto value = env("FORTI_HOME"); !value.empty()) {
+            if (!fs::path(value).is_absolute())
+                throw Failure(Code::config, std::format("FORTI_HOME must be an absolute path, not \"{}\"", value));
+            paths.home = value;
+        } else paths.home = user_home() / ".forti";
+
+        // A pre-0.2 setup (XDG locations) stays in use until it is migrated, unless FORTI_HOME says
+        // otherwise or the home already has a config.
+        std::error_code error;
+        fs::path legacy_config = locate("FORTI_CONFIG_DIR", "XDG_CONFIG_HOME", ".config");
+        paths.legacy = env("FORTI_HOME").empty() && env("FORTI_CONFIG_DIR").empty() &&
+                       !fs::exists(paths.home / "config.json", error) &&
+                       fs::exists(legacy_config / "config.json", error);
+
+        auto pick = [&](const char* override_var, const char* xdg_var, const char* fallback, fs::path in_home) {
+            if (!env(override_var).empty() || paths.legacy) return locate(override_var, xdg_var, fallback);
+            return in_home;
+        };
+        paths.config = pick("FORTI_CONFIG_DIR", "XDG_CONFIG_HOME", ".config", paths.home);
+        paths.state = pick("FORTI_STATE_DIR", "XDG_STATE_HOME", ".local/state", paths.home / "state");
+        paths.cache = pick("FORTI_CACHE_DIR", "XDG_CACHE_HOME", ".cache", paths.home / "cache");
+        return paths;
     }
 
     nlohmann::json SecretRef::to_json() const {
