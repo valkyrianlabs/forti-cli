@@ -7,10 +7,18 @@
 engine_inc = include_directories('include')
 shards = get_option('engine_shards')
 
+# Under sanitizers the shards stay uninstrumented and without debug info: they are the SDK's generated
+# from_json/to_json glue (forti-api's own CI runs it under ASan/UBSan), and instrumenting them made a
+# sanitizer build several times slower than a release build. Every hand-written TU stays instrumented.
+shard_args = []
+if get_option('b_sanitize') != 'none'
+    shard_args += ['-fno-sanitize=all', '-g0']
+endif
+
 shard_libs = []
 foreach k : range(shards)
     shard_libs += static_library('forti-engine-shard@0@'.format(k), 'src/catalog_shard.cpp',
-                                 cpp_args : ['-DFORTI_SHARD=@0@'.format(k), '-DFORTI_SHARDS=@0@'.format(shards)],
+                                 cpp_args : shard_args + ['-DFORTI_SHARD=@0@'.format(k), '-DFORTI_SHARDS=@0@'.format(shards)],
                                  include_directories : engine_inc,
                                  dependencies : forti_api_dep,
                                  implicit_include_directories : false)

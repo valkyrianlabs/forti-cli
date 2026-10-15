@@ -24,7 +24,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git gnupg sudo \
-      build-essential meson ninja-build pkgconf libcurl4-openssl-dev libgtest-dev \
+      build-essential meson ninja-build pkgconf libcurl4-openssl-dev libgtest-dev ccache openssl \
       dpkg-dev debhelper \
  && echo 'ALL ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/ci \
  && chmod 0440 /etc/sudoers.d/ci \

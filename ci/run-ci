@@ -62,7 +62,7 @@ fi
 
 project="$(basename "$root" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9.\n-' '-')"
 cache="${CI_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/$project-ci}"
-mkdir -p "$cache/pnpm-store" "$cache/npm"
+mkdir -p "$cache/pnpm-store" "$cache/npm" "$cache/ccache"
 
 # --- image -----------------------------------------------------------------------------------
 # Tagged by the Containerfile and the newest ValkyrianLabs tool versions, so editing either
@@ -118,7 +118,8 @@ while IFS= read -r name; do
   esac
 done < <(compgen -e)
 env_args+=(--env CI=true --env HOME=/home/ci --env GITHUB_WORKSPACE=/workspace
-  --env npm_config_store_dir=/cache/pnpm-store --env NPM_CONFIG_CACHE=/cache/npm)
+  --env npm_config_store_dir=/cache/pnpm-store --env NPM_CONFIG_CACHE=/cache/npm
+  --env CCACHE_DIR=/cache/ccache --env CCACHE_MAXSIZE=8G)
 # As container root (stock images have no /home/ci), root's own home.
 if $root_user; then env_args+=(--env HOME=/root); fi
 
@@ -140,7 +141,7 @@ done < <(git config --file "$root/.git/config" --get-regexp '^includeif\.gitdir:
 if [ "$git_includes" -gt 0 ]; then env_args+=(--env "GIT_CONFIG_COUNT=$git_includes"); fi
 
 mount_args=(--volume "$root:/workspace" --volume "$cache/pnpm-store:/cache/pnpm-store"
-  --volume "$cache/npm:/cache/npm")
+  --volume "$cache/npm:/cache/npm" --volume "$cache/ccache:/cache/ccache")
 if [ -n "${RUNNER_TEMP:-}" ] && [ -d "$RUNNER_TEMP" ]; then
   mount_args+=(--volume "$RUNNER_TEMP:$RUNNER_TEMP")
 fi

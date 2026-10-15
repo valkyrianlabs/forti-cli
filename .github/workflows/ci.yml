@@ -10,8 +10,11 @@
 # are forti-api's CI's job, so -Dforti-api:tests=disabled); the package job builds against
 # libforti-api-dev from apt.valkyrianlabs.com, exactly like a release.
 #
-# Memory: each engine shard TU needs ~2 GB at -O2/-O3 and more with sanitizers. The CI container is
-# capped at 12 GB (ci/run-ci) and the macOS runner has 7 GB, so ninja parallelism is capped per job.
+# Time: the 8 engine shard TUs (generated SDK glue) are ~70% of a build. ccache keeps them between
+# runs (ci/run-ci on the self-hosted runner, actions/cache on macOS), sanitizer builds leave them
+# uninstrumented, and independent work runs as parallel jobs.
+# Memory: each shard TU needs ~2 GB at -Os. The CI container is capped at 12 GB (ci/run-ci) and the
+# macOS runner has 7 GB, so ninja parallelism is capped per job.
 name: CI
 
 on:
@@ -45,22 +48,36 @@ jobs:
         run: |
           g++ --version | head -1
           meson --version
+          ccache --version | head -1
 
-      # The release build type (meson.build default), as packaged: warnings are errors.
-      - name: Build (warnings are errors) and run the unit tests
+      # The release build type (meson.build default), as packaged: warnings are errors. ccache
+      # (ci/run-ci keeps it on the runner) makes the engine shards free unless forti-api or the SDK
+      # glue changed. Unit tests are mocked and take seconds; the integration suite runs the real
+      # binary against the mock FortiOS over TLS.
+      - name: Build (warnings are errors) and run the tests
         run: |
           meson setup build/ci -Dtests=enabled -Dforti-api:tests=disabled -Dwerror=true
           meson compile -C build/ci -j 4
-          meson test -C build/ci --suite unit --print-errorlogs
+          meson test -C build/ci --suite unit --suite integration --print-errorlogs
           ci/smoke-test.sh build/ci/src/cli/forti
+          ccache --show-stats | head -5
 
-      # Sanitizers roughly double a shard's memory: twice the shards (half the endpoints per TU) and
-      # three jobs keep the peak well under the container's 12 GB.
-      - name: Unit tests under AddressSanitizer + UndefinedBehaviorSanitizer
+  # Its own job so it runs alongside the release build. The engine shards (generated SDK glue) are
+  # compiled uninstrumented (engine/meson.build); everything hand-written is instrumented.
+  sanitizers:
+    name: Unit tests (ASan + UBSan, GCC 13)
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && fromJSON('["ubuntu-latest"]') || fromJSON('["self-hosted","Linux","X64","ubuntu-latest-lts"]') }}
+    defaults:
+      run:
+        shell: bash ./ci/run-ci bash -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build and run the unit tests under sanitizers
         run: |
-          meson setup build/asan -Dtests=enabled -Dforti-api:tests=disabled -Dengine_shards=16 --buildtype=debugoptimized \
+          meson setup build/asan -Dtests=enabled -Dforti-api:tests=disabled --buildtype=debugoptimized \
             -Db_sanitize=address,undefined -Db_lundef=false
-          meson compile -C build/asan -j 3
+          meson compile -C build/asan -j 4
           UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 meson test -C build/asan --suite unit --print-errorlogs
 
   package:
@@ -112,23 +129,44 @@ jobs:
           '
 
   macos:
-    name: Build and Homebrew formula (macOS, Apple clang)
+    name: Build and tests (macOS, Apple clang)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Homebrew packages
+        run: brew install meson ninja googletest ccache
+
+      # Keyed by the SDK pin and the engine's SDK glue: a PR that touches neither restores every
+      # engine shard from the cache.
+      - name: Compiler cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-macos-${{ hashFiles('subprojects/forti-api.wrap', 'engine/src/catalog_shard.cpp', 'engine/src/ops.hpp') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-${{ hashFiles('subprojects/forti-api.wrap', 'engine/src/catalog_shard.cpp', 'engine/src/ops.hpp') }}-
+            ccache-macos-
+
+      - name: Build and run the tests
+        run: |
+          clang++ --version | head -1
+          meson setup build -Dtests=enabled -Dforti-api:tests=disabled -Dwerror=true
+          meson compile -C build -j 3
+          meson test -C build --suite unit --suite integration --print-errorlogs
+          ci/smoke-test.sh build/src/cli/forti
+          ccache --show-stats | head -5
+
+  # Installs the formula (with forti-api from valkyrianlabs/tap) from a throwaway local tap and runs
+  # its test block. Homebrew builds from source in its own sandbox, so this job is separate and runs
+  # in parallel. Skipped while no release docs are staged, since `vlr prepare` would refuse.
+  homebrew:
+    name: Homebrew formula (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-
-      - name: Install Homebrew packages
-        run: brew install meson ninja googletest
-
-      - name: Build and run the unit tests
-        run: |
-          clang++ --version | head -1
-          meson setup build -Dtests=enabled -Dforti-api:tests=disabled -Dwerror=true
-          meson compile -C build -j 3
-          meson test -C build --suite unit --print-errorlogs
-          ci/smoke-test.sh build/src/cli/forti
 
       # vl-release from its pinned release tag (pure Python, no install needed).
       - name: vl-release
@@ -136,9 +174,6 @@ jobs:
           git clone --quiet --depth 1 --branch "$VL_RELEASE_TAG" https://github.com/valkyrianlabs/vl-release.git "$RUNNER_TEMP/vl-release"
           echo "$RUNNER_TEMP/vl-release/bin" >> "$GITHUB_PATH"
 
-      # Installs the formula (with forti-api from valkyrianlabs/tap) from a throwaway local tap and
-      # runs its test block (ephemeral checkout: the script prepares the release documents). Skipped
-      # while no release docs are staged, since `vlr prepare` would refuse.
       - name: Homebrew formula
         run: |
           phase="$(vlr status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["phase"])')"
