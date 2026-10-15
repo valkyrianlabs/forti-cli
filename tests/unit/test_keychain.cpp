@@ -22,10 +22,12 @@ TEST(Keychain, RoundTripWhenExplicitlyEnabled) {
     (void) store->erase(account);
     EXPECT_EQ(store->kind(), "keychain");
     EXPECT_FALSE(store->get(account));
-    store->put(account, "first");
-    EXPECT_EQ(store->get(account), "first");
-    store->put(account, "second");   // update in place
-    EXPECT_EQ(store->get(account), "second");
+    store->put(account, "first", "fw.test:443");
+    EXPECT_EQ(store->get(account)->secret, "first");
+    EXPECT_EQ(store->get(account)->binding, "fw.test:443");
+    store->put(account, "second", "fw2.test:8443");   // update in place, binding included
+    EXPECT_EQ(store->get(account)->secret, "second");
+    EXPECT_EQ(store->get(account)->binding, "fw2.test:8443");
     EXPECT_TRUE(store->erase(account));
     EXPECT_FALSE(store->erase(account));
 #endif

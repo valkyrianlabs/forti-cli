@@ -449,7 +449,7 @@ TEST_F(PlanTest, WireBodiesMatchThePlanExactly) {
     transport->reply(404, missing());
     json result = apply(id);
     ASSERT_TRUE(result["ok"]) << result.dump();
-    for (const auto& op: result["data"]["operations"]) EXPECT_EQ(op["status"], "verified") << op.dump();
+    for (const auto& op: result["data"]["operations"]) { EXPECT_EQ(op["status"], "verified") << op.dump(); }
 
     std::vector<fortiapi::HttpRequest> sent;
     for (const auto& request: transport->requests) if (request.method != fortiapi::Method::Get) sent.push_back(request);
@@ -488,6 +488,10 @@ TEST_F(PlanTest, ApiErrorStopsWithPartialFailure) {
     EXPECT_EQ(ops[1]["error"]["details"]["fortios_error"], -651);
     EXPECT_FALSE(ops[1].contains("changed_after_failure"));
     EXPECT_EQ(ops[2]["status"], "not_attempted");
+    // Object names are not secrets: the record of a stopped apply says which objects it touched.
+    EXPECT_EQ(ops[0]["key"], "a");
+    EXPECT_EQ(ops[1]["key"], "b");
+    EXPECT_EQ(ops[2]["key"], "c");
     EXPECT_EQ(writes(), 2u);
     // The rollback undoes only what changed: operation 1.
     std::string rollback = result["error"]["details"]["rollback"]["plan_id"];
@@ -757,7 +761,7 @@ TEST_F(PlanTest, NeverAttemptedOperationsLeaveTheRollbackPlan) {
     EXPECT_EQ(result["error"]["code"], "partial_failure");
     // The provisional rollback was written, then removed: nothing reached the device.
     for (const auto& entry: fs::directory_iterator(paths.state / "plans"))
-        if (entry.path().extension() == ".json") EXPECT_NE(json::parse(slurp(entry.path())).value("kind", ""), "rollback");
+        if (entry.path().extension() == ".json") { EXPECT_NE(json::parse(slurp(entry.path())).value("kind", ""), "rollback"); }
 }
 
 TEST_F(PlanTest, TheAppliedMarkerIsAnAtomicGate) {

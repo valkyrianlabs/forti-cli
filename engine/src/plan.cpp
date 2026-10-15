@@ -89,6 +89,7 @@ namespace forti::engine {
             request.resource_name = text(item, "resource", where);
             if (request.resource_name.empty()) throw Failure(Code::usage, where + ": \"resource\" is required");
             request.key = text(item, "key", where);
+            if (!request.key.empty()) detail::validate_key(request.key, where);
             if (auto it = item.find("set"); it != item.end() && !it->is_null()) {
                 if (!it->is_object()) throw Failure(Code::usage, where + ": \"set\" must be an object");
                 request.set = *it;
@@ -109,6 +110,23 @@ namespace forti::engine {
             if (auto it = item.find("body"); it != item.end() && !it->is_null()) {
                 if (!it->is_object()) throw Failure(Code::usage, where + ": \"body\" must be an object");
                 request.body = *it;
+            }
+            // Reads redact secrets; an agent that copies a read object into a plan would otherwise set a
+            // password or PSK to the literal placeholder.
+            for (const json* values: {&request.set, &request.object, &request.body}) {
+                std::vector<const json*> stack{values};
+                while (!stack.empty()) {
+                    const json* node = stack.back();
+                    stack.pop_back();
+                    if (node->is_string() && node->get_ref<const std::string&>() == detail::redacted)
+                        throw Failure(Code::validation,
+                                      std::format("{}: \"{}\" is the placeholder reads show for a secret, not a value; "
+                                                  "leave the attribute out to keep the current secret", where,
+                                                  detail::redacted),
+                                      {{"reason", "redacted_placeholder"}});
+                    if (node->is_structured())
+                        for (const auto& child: *node) stack.push_back(&child);
+                }
             }
             return request;
         }
@@ -141,6 +159,7 @@ namespace forti::engine {
                                          const fortiapi::Query& query, Identity& identity) {
             std::string path = object_path(resource, key);
             fortiapi::Result result = client.exchange(fortiapi::Method::Get, path, query);
+            detail::check_reply_depth(result.body, path);
             identity.take(result.body);
             if (result.http_status == 404) return std::nullopt;
             if (!result.ok()) throw fortiapi::ApiError(fortiapi::Method::Get, path, result.http_status, std::move(result.body));
@@ -336,16 +355,6 @@ namespace forti::engine {
             return resource;
         }
 
-        std::string summarize(const json& operations, const json& device, Risk risk) {
-            std::map<std::string, int> counts;
-            for (const auto& op: operations) ++counts[op.value("op", "")];
-            std::string parts;
-            for (const char* op: {"create", "update", "delete", "action"})
-                if (counts[op]) parts += std::format("{}{} {}", parts.empty() ? "" : ", ", counts[op], op);
-            return std::format("{} operation{} on {} ({}): {}; risk {}", operations.size(), operations.size() == 1 ? "" : "s",
-                               device.value("profile", ""), device.value("host", ""), parts, detail::to_string(risk));
-        }
-
         json make_plan(json device, json operations, detail::Clock::time_point time, std::string kind,
                        std::string rollback_of = {}, std::string id = {}) {
             json plan = {{"format", detail::plan_format},
@@ -357,7 +366,7 @@ namespace forti::engine {
             if (!rollback_of.empty()) plan["rollback_of"] = rollback_of;
             Risk risk = detail::plan_risk(plan);
             plan["risk"] = detail::to_string(risk);
-            plan["summary"] = summarize(plan["operations"], plan["device"], risk);
+            plan["summary"] = detail::summarize(plan);
             plan["digest"] = detail::plan_digest(plan);
             return plan;
         }
@@ -367,6 +376,12 @@ namespace forti::engine {
             json details = detail::redact(failure.details());
             // Top-level "key" in engine details is the object's name (a table key), not an attribute.
             if (auto it = failure.details().find("key"); it != failure.details().end()) details["key"] = *it;
+            // So is each operation's "key" in an apply's execution record: the record must still say which
+            // objects a stopped apply touched.
+            if (auto ops = failure.details().find("operations"); ops != failure.details().end() && ops->is_array())
+                for (std::size_t i = 0; i < ops->size() && i < details["operations"].size(); ++i)
+                    if (auto key = (*ops)[i].find("key"); (*ops)[i].is_object() && key != (*ops)[i].end())
+                        details["operations"][i]["key"] = *key;
             std::string message = failure.what();
             if (auto it = failure.details().find("attribute"); it != failure.details().end() && it->is_string() &&
                                                                  detail::sensitive_name(it->get<std::string>()))
@@ -418,7 +433,11 @@ namespace forti::engine {
             for (std::size_t i = 0; i < operations_it->size(); ++i) {
                 OpRequest op = parse_operation((*operations_it)[i], i);
                 Resource resource = resolve_for(op, i);
-                if (op.op == "create") op.key = key_of_object(resource, op.object);
+                if (op.op == "create") {
+                    op.key = key_of_object(resource, op.object);
+                    // The key is used for the existence check now and for a rollback delete later.
+                    if (!op.key.empty()) detail::validate_key(op.key, std::format("operations[{}]", i));
+                }
                 // One operation per object: each before-state is read once, before anything runs.
                 if (op.op != "action" && !(op.op == "create" && op.key.empty()) &&
                     !targets.insert(object_path(resource, op.key)).second)
@@ -472,6 +491,31 @@ namespace forti::engine {
 
     namespace {
 
+        constexpr std::string_view audit_failure_note =
+                "the audit record of this apply could not be appended to audit.jsonl (disk full, permissions?)";
+
+        // Backups hold the device's reversible secrets: keep only the most recent ones (by mtime), always
+        // including the one just written. Best effort: a backup that cannot be pruned is left in place.
+        constexpr std::size_t kept_backups = 20;
+
+        void prune_backups(const std::filesystem::path& dir, const std::filesystem::path& keep) {
+            namespace fs = std::filesystem;
+            std::vector<std::pair<fs::file_time_type, fs::path>> backups;
+            std::error_code error;
+            for (const auto& entry: fs::directory_iterator(dir, error)) {
+                std::error_code ignored;
+                if (entry.path().extension() != ".conf" || !entry.is_regular_file(ignored) || entry.is_symlink(ignored)) continue;
+                if (entry.path() == keep) continue;
+                backups.emplace_back(entry.last_write_time(ignored), entry.path());
+            }
+            if (backups.size() < kept_backups) return;
+            std::ranges::sort(backups, std::greater<>{}, &std::pair<fs::file_time_type, fs::path>::first);
+            for (std::size_t i = kept_backups - 1; i < backups.size(); ++i) {
+                std::error_code ignored;
+                fs::remove(backups[i].second, ignored);
+            }
+        }
+
         // The device's full configuration, taken before a critical-risk plan runs. Streamed through the
         // SDK's bounded download straight into <state>/backups/<plan id>.conf (0600, directory 0700): never
         // buffered whole, logged, or echoed. A recovery *aid*: restoring it needs a working management
@@ -487,8 +531,10 @@ namespace forti::engine {
             ensure_private_dir(paths.state);
             ensure_private_dir(dir);
             auto file = dir / (id + ".conf");
-            auto partial = dir / (id + ".conf.partial");
-            ::unlink(partial.c_str());   // a leftover from a crashed attempt at this same plan
+            // Per process: two concurrent applies of one plan (only one passes mark_applied later) must not
+            // unlink or rename each other's half-written file.
+            auto partial = dir / std::format("{}.conf.partial.{}", id, ::getpid());
+            ::unlink(partial.c_str());   // a leftover from a crashed attempt that had this pid
             int fd = ::open(partial.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
             if (fd < 0) throw Failure(Code::config, std::format("cannot create {}", partial.string()));
 
@@ -526,6 +572,7 @@ namespace forti::engine {
                     ::unlink(partial.c_str());
                     throw Failure(Code::config, std::format("cannot store {}", file.string()));
                 }
+                prune_backups(dir, file);
                 return {{"status", "saved"}, {"path", file.string()}, {"bytes", download.bytes},
                         {"sha256", detail::hex(hash.finish())}};
             } catch (const Failure&) {
@@ -743,6 +790,13 @@ namespace forti::engine {
                                           device.value("serial", "")),
                               {{"plan_id", id}, {"reason", "device_serial"}});
 
+            // The audit record is written after execution; make sure it can be before anything changes.
+            if (!detail::audit_writable(paths))
+                throw Failure(Code::config,
+                              std::format("cannot open the audit log {} for appending; apply refused before any change",
+                                          (paths.state / "audit.jsonl").string()),
+                              {{"plan_id", id}, {"reason", "audit_unwritable"}});
+
             json backup = nullptr;
             if (risk == Risk::critical) backup = pre_change_backup(client, paths, profile, id);
 
@@ -787,6 +841,8 @@ namespace forti::engine {
                         fortiapi::Reply reply = resource.ops->create(client, op["object"], query);
                         if (done.key.empty() && !reply.mkey.is_null())
                             done.key = reply.mkey.is_string() ? reply.mkey.get<std::string>() : reply.mkey.dump();
+                        // A device-reported key is used for verification and the rollback delete.
+                        if (!detail::addressable_key(done.key)) done.key.clear();
                         object_key = done.key;
                     } else if (kind == "update") {
                         detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};
@@ -809,6 +865,16 @@ namespace forti::engine {
                     done.record["error"] = redacted_failure(translate(std::current_exception())).to_json();
                     if (!error.before_send())
                         done.record["note"] = "the request may have reached the device; its effect is unknown";
+                    stop = true;
+                } catch (const fortiapi::DecodeError&) {
+                    // The device answered 2xx, so the request was accepted, but the reply could not be
+                    // read: the effect is unknown, not "failed".
+                    done.changed = true;
+                    done.status = "outcome_unknown";
+                    done.record["sent"] = true;
+                    done.record["error"] = redacted_failure(translate(std::current_exception())).to_json();
+                    done.record["note"] = "the device accepted the request (HTTP 2xx) but its reply could not be "
+                                          "decoded; its effect is unknown";
                     stop = true;
                 } catch (...) {
                     done.status = "failed";
@@ -886,7 +952,9 @@ namespace forti::engine {
                 done.record["status"] = done.status;
 
                 // Management connectivity after a critical change that may have reached the device.
-                if (done.sent && resource.kind != Kind::monitor && detail::risk_of(resource) == Risk::critical) {
+                // Monitor actions included: a critical one (reboot, restore, upgrade) is exactly when the
+                // management path is most likely gone.
+                if (done.sent && detail::risk_of(resource) == Risk::critical) {
                     json result = probe(options_, *secrets_, profile, device.value("serial", ""), vdom);
                     done.record["management_probe"] = result;
                     if (!result.value("ok", false)) {
@@ -946,15 +1014,20 @@ namespace forti::engine {
                                           "applied", id),
                               std::move(record));
             event["outcome"] = "ok";
-            detail::audit(paths, event);
             record["status"] = "applied";
+            // The changes are made; a failed audit write does not undo them, but it is never silent.
+            if (!detail::audit(paths, event)) record["audit_error"] = audit_failure_note;
             return ok(std::move(record), {{"profile", profile.name}, {"vdom", vdom}});
         } catch (...) {
             Failure failure = redacted_failure(translate(std::current_exception()));
             event["outcome"] = to_string(failure.code());
             event["error"] = {{"code", to_string(failure.code())}, {"message", failure.what()}};
             if (auto it = failure.details().find("reason"); it != failure.details().end()) event["error"]["reason"] = *it;
-            detail::audit(paths, event);
+            if (!detail::audit(paths, event) && failure.details().contains("operations")) {
+                json details = failure.details();
+                details["audit_error"] = audit_failure_note;
+                throw Failure(failure.code(), failure.what(), std::move(details));
+            }
             throw failure;
         }
     }

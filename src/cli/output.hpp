@@ -28,6 +28,7 @@ namespace forti::cli {
         bool color = false;           // ANSI styles on `out` (a TTY, NO_COLOR unset)
         bool err_color = false;       // ANSI styles on `err`
         std::size_t width = 0;        // terminal columns for tables; 0: no limit (not a TTY)
+        bool tty = false;             // stdout is a terminal (`forti get --reveal` needs one, or --json)
     };
 
     // Decides format, color and width from the environment (FORTI_OUTPUT, NO_COLOR, isatty, COLUMNS).
@@ -62,6 +63,15 @@ namespace forti::cli {
 
     // Display width of UTF-8 text (code points; good enough for names and addresses).
     std::size_t display_width(std::string_view text);
+
+    // Text safe to print on a terminal. Device data (names, comments) and plan values (chosen by
+    // whoever made the plan, possibly an agent) must not be able to move the cursor, erase or recolor
+    // lines, retitle the window, or reorder text: C0 and C1 controls, DEL, line separators and Unicode
+    // bidirectional controls become visible escapes (\n, \x1b, \u202e). `keep_newlines` keeps '\n'
+    // (forti's own multi-line hints).
+    std::string printable(std::string_view text, bool keep_newlines = false);
+    // A copy with every string and object key passed through printable().
+    nlohmann::json printable_json(const nlohmann::json& value);
 
 }  // namespace forti::cli
 

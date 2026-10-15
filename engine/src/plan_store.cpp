@@ -12,6 +12,7 @@
 #include <ctime>
 #include <format>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <system_error>
 
@@ -156,11 +157,55 @@ namespace forti::engine::detail {
         if (!plan.contains("digest") || !plan["digest"].is_string() || plan["digest"] != plan_digest(plan))
             tampered(id, "digest");
         // The risk tier drives the connectivity probe: it must be the catalog's, not the file's word.
+        // The digest only proves the file is self-consistent (anyone who can write it can recompute
+        // it), so apply must also be able to trust the shape it executes: an operation kind it knows,
+        // a resource that supports it, the fields it reads, and a recorded request (shown to the person
+        // approving) that is the one apply will send.
         for (const auto& op: plan["operations"]) {
             if (!op.is_object() || !op.contains("resource") || !op["resource"].is_string()) tampered(id, "operation");
             Resource resource = Catalog::instance().resolve(op["resource"].get<std::string>());
             Risk risk = risk_of(resource);
             if (to_string(risk) != op.value("risk", "")) tampered(id, "risk");
+
+            auto kind = op.find("op");
+            if (kind == op.end() || !kind->is_string()) tampered(id, "operation");
+            const std::string& name = kind->get_ref<const std::string&>();
+            auto is = [&](const char* field, json::value_t type) {
+                auto it = op.find(field);
+                return it != op.end() && it->type() == type;
+            };
+            bool shape = false;
+            std::string method, path;
+            std::string key = is("key", json::value_t::string) ? op["key"].get<std::string>() : std::string();
+            if (op.contains("key") && (!op["key"].is_string() || !addressable_key(key))) tampered(id, "operation");
+            if (name == "action") {
+                shape = resource.kind == Kind::monitor && is("body", json::value_t::object);
+                method = "POST";
+                path = resource.path;
+            } else if (resource.kind != Kind::monitor && resource.typed()) {
+                bool table = resource.kind == Kind::table;
+                if (name == "create") {
+                    shape = table && is("object", json::value_t::object);
+                    method = "POST";
+                    path = resource.path;
+                } else if (name == "update") {
+                    shape = (table ? !key.empty() : key.empty()) && is("set", json::value_t::object) &&
+                            is("clear", json::value_t::array) &&
+                            std::ranges::all_of(op["clear"], [](const json& item) { return item.is_string(); });
+                    method = "PUT";
+                    path = key.empty() ? resource.path : fortiapi::path(resource.path, key);
+                } else if (name == "delete") {
+                    shape = table && !key.empty();
+                    method = "DELETE";
+                    path = fortiapi::path(resource.path, key);
+                }
+            }
+            if (!shape) tampered(id, "operation");
+            if (auto digest = op.find("before_digest"); digest == op.end() || !(digest->is_string() || digest->is_null()))
+                tampered(id, "operation");
+            auto wire = op.find("wire");
+            if (wire == op.end() || !wire->is_object() || wire->value("method", "") != method || wire->value("path", "") != path)
+                tampered(id, "wire");
         }
         return plan;
     }
@@ -240,9 +285,19 @@ namespace forti::engine::detail {
                 "password", "passwd", "passphrase", "psk", "secret", "private-key", "privatekey", "key-material",
                 "token", "pwd", "md5-key", "auth-key", "authentication-key", "pre-shared-key", "pin",
                 "community", "credential",
+                // From the 7.4.8 schema snapshot (attributes typed password*, security-audit.md S-08):
+                // api-key, aws-api-key, uploadpass, auth-string (RIP), key-string (key-chain, OSPF),
+                // preshared-key (FortiAnalyzer), keytab (base64 Kerberos keytab).
+                "api-key", "uploadpass", "auth-string", "key-string", "preshared", "keytab",
         };
-        static constexpr std::string_view exact[] = {"key", "keys", "ppk-secret", "auth-code", "radius-secret"};
+        static constexpr std::string_view exact[] = {"key", "keys", "ppk-secret", "auth-code", "radius-secret",
+                                                     "bmr-hostname"};   // typed password in the schema
         if (std::ranges::find(exact, std::string_view(name)) != std::end(exact)) return true;
+        // "<something>-key(s)": enc-key, server-key, secondary-key, ddns-key, inter-controller-key, mpsk-key,
+        // n-mhae-key... Public keys and lookup keys are the exceptions.
+        if ((name.ends_with("-key") || name.ends_with("-keys")) && name.find("public") == std::string::npos &&
+            name != "parent-key" && name != "search-key" && name != "sso-attribute-key")
+            return true;
         for (auto fragment: fragments) {
             auto at = name.find(fragment);
             if (at == std::string::npos) continue;
@@ -265,7 +320,8 @@ namespace forti::engine::detail {
             auto children = node.find("children");
             if (children == node.end() || !children->is_object()) return;
             for (auto it = children->begin(); it != children->end(); ++it) {
-                if (it.value().is_object() && it.value().value("type", "") == "password") out.insert(it.key());
+                // password, password-2, password-3, password_aes256 (all in the 7.4.8 schema).
+                if (it.value().is_object() && it.value().value("type", "").starts_with("password")) out.insert(it.key());
                 self(self, it.value());
             }
         };
@@ -295,6 +351,56 @@ namespace forti::engine::detail {
         return out;
     }
 
+    void redact_read(json& value, std::set<std::string, std::less<>>& paths) {
+        // Iterative: device replies are depth-checked, but this keeps the walk off the stack anyway.
+        std::vector<std::pair<json*, std::string>> stack{{&value, ""}};
+        auto escaped = [](std::string_view key) {
+            std::string out;
+            for (char c: key) out += c == '~' ? "~0" : c == '/' ? "~1" : std::string(1, c);
+            return out;
+        };
+        while (!stack.empty()) {
+            auto [node, pointer] = std::move(stack.back());
+            stack.pop_back();
+            if (node->is_array()) {
+                for (auto& item: *node) stack.emplace_back(&item, pointer + "/*");
+            } else if (node->is_object()) {
+                for (auto it = node->begin(); it != node->end(); ++it) {
+                    std::string at = pointer + "/" + escaped(it.key());
+                    json& child = it.value();
+                    bool empty = child.is_null() || (child.is_string() && child.get_ref<const std::string&>().empty()) ||
+                                 (child.is_structured() && child.empty());
+                    if (sensitive_name(it.key()) && !empty) {
+                        child = redacted;
+                        paths.insert(std::move(at));
+                    } else {
+                        stack.emplace_back(&child, std::move(at));
+                    }
+                }
+            } else if (node->is_string() && node->get_ref<const std::string&>().starts_with("ENC ")) {
+                *node = redacted;
+                paths.insert(pointer.empty() ? "/" : pointer);
+            }
+        }
+    }
+
+    std::string summarize(const json& plan) {
+        const json operations = plan.value("operations", json::array());
+        const json device = plan.value("device", json::object());
+        std::map<std::string, int> counts;
+        for (const auto& op: operations)
+            if (op.is_object() && op.contains("op") && op["op"].is_string()) ++counts[op["op"].get<std::string>()];
+        std::string parts;
+        for (const char* op: {"create", "update", "delete", "action"})
+            if (counts[op]) parts += std::format("{}{} {}", parts.empty() ? "" : ", ", counts[op], op);
+        auto text = [&](const char* key) {
+            auto it = device.find(key);
+            return it != device.end() && it->is_string() ? it->get<std::string>() : std::string();
+        };
+        return std::format("{} operation{} on {} ({}): {}; risk {}", operations.size(), operations.size() == 1 ? "" : "s",
+                           text("profile"), text("host"), parts, to_string(plan_risk(plan)));
+    }
+
     json plan_view(const json& plan, bool full) {
         json view = {{"id", plan.value("id", "")},
                      {"digest", plan.value("digest", "")},
@@ -302,7 +408,9 @@ namespace forti::engine::detail {
                      {"created_at", plan.value("created_at", "")},
                      {"device", plan.value("device", json::object())},
                      {"risk", to_string(plan_risk(plan))},
-                     {"summary", plan.value("summary", "")}};
+                     // Recomputed: the stored summary is outside the digest, and a person approving
+                     // the plan reads this line first.
+                     {"summary", summarize(plan)}};
         if (plan.contains("rollback_of")) view["rollback_of"] = plan["rollback_of"];
         json operations = json::array();
         for (const auto& op: plan.value("operations", json::array())) {
@@ -328,7 +436,45 @@ namespace forti::engine::detail {
         return view;
     }
 
+    // ---- object keys ----
+
+    bool addressable_key(std::string_view key) { return !key.empty() && key != "." && key != ".."; }
+
+    void validate_key(std::string_view key, std::string_view where) {
+        if (!addressable_key(key))
+            throw Failure(Code::usage, std::format("{}: \"{}\" cannot be used as an object key (it would address the "
+                                                   "table or its parent, not one object)", where, key),
+                          {{"key", key}});
+    }
+
+    // ---- device replies ----
+
+    void check_reply_depth(const json& body, std::string_view what, std::size_t limit) {
+        std::vector<std::pair<const json*, std::size_t>> stack{{&body, 0}};
+        while (!stack.empty()) {
+            auto [node, depth] = stack.back();
+            stack.pop_back();
+            if (!node->is_structured()) continue;
+            if (depth >= limit)
+                throw Failure(Code::api, std::format("{}: the device reply is nested more than {} levels deep", what, limit));
+            for (const auto& child: *node)
+                if (child.is_structured()) stack.emplace_back(&child, depth + 1);
+        }
+    }
+
     // ---- audit ----
+
+    bool audit_writable(const Paths& paths) {
+        try {
+            ensure_private_dir(paths.state);
+            int fd = ::open((paths.state / "audit.jsonl").c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+            if (fd < 0) return false;
+            ::close(fd);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
 
     bool audit(const Paths& paths, json event) {
         try {
@@ -337,7 +483,7 @@ namespace forti::engine::detail {
             line.update(event);
             std::string text = canonical(line) + "\n";
             fs::path file = paths.state / "audit.jsonl";
-            int fd = ::open(file.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+            int fd = ::open(file.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
             if (fd < 0) return false;
             ::fchmod(fd, 0600);
             // One write() per line: O_APPEND keeps concurrent writers' lines whole.

@@ -3,7 +3,7 @@ project('forti-cli', 'cpp',
         meson_version : '>=1.3.0',
         license : 'MIT',
         default_options : ['warning_level=3', 'cpp_std=c++23', 'buildtype=release', 'optimization=s',
-                           'b_ndebug=if-release'])
+                           'b_ndebug=if-release', 'forti-api:tests=disabled'])
 
 # Release profile (.claude/context/release.md, "Build profile" has the measurements). Size-optimized:
 # the executable is mostly instantiated SDK code that runs once per request against a network API,
@@ -33,4 +33,11 @@ if not meson.is_subproject()
     subdir('src')
     subdir('tests')
     install_man('doc/forti.1')
+elif get_option('subproject_cli')
+    # forti-mcp's integration tests drive `forti` too (approvals, shared state). Built, never installed.
+    subdir('src')
 endif
+
+# The mock FortiOS server and test harness (Python 3 stdlib), for consumers' integration tests:
+# subproject('forti-cli').get_variable('mock_fortios_dir').
+mock_fortios_dir = meson.current_source_dir() / 'tests' / 'mock-fortios'

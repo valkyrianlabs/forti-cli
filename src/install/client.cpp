@@ -72,7 +72,12 @@ namespace forti::install {
     std::vector<Action> ClientAdapter::install_skill(Scope scope, std::string_view content, const Context& context) const {
         auto path = skill_file(scope, context);
         std::string text(content);
-        return {{"write", std::format("write {}", path.string()), [path, text] { write_file_atomic(path, text, 0644); }}};
+        std::optional<fs::path> root;
+        if (scope != Scope::user) root = context.project_dir;   // .claude/skills, .agents/skills in the project
+        return {{"write", std::format("write {}", path.string()), [path, text, root] {
+                     if (root) require_inside(path, *root);
+                     write_file_atomic(path, text, 0644);
+                 }}};
     }
 
     std::vector<Action> ClientAdapter::remove_skill(Scope scope, const Context& context) const {
@@ -82,7 +87,11 @@ namespace forti::install {
         // Remove SKILL.md, then directories left empty: up to the project for project files, up to the
         // client's own directory (~/.claude, ~/.agents) for user files, which is never removed itself.
         auto stop = scope == Scope::user ? path.parent_path().parent_path().parent_path() : context.project_dir;
-        return {{"remove", std::format("remove {}", path.string()), [path, stop] { remove_file(path, stop); }}};
+        bool confined = scope != Scope::user;
+        return {{"remove", std::format("remove {}", path.string()), [path, stop, confined] {
+                     if (confined) require_inside(path, stop);
+                     remove_file(path, stop);
+                 }}};
     }
 
     std::optional<std::string> ClientAdapter::installed_skill(Scope scope, const Context& context) const {

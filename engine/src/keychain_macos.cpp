@@ -103,33 +103,46 @@ namespace forti::engine {
 
             std::string_view kind() const override { return "keychain"; }
 
-            std::optional<std::string> get(std::string_view account) override {
+            // The binding (Profile::secret_binding()) lives in the item's generic attribute (kSecAttrGeneric).
+            std::optional<StoredSecret> get(std::string_view account) override {
                 auto service = cf_string(service_);
                 auto name = cf_string(account);
                 auto search = query(service, name);
                 CFDictionarySetValue(search.get(), kSecReturnData, kCFBooleanTrue);
+                CFDictionarySetValue(search.get(), kSecReturnAttributes, kCFBooleanTrue);
                 CFDictionarySetValue(search.get(), kSecMatchLimit, kSecMatchLimitOne);
                 Cf<CFTypeRef> result;
                 OSStatus status = SecItemCopyMatching(search.get(), result.out());
                 if (status == errSecItemNotFound) return std::nullopt;
                 if (status != errSecSuccess) fail("read", account, status);
-                if (!result.get() || CFGetTypeID(result.get()) != CFDataGetTypeID())
+                if (!result.get() || CFGetTypeID(result.get()) != CFDictionaryGetTypeID())
+                    throw Failure(Code::config, std::format("macOS Keychain: unexpected reply for {}", account));
+                auto item = static_cast<CFDictionaryRef>(result.get());
+                auto bytes = [](const void* value) -> std::optional<std::string> {
+                    if (!value || CFGetTypeID(value) != CFDataGetTypeID()) return std::nullopt;
+                    auto data = static_cast<CFDataRef>(value);
+                    return std::string(reinterpret_cast<const char*>(CFDataGetBytePtr(data)),
+                                       static_cast<std::size_t>(CFDataGetLength(data)));
+                };
+                auto secret = bytes(CFDictionaryGetValue(item, kSecValueData));
+                if (!secret)
                     throw Failure(Code::config, std::format("macOS Keychain: the item for {} holds no password data", account));
-                auto data = static_cast<CFDataRef>(result.get());
-                return std::string(reinterpret_cast<const char*>(CFDataGetBytePtr(data)),
-                                   static_cast<std::size_t>(CFDataGetLength(data)));
+                return StoredSecret{std::move(*secret), bytes(CFDictionaryGetValue(item, kSecAttrGeneric)).value_or("")};
             }
 
-            void put(std::string_view account, std::string_view secret) override {
+            void put(std::string_view account, std::string_view secret, std::string_view binding) override {
                 auto service = cf_string(service_);
                 auto name = cf_string(account);
                 Cf<CFDataRef> data(CFDataCreate(kCFAllocatorDefault, reinterpret_cast<const UInt8*>(secret.data()),
                                                 static_cast<CFIndex>(secret.size())));
+                Cf<CFDataRef> bound(CFDataCreate(kCFAllocatorDefault, reinterpret_cast<const UInt8*>(binding.data()),
+                                                 static_cast<CFIndex>(binding.size())));
 
                 auto match = query(service, name);
                 Cf<CFMutableDictionaryRef> update(CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
                                                                             &kCFTypeDictionaryValueCallBacks));
                 CFDictionarySetValue(update.get(), kSecValueData, data.get());
+                CFDictionarySetValue(update.get(), kSecAttrGeneric, bound.get());
                 OSStatus status = SecItemUpdate(match.get(), update.get());
                 if (status == errSecSuccess) return;
                 if (status != errSecItemNotFound) fail("update", account, status);
@@ -138,6 +151,7 @@ namespace forti::engine {
                 auto label = cf_string(std::format("{} ({})", service_, account));
                 auto description = cf_string("FortiOS REST API credential (forti-cli)");
                 CFDictionarySetValue(item.get(), kSecValueData, data.get());
+                CFDictionarySetValue(item.get(), kSecAttrGeneric, bound.get());
                 CFDictionarySetValue(item.get(), kSecAttrLabel, label.get());
                 CFDictionarySetValue(item.get(), kSecAttrDescription, description.get());
                 status = SecItemAdd(item.get(), nullptr);

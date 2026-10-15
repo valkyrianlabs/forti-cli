@@ -68,7 +68,12 @@ namespace forti::engine {
 
         // ---- The four operations (requests: architecture.md, "Requests") ----
         nlohmann::json discover(const nlohmann::json& request);
-        nlohmann::json read(const nlohmann::json& request);
+        // Device secrets in the result are redacted (architecture.md, "Read redaction"): string values
+        // starting "ENC " and values of sensitive attribute names become "<redacted>", listed in
+        // meta.redacted. Only a C++ caller can pass Secrets::reveal (the CLI's `forti get --reveal`);
+        // no request field turns redaction off, so MCP cannot.
+        enum class Secrets { redact, reveal };
+        nlohmann::json read(const nlohmann::json& request, Secrets secrets = Secrets::redact);
         nlohmann::json plan(const nlohmann::json& request);
         nlohmann::json apply(const nlohmann::json& request);
 

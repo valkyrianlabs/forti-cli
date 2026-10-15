@@ -130,7 +130,7 @@ TEST_F(ReadCli, ColorOnlyWhenEnabledAndTablesFitTheTerminal) {
     EXPECT_NE(out.str().find("\x1b[1m"), std::string::npos);
     auto text = lines(out.str());
     for (std::size_t i = 1; i < text.size(); ++i)   // the header and the note carry escape codes
-        if (!text[i].starts_with("\x1b")) EXPECT_LE(cli::display_width(text[i]), 40u) << text[i];
+        if (!text[i].starts_with("\x1b")) { EXPECT_LE(cli::display_width(text[i]), 40u) << text[i]; }
     EXPECT_NE(out.str().find("--fields or --json"), std::string::npos);
     EXPECT_TRUE(text[1].starts_with("address-"));
 }

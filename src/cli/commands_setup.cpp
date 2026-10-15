@@ -294,22 +294,42 @@ namespace forti::cli {
         // ---- configure ----
 
         // The real store plus secrets not yet written, so a profile is verified before anything is saved.
+        // Everything read through it is bound to the profile being configured (`binding`): the operator
+        // is pointing this profile at that device now, so a kept key is re-bound to it on save.
         class PendingStore final : public engine::SecretStore {
             engine::SecretStore& base_;
             std::map<std::string, std::string, std::less<>> pending_;
+            std::string binding_;
 
         public:
             explicit PendingStore(engine::SecretStore& base) : base_(base) {}
+            void bind(std::string binding) { binding_ = std::move(binding); }
             void stage(std::string account, std::string secret) { pending_.insert_or_assign(std::move(account), std::move(secret)); }
-            [[nodiscard]] const auto& pending() const { return pending_; }
 
             std::string_view kind() const override { return base_.kind(); }
-            std::optional<std::string> get(std::string_view account) override {
-                if (auto it = pending_.find(account); it != pending_.end()) return it->second;
-                return base_.get(account);
+            std::optional<engine::StoredSecret> get(std::string_view account) override {
+                if (auto it = pending_.find(account); it != pending_.end()) return engine::StoredSecret{it->second, binding_};
+                auto stored = base_.get(account);
+                if (stored) stored->binding = binding_;
+                return stored;
             }
-            void put(std::string_view account, std::string_view secret) override { stage(std::string(account), std::string(secret)); }
+            void put(std::string_view account, std::string_view secret, std::string_view) override {
+                stage(std::string(account), std::string(secret));
+            }
             bool erase(std::string_view account) override { return pending_.erase(std::string(account)) > 0; }
+
+            // Writes staged secrets, and re-binds kept ones, for the store-source accounts of `profile`.
+            void commit(const Profile& profile) {
+                auto binding = profile.secret_binding();
+                auto write = [&](const engine::SecretRef& ref, const std::string& account) {
+                    if (ref.source != engine::SecretRef::Source::store) return;
+                    if (auto it = pending_.find(account); it != pending_.end()) base_.put(account, it->second, binding);
+                    else if (auto stored = base_.get(account); stored && stored->binding != binding)
+                        base_.put(account, stored->secret, binding);
+                };
+                write(profile.api_key, profile.api_key_account());
+                write(profile.cert_password, profile.cert_password_account());
+            }
         };
 
         std::string read_stdin_secret(const Context& context, std::string_view what) {
@@ -587,6 +607,7 @@ namespace forti::cli {
                 non_interactive(context, args, draft);
             }
             Profile& profile = draft.profile;
+            secrets.bind(profile.secret_binding());
 
             json result = {{"profile", nullptr}};
             if (!args.flag("skip-check")) {
@@ -609,7 +630,7 @@ namespace forti::cli {
 
             // Verified (or not checked): write secrets first, so a saved profile never points at nothing.
             auto& store = context.engine.secrets();
-            for (const auto& [account, secret]: secrets.pending()) store.put(account, secret);
+            secrets.commit(profile);
             if (draft.existed) {
                 if (draft.previous.api_key.source == SecretRef::Source::store && profile.api_key.source != SecretRef::Source::store)
                     store.erase(profile.api_key_account());
@@ -679,7 +700,10 @@ namespace forti::cli {
                 data["api_key"] = describe_source(profile.api_key, store.kind());
                 if (profile.api_key.source == SecretRef::Source::store) {
                     try {
-                        data["api_key_stored"] = store.get(profile.api_key_account()).has_value();
+                        auto stored = store.get(profile.api_key_account());
+                        data["api_key_stored"] = stored.has_value();
+                        // Released only to this host:port (see SecretStore); a mismatch needs forti configure.
+                        if (stored) data["api_key_bound"] = stored->binding == profile.secret_binding();
                     } catch (const Failure& failure) {
                         data["api_key_stored"] = std::string("unknown: ") + failure.what();
                     }
@@ -1008,7 +1032,7 @@ namespace forti::cli {
                                        {"details", data}}}};
             if (context.output.format == Format::json) return emit(context.output, failure);
             emit(context.output, engine::ok(data), render_checks);
-            *context.output.err << std::format("forti: doctor: {}\n", failure["error"]["message"].get<std::string>());
+            *context.output.err << std::format("forti: doctor: {}\n", printable(failure["error"]["message"].get<std::string>()));
             return exit_status(first_code);
         }
 

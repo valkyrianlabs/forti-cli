@@ -10,6 +10,7 @@ ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api   # SDK co-development
 meson setup build/dev -Dtests=enabled --buildtype=debugoptimized
 ninja -C build/dev -j4                 # engine shard TUs: ~1.8 GB each at -Os, ~3.9 GB with -g
 meson test -C build/dev --suite unit   # network-free; what CI runs
+meson test -C build/dev --suite integration   # real `forti` vs a mock FortiOS over TLS (python3 + openssl)
 meson install -C build/rel --skip-subprojects   # source installs: never install the SDK from the wrap
 ```
 
@@ -26,6 +27,8 @@ Packaging and release: `.claude/context/release.md`.
 | `src/install/` | AI client adapters for `forti install mcp` |
 | `skill/` | The agent skill installed alongside the MCP registration |
 | `tests/` | GoogleTest, network-free. `tests/support/fake_transport.hpp` scripts the SDK transport |
+| `tests/mock-fortios/` | Stateful mock FortiOS REST server (Python stdlib, HTTPS with a throwaway CA, fault injection, request records) and the harness forti-mcp reuses (`mock_fortios_dir`) |
+| `tests/integration/` | The real `forti` end to end against the mock; `scan_http.py` checks that nothing outside forti-api speaks HTTP. `tests/perf/bench.py`: startup, RSS and latency |
 
 ## Rules
 
