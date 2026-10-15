@@ -4,6 +4,14 @@ project('forti-cli', 'cpp',
         license : 'MIT',
         default_options : ['warning_level=3', 'cpp_std=c++23', 'buildtype=release', 'b_ndebug=if-release', 'forti-api:tests=disabled'])
 
+# Release builds (packages, the release workflow) are buildtype=release: -O3, tested as built.
+# Pull-request CI builds unoptimized (-O0) and tests that build (.github/workflows/ci.yml).
+cxx = meson.get_compiler('cpp')
+if not get_option('debug') and host_machine.system() != 'darwin' and cxx.has_link_argument('-Wl,--gc-sections')
+    add_project_arguments('-ffunction-sections', '-fdata-sections', language : 'cpp')
+    add_project_link_arguments('-Wl,--gc-sections', language : 'cpp')
+endif
+
 # forti-api is the only FortiOS implementation. A system install (pkg-config forti-api) wins; the
 # wrap is the source-build fallback.
 forti_api_dep = dependency('forti-api', version : '>=1.0.1')

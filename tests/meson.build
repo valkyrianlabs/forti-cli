@@ -51,8 +51,12 @@ endif
 # no code outside forti-api builds URLs or talks HTTP, sockets, DNS or TLS.
 python3 = find_program('python3', required : false)
 if python3.found() and not get_option('tests').disabled()
+    integration_env = environment({'FORTI_BINARY' : forti_exe.full_path(), 'PYTHONDONTWRITEBYTECODE' : '1'})
+    if get_option('b_sanitize').contains('address')
+        integration_env.set('ASAN_OPTIONS', 'detect_container_overflow=0')
+    endif
     test('cli-e2e', python3, args : [files('integration/test_cli.py')],
-         env : {'FORTI_BINARY' : forti_exe.full_path(), 'PYTHONDONTWRITEBYTECODE' : '1'},
+         env : integration_env,
          depends : forti_exe, suite : 'integration', timeout : 300)
     test('no-second-http-stack', python3,
          args : [files('integration/scan_http.py'), '--root', meson.project_source_root() / 'engine',
