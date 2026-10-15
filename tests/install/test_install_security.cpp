@@ -119,7 +119,7 @@ TEST_F(Hostile, ProjectInstallStillWorksAndKeepsTheEntryClean) {
                            .desired = {"/opt/my \"forti\" dir/forti-mcp", {"--profile", "lab"}, false}};
     auto plans = plan_install(request, context);
     execute(plans, context);
-    for (const auto& plan: plans) EXPECT_EQ(plan.state, "installed") << to_json(plan).dump();
+    for (const auto& plan: plans) { EXPECT_EQ(plan.state, "installed") << to_json(plan).dump(); }
     auto mcp = nlohmann::json::parse(slurp(project / ".mcp.json"));
     EXPECT_EQ(mcp["mcpServers"]["forti"]["command"], "/opt/my \"forti\" dir/forti-mcp");
     EXPECT_FALSE(mcp["mcpServers"]["forti"].contains("env"));

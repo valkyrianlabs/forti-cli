@@ -136,7 +136,7 @@ TEST_F(Fixture, NoRequestFieldTurnsRedactionOff) {
         request.update(extra);
         json result = read(request);
         // Unknown fields are refused; a query parameter is just sent to the device.
-        if (result["ok"]) EXPECT_EQ(result["data"][0]["psksecret"], "<redacted>") << extra.dump();
+        if (result["ok"]) { EXPECT_EQ(result["data"][0]["psksecret"], "<redacted>") << extra.dump(); }
         else EXPECT_EQ(result["error"]["code"], "usage") << extra.dump();
         transport->script.clear();
     }

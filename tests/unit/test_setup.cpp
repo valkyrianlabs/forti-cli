@@ -201,7 +201,7 @@ TEST_F(SetupCli, DoctorPassesInOrderAndReportsTheMode) {
     for (const auto& c: data["checks"]) order.push_back(c["check"]);
     EXPECT_EQ(order, (std::vector<std::string>{"config", "profile", "secrets", "tls_files", "connection", "auth", "version",
                                                "mode", "mcp"}));
-    for (const auto& c: data["checks"]) EXPECT_NE(c["status"], "fail") << c.dump();
+    for (const auto& c: data["checks"]) { EXPECT_NE(c["status"], "fail") << c.dump(); }
     EXPECT_NE(check(data["checks"], "mcp")["message"].get<std::string>().find(mcp), std::string::npos);
     EXPECT_NE(check(data["checks"], "mode")["message"].get<std::string>().find("read-only"), std::string::npos);
     EXPECT_EQ(data["summary"]["fail"], 0);

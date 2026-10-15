@@ -13,7 +13,7 @@ TEST(Catalog, ReflectsEveryGeneratedEndpoint) {
         singletons += resource.kind == Kind::singleton;
         monitors += resource.kind == Kind::monitor;
         EXPECT_TRUE(resource.typed()) << resource.path;
-        if (resource.kind == Kind::table) EXPECT_FALSE(resource.key.empty()) << resource.path;
+        if (resource.kind == Kind::table) { EXPECT_FALSE(resource.key.empty()) << resource.path; }
     }
     // forti-api 1.0.0: 487 cmdb endpoints (360 tables, 127 singletons) and 47 typed monitor GETs.
     EXPECT_EQ(tables, 360u);
