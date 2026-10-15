@@ -4,14 +4,14 @@
 # or too-old libforti-api-dev fails the build instead of silently vendoring another SDK.
 #
 # Release profile (.claude/context/release.md, "Build profile"): debhelper configures meson with
-# buildtype=plain and dpkg-buildflags (hardening on), so the size optimization meson.build sets for
-# its own release builds is applied here as -Os in place of dpkg's -O2, and NDEBUG explicitly
+# buildtype=plain and dpkg-buildflags (hardening on), so meson.build's release optimization (-O3) is
+# applied here in place of dpkg's -O2, and NDEBUG explicitly
 # (b_ndebug=if-release does not fire for buildtype=plain). meson.build adds -ffunction-sections
 # -fdata-sections -Wl,--gc-sections for non-debug ELF builds. debhelper strips into forti-cli-dbgsym.
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export DEB_CXXFLAGS_MAINT_STRIP = -O2
-export DEB_CXXFLAGS_MAINT_APPEND = -Os
+export DEB_CXXFLAGS_MAINT_APPEND = -O3
 
 include /usr/share/dpkg/architecture.mk
 

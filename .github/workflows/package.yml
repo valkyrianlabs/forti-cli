@@ -1,22 +1,9 @@
-# Packaging: the optimized release build as packaged, the Debian release rehearsal with a clean
-# install, and the Homebrew formula. Slow by nature (an optimized build of every engine shard), so it
-# runs only when packaging can be affected and on main; ci.yml validates pull requests.
+# Manual packaging rehearsal: the Debian package and the Homebrew formula built -O3 as released, and
+# tested as built. Never on pull requests (ci.yml: one -O0 build per job); release.yml runs the same
+# steps for a tagged release.
 name: Package
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    paths:
-      - debian/**
-      - packaging/**
-      - release.toml
-      - meson.build
-      - meson.options
-      - subprojects/*.wrap
-      - ci/**
-      - .github/**
-      - .release/**
   workflow_dispatch:
 
 permissions:
