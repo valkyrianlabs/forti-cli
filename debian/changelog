@@ -1,3 +1,13 @@
+forti-cli (0.1.1-1) unstable; urgency=medium
+
+  * Documentation: the docs package (docs set forti-cli) is rewritten in
+    Payload Markdown directives (TOCs, tabs, steps, callouts, cards, badges,
+    buttons), with new summary tables for commands, exit statuses, plan states
+    and rollback operations. The forti binary and the package contents are
+    unchanged.
+
+ -- Cooper Larson <cooper@valkyrianlabs.com>  Thu, 15 Oct 2026 18:32:10 +0000
+
 forti-cli (0.1.0-1) unstable; urgency=medium
 
   * Packaging
