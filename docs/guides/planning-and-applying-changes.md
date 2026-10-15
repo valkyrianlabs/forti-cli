@@ -13,6 +13,9 @@ Every change goes through two steps. `forti plan` reads the device, validates th
 it as a plan; it never changes the device. `forti apply <id>` executes a stored plan once. Between
 the two, you (or a person you trust) read exactly what will be sent.
 
+:::toc[On this page]{depth="3" theme="compact"}
+:::
+
 ## Writing a plan
 
 The convenience forms plan one operation:
@@ -71,8 +74,13 @@ forti plan --profile fw01 --file - < changes.json
 | `set`, `clear` | `update`: attributes to set, and attribute names to reset to their defaults (at least one of the two) |
 | `body` | `action`: the JSON body of the monitor POST (default `{}`) |
 
-Any other field is a `usage` error. Which operation fits which resource: `create`, `update` and
-`delete` for tables, `update` for singletons, `action` for monitor paths.
+Any other field is a `usage` error. Which operation fits which resource:
+
+| Resource kind | Operations |
+|---|---|
+| table | `create`, `update`, `delete` |
+| singleton | `update` |
+| monitor path | `action` |
 
 ### What planning checks
 
@@ -87,9 +95,11 @@ stored. It also refuses:
 - the value `"<redacted>"` anywhere in a plan. Reads show secrets that way; leave a secret attribute
   out to keep its current value.
 
-**Table attributes are replaced wholesale.** FortiOS replaces a list attribute such as `srcaddr` or
-`member` with exactly the entries you send. List every entry you want to keep; the diff shows which
-entries the change adds and removes and the resulting list.
+:::callout[Table attributes are replaced wholesale]{variant="warning"}
+FortiOS replaces a list attribute such as `srcaddr` or `member` with exactly the entries you send.
+List every entry you want to keep; the diff shows which entries the change adds and removes and the
+resulting list.
+:::
 
 ### The plan
 
@@ -116,24 +126,34 @@ SHA-256 digest, the after-state, a field diff, the exact request (method, path a
 tier. The plan's digest is a SHA-256 over the device identity and the operations. Plan ids look like
 `20261015-142233-a1b2c3` (UTC time and six random hex digits).
 
+:::callout[Stored plans hold real values]{variant="note"}
 Sensitive values are redacted in everything forti prints (diffs, request bodies, `plan show`). The
 stored plan file keeps the real values because apply writes them and compares the device against
 them; that is why it is owner-only.
+:::
 
 ```sh
 forti plan list                      # stored plans, newest first, with their state
 forti plan show <id>                 # the plan, its before/after, approval and applied state
 ```
 
-`plan list` states: `pending`, `approved`, `approval_expired`, `applied`, and `tampered` (or
-`invalid`) for a plan file that fails its integrity check.
+| `plan list` state | Meaning |
+|---|---|
+| `pending` | not applied, and no approval for its digest |
+| `approved` | not applied, with an unexpired approval for its digest |
+| `approval_expired` | not applied; its approval has expired (approvals last 24 hours) |
+| `applied` | the plan has run (a plan runs at most once) |
+| `tampered`, `invalid` | the plan file fails its integrity check |
 
 ## Operating modes
 
-The **FortiOS account's privileges are the primary authorization boundary**: an API user can do
-exactly what its admin profile, VDOM assignment and trusted hosts allow, whatever forti's settings.
-A profile's mode is the operator's policy on top of that. It is set with `forti configure --mode` or
-`forti profile mode`, is stored in config.json, and cannot be changed through forti-mcp.
+:::callout[The FortiOS account is the primary authorization boundary]{variant="warning"}
+An API user can do exactly what its admin profile, VDOM assignment and trusted hosts allow, whatever
+forti's settings. A profile's mode is the operator's policy on top of that.
+:::
+
+A mode is set with `forti configure --mode` or `forti profile mode`, is stored in config.json, and
+cannot be changed through forti-mcp.
 
 | Mode | Plan | Apply |
 |---|---|---|
@@ -154,9 +174,13 @@ the apply it allows. Approving a plan of a read-only profile, or one already app
 (`policy_denied`); for an autonomous profile nothing is written and forti says no approval is needed.
 
 Approval exists only in the CLI. forti-mcp never writes approvals: in guarded mode its apply tool
-answers `approval_required` with the `forti plan approve <id>` command for the person to run. An
-approval records operator intent; it is not a cryptographic control. See
+answers `approval_required` with the `forti plan approve <id>` command for the person to run.
+
+:::callout[An approval records intent]{variant="warning"}
+An approval records operator intent; it is not a cryptographic control. An agent that can run shell
+commands as you can approve a plan too. See
 [What a mode does and does not stop](/reference/security#what-a-mode-does-and-does-not-stop).
+:::
 
 ## Applying a plan
 
@@ -193,17 +217,25 @@ Each operation ends with one status:
 
 An apply that stopped returns `partial_failure`, `outcome_unknown` or `management_connectivity_lost`
 (exit 8) with the full execution record in `error.details`; in text mode the record is printed
-first. An HTTP failure is never taken to mean "nothing changed": after a failed operation forti
-re-reads the object. FortiOS creates are not transactional, so a create that failed can leave the
-object behind (`exists_after_failure`).
+first.
+
+:::callout[A failed request does not mean nothing changed]{variant="warning"}
+An HTTP failure is never taken to mean "nothing changed": after a failed operation forti re-reads the
+object. FortiOS creates are not transactional, so a create that failed can leave the object behind
+(`exists_after_failure`).
+:::
 
 ### Rollback plans
 
 Every apply that may have changed the device writes a **rollback plan**: the inverse operations, in
-reverse order, built from the recorded before-states. A create is undone by a delete, an update by
-setting the previous values (or clearing attributes that had none), a delete by re-creating the
-object from its writable attributes. Monitor actions cannot be rolled back; the record lists them
-under `rollback.skipped`.
+reverse order, built from the recorded before-states.
+
+| Operation | Undone by |
+|---|---|
+| create | a delete |
+| update | setting the previous values (or clearing attributes that had none) |
+| delete | re-creating the object from its writable attributes |
+| action | nothing: monitor actions cannot be rolled back; the record lists them under `rollback.skipped` |
 
 The rollback plan is an ordinary stored plan (`kind: rollback`, `rollback_of: <id>`). Review it with
 `forti plan show` and run it with `forti apply <rollback id>`, under the same mode rules: a guarded
@@ -217,8 +249,10 @@ logged, and the 20 most recent backups are kept (older ones are deleted after ea
 backup cannot be taken, the plan does not run (`policy_denied`, reason `backup_failed`). Setting
 `"backup_before_critical": false` on the profile in config.json turns the backup off.
 
+:::callout[Treat a backup like a credential]{variant="warning"}
 A backup holds the complete configuration, including FortiOS-encrypted secrets, most of them
-reversible. Treat it like a credential; see [Security notes](/reference/security#what-is-stored-where).
+reversible. See [Security notes](/reference/security#what-is-stored-where).
+:::
 
 ### Management connectivity probe
 
@@ -229,11 +263,13 @@ the rollback plan id, the backup reference and the before-state of the operation
 
 ### Recovery aids are not guaranteed recovery
 
+:::callout[Keep an independent path to the device]{variant="danger"}
 The rollback plan and the configuration backup both need a **working management path** to the device.
 If a change cuts off management access (an interface, a route, an admin setting, trusted hosts), forti
 cannot undo it, and it never claims to. You need an independent path: the console port, an
 out-of-band management interface, or a device-side automatic revert. Have one before you, or an
 agent, change critical settings.
+:::
 
 ## Risk tiers
 
@@ -246,8 +282,10 @@ its riskiest operation.
 | `elevated` | policies, VIPs, IP pools, users, VPN, logging, most `system/*`, and monitor actions not listed as critical |
 | `critical` | management access, routing, interfaces, zones, admins and API users, access profiles, HA, VDOMs, DNS, NTP, SD-WAN, SNMP, certificates, `system/global` and `system/settings`, local-in policies; monitor actions that reboot, restore, upgrade, reset or disconnect (`system/os/*`, `system/config/restore`, `system/firmware/*`, `system/ha-*`, `system/interface/*`, `firewall/session/close-all`, ...) |
 
-Tiers drive the configuration backup, the connectivity probe and the emphasis in output. They are
-not approval gates: what may run is decided by the mode and the FortiOS account.
+:::callout[Tiers are not approval gates]{variant="info"}
+Tiers drive the configuration backup, the connectivity probe and the emphasis in output. What may
+run is decided by the mode and the FortiOS account.
+:::
 
 ## Audit log
 

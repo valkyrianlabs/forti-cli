@@ -16,6 +16,24 @@ forti [global options] <command> [arguments]
 `forti --help` lists the commands; `forti <command> --help` or `forti help <command>` shows a
 command's options, and `man forti` has a summary. A mistyped command gets suggestions.
 
+:::toc[On this page]{depth="3" theme="compact"}
+:::
+
+## Commands at a glance
+
+| Command | Group | What it does | Contacts the device |
+|---|---|---|---|
+| [`configure`](#configure) | Setup | create or update a profile | one verification read, unless `--skip-check` |
+| [`profile`](#profile) | Setup | list, show, set the default, set the mode, remove | never |
+| [`doctor`](#doctor) | Setup | check configuration, credentials, TLS, auth, version, mode | yes |
+| [`devices`](#devices) | Read | list the configured profiles | never |
+| [`discover`](#discover) | Read | search the catalog, or show a resource's attributes | only with `--live` |
+| [`get`](#get) | Read | read configuration or monitor data | yes |
+| [`plan`](#plan) | Change | write, show, list and approve stored plans | when writing a plan (reads only) |
+| [`apply`](#apply) | Change | execute a stored plan once | yes |
+| [`install mcp`](#install-mcp) | Integrations | register forti-mcp with AI clients | never |
+| [`mcp`](#mcp) | Integrations | status, repair or uninstall the registrations | never |
+
 ## Global options
 
 Global options may come before or after the command.
@@ -57,10 +75,14 @@ forti configure --profile NAME --host HOST [options] <credential>
 ```
 
 Creates or updates a profile and verifies it with one read of `monitor/system/status` before saving.
-Options: `--host`, `--port`, `--vdom`, `--ca-bundle`, `--resolve-ip`, `--client-cert`, one of
-`--api-key-stdin`, `--api-key-env VAR`, `--api-key-command CMD`, optionally one of
-`--cert-password-stdin`, `--cert-password-env VAR`, `--cert-password-command CMD`, and `--mode`,
-`--default`, `--skip-check`. See [Profiles and credentials](/guides/profiles-and-credentials).
+See [Profiles and credentials](/guides/profiles-and-credentials).
+
+| Options | |
+|---|---|
+| connection | `--host`, `--port`, `--vdom`, `--ca-bundle`, `--resolve-ip`, `--client-cert` |
+| API key (one of) | `--api-key-stdin`, `--api-key-env VAR`, `--api-key-command CMD` |
+| certificate password (optionally one of) | `--cert-password-stdin`, `--cert-password-env VAR`, `--cert-password-command CMD` |
+| other | `--mode`, `--default`, `--skip-check` |
 
 ### profile
 
@@ -154,9 +176,14 @@ forti plan approve <id> [--yes]
 forti apply <plan id>
 ```
 
-Executes a stored plan once, under the profile's mode: read-only profiles refuse, guarded profiles
-need `forti plan approve <id>` first, autonomous profiles run without approval. See
+Executes a stored plan once, under the profile's mode. See
 [Applying a plan](/guides/planning-and-applying-changes#applying-a-plan).
+
+| Profile mode | `forti apply` |
+|---|---|
+| `read-only` | refused (`policy_denied`) |
+| `guarded` | needs `forti plan approve <id>` first |
+| `autonomous` | runs without approval |
 
 ## Integrations
 

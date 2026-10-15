@@ -12,8 +12,21 @@ tags:
 `forti` is a single executable. Its only runtime dependency is libcurl; the forti-api SDK is
 header-only and compiled in. The package installs `forti` and its man page (`man forti`).
 
-## Debian and Ubuntu
+:::toc[On this page]{depth="2" theme="compact"}
+:::
 
+## Install forti
+
+Pick the method for your platform: the APT package (Debian and Ubuntu, amd64), the Homebrew formula
+(macOS and Linux), or a build from source.
+
+:::tabs{
+  default="apt"
+  theme="glass"
+  tabTheme="muted"
+}
+
+:::tab[APT (Debian, Ubuntu)]{value="apt"}
 The `forti-cli` package (amd64) is published to the ValkyrianLabs APT repository:
 
 ```bash
@@ -30,24 +43,21 @@ sudo apt install -y forti-cli
 ```
 
 The executable is `/usr/bin/forti`.
+:::
 
-## Homebrew (macOS and Linux)
-
+:::tab[Homebrew (macOS, Linux)]{value="homebrew"}
 ```bash
 brew install valkyrianlabs/tap/forti-cli
 ```
 
-Recent Homebrew versions ask you to trust a third-party tap first (`brew trust valkyrianlabs/tap`).
 The formula builds from source against the `forti-api` formula, which it needs only at build time.
 
-## forti-mcp (optional)
+:::callout[Trust the tap first]{variant="note"}
+Recent Homebrew versions ask you to trust a third-party tap first: `brew trust valkyrianlabs/tap`.
+:::
+:::
 
-forti-mcp, the MCP server for AI clients, is a separate package with no dependency on forti-cli:
-`brew install valkyrianlabs/tap/forti-mcp` or `sudo apt install forti-mcp`. With both installed,
-`forti install mcp` registers it with your AI client ([AI agent integration](/guides/ai-agent-integration)).
-
-## From source
-
+:::tab[From source]{value="source"}
 Needs a C++23 compiler (Apple clang 16+ or GCC 13+), Meson 1.3 or later, Ninja and libcurl. The
 forti-api SDK comes from pkg-config (`libforti-api-dev` or the Homebrew formula) or, failing that,
 from the Meson wrap.
@@ -60,10 +70,23 @@ meson compile -C build -j 4
 meson install -C build --skip-subprojects
 ```
 
-The default build type is `release` (-O3). The typed endpoint operations are split across ten
-translation units ("engine shards"), each needing about 2 GB of RAM to compile, so limit the jobs
-on a small machine. `--skip-subprojects` keeps `meson install` from installing the SDK headers when
-they came from the wrap. See [Building](/development/building) for the details.
+The default build type is `release` (-O3). `--skip-subprojects` keeps `meson install` from
+installing the SDK headers when they came from the wrap. See [Building](/development/building) for
+the details.
+
+:::callout[About 2 GB of RAM per compile job]{variant="warning"}
+The typed endpoint operations are split across ten translation units ("engine shards"), each
+needing about 2 GB of RAM to compile, so limit the jobs (`-j`) on a small machine.
+:::
+:::
+
+:::
+
+## forti-mcp (optional)
+
+forti-mcp, the MCP server for AI clients, is a separate package with no dependency on forti-cli:
+`brew install valkyrianlabs/tap/forti-mcp` or `sudo apt install forti-mcp`. With both installed,
+`forti install mcp` registers it with your AI client ([AI agent integration](/guides/ai-agent-integration)).
 
 ## Check the installation
 
@@ -74,3 +97,24 @@ forti discover firewall/address
 
 `--version` prints the forti version and the FortiOS schema version its models come from
 (`forti 0.1.0 (FortiOS schema 7.4.8)`). `discover` works offline: the resource catalog is compiled in.
+
+## Next steps
+
+:::cards{
+  columns="3"
+  cardTheme="muted"
+}
+
+:::card[Quick start]{href="/getting-started/quick-start"}
+Configure a first profile and make a first read and change.
+:::
+
+:::card[Profiles and credentials]{href="/guides/profiles-and-credentials"}
+Every `forti configure` option, credential sources and TLS.
+:::
+
+:::card[Building]{href="/development/building"}
+Build options, engine shards and the release profile.
+:::
+
+:::

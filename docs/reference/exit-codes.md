@@ -12,9 +12,27 @@ tags:
 Every failure has a stable error code (`error.code` in the `--json` envelope), and the exit status
 follows from it. forti and forti-mcp share the same codes.
 
+:::toc[On this page]{depth="2" theme="compact"}
+:::
+
+## Exit statuses
+
+| Exit | Codes | In short |
+|---|---|---|
+| 0 | none | success |
+| 1 | `internal` | a bug or an unexpected state |
+| 2 | `usage` | the command line or request is wrong |
+| 3 | `config` | the local setup is wrong |
+| 4 | `connection`, `auth` | the device could not be reached, or refused the key |
+| 5 | `not_found`, `unknown_resource` | an object, a stored plan, a resource or forti-mcp does not exist |
+| 6 | `validation`, `api` | the device or the catalog rejected the request |
+| 7 | `stale_plan`, `approval_required`, `policy_denied` | nothing was changed: plan again, approve, or change the mode |
+| 8 | `partial_failure`, `management_connectivity_lost`, `outcome_unknown` | an apply stopped and the device may have changed |
+
+## Error codes
+
 | Exit | Code | Meaning | Typical fix |
 |---|---|---|---|
-| 0 | | success | |
 | 1 | `internal` | a bug or an unexpected state | report it, with `--json` output |
 | 2 | `usage` | bad arguments or request shape | `forti <command> --help` |
 | 3 | `config` | missing or invalid profile, credentials or config file; an unwritable audit log | `forti configure`, `forti doctor` |
@@ -31,11 +49,25 @@ follows from it. forti and forti-mcp share the same codes.
 | 8 | `management_connectivity_lost` | apply stopped: the connectivity probe after a critical change failed | restore access through an independent path; see below |
 | 8 | `outcome_unknown` | a change may or may not have reached the device | re-read the object before doing anything else |
 
+## Error details
+
 `error.details` adds structure where it helps: `reason` (for example `read_only`, `already_applied`,
 `before_changed`, `backup_failed`), `hint`, `http_status`, `fortios_error` and `cli_error` from
 FortiOS, and for a stopped apply the full execution record with the rollback plan.
 
-For exit 8, read [Applying a plan](/guides/planning-and-applying-changes#applying-a-plan) and
+```json
+{"ok": false, "error": {"code": "not_found", "message": "firewall/address \"x\" not found", "details": {"http_status": 404}}}
+```
+
+## After exit 8
+
+:::callout[The device may have changed]{variant="danger"}
+Exit 8 means an apply stopped after it began executing operations. Read the execution record in
+`error.details` before doing anything else, then read
+[Applying a plan](/guides/planning-and-applying-changes#applying-a-plan) and
 [Recovery aids are not guaranteed recovery](/guides/planning-and-applying-changes#recovery-aids-are-not-guaranteed-recovery).
+:::
+
+## forti doctor
 
 `forti doctor` exits with the status of its first failed check. Warnings do not fail it.

@@ -9,7 +9,11 @@ tags:
 
 # Configuration files
 
-Nothing depends on the working directory.
+Where forti keeps profiles, secrets, plans, approvals, backups and the audit log, and the keys of
+`config.json`. Nothing depends on the working directory.
+
+:::toc[On this page]{depth="3" theme="compact"}
+:::
 
 ## Directories
 
@@ -36,8 +40,10 @@ The `FORTI_*_DIR` overrides must be absolute paths (a relative one is a `config`
 | `<state>/backups/<plan id>.conf` | 0600, directory 0700 | configuration backups taken before critical plans (the 20 most recent are kept) |
 | `<state>/audit.jsonl` | 0600 | one JSON line per apply attempt and per approval; attribute names, never values |
 
+:::callout[No automatic cleanup]{variant="note"}
 Plans, approvals and backups are never cleaned up automatically, apart from the backup limit.
 Deleting old plan files is safe once you no longer need them.
+:::
 
 The cache directory is resolved but not written in this release: `forti discover --live` reads the
 device's schema each time.
@@ -77,7 +83,12 @@ device's schema each time.
 ```
 
 `forti configure` and `forti profile` write this file atomically. You can edit it by hand; keep it
-0600. Keys other than those below are dropped the next time forti writes the file.
+0600.
+
+:::callout[Unknown keys are dropped]{variant="warning"}
+Keys other than those below are dropped the next time forti writes the file. A profile that contains
+a secret value (`token`, `password`, `api_key_value`) is rejected.
+:::
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -95,8 +106,7 @@ device's schema each time.
 | `timeout_ms` | `30000` | whole-request timeout |
 
 `backup_before_critical`, `connect_timeout_ms` and `timeout_ms` have no `forti configure` option;
-set them here. A profile that contains a secret value (`token`, `password`, `api_key_value`) is
-rejected.
+set them here.
 
 ## Environment
 

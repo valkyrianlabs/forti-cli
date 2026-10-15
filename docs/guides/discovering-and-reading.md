@@ -9,6 +9,12 @@ tags:
 
 # Discovering and reading
 
+Find the resource you need with `forti discover`, then read it with `forti get`: narrowed by
+filters and fields, paged, and with device secrets redacted.
+
+:::toc[On this page]{depth="3" theme="compact"}
+:::
+
 ## Resources
 
 Every FortiOS object forti can address is a **resource**, named by its REST path:
@@ -52,9 +58,11 @@ For a resource, forti prints its kind, key and risk tier (`low`, `elevated` or `
 [Risk tiers](/guides/planning-and-applying-changes#risk-tiers)), then each attribute with its type
 (`table[...]` for a list of child entries, `ro` for read-only). With `--json` the result also lists
 the supported operations and each attribute's default value, and `--fields` limits the list to the
-attributes you name and expands their child attributes. `--live` reads the device's schema (`?action=schema`) through the selected profile and
-adds FortiOS's help text to every attribute; for the attributes named in `--fields` it also adds
-the FortiOS type, size, value range, `required`, option names and the data source of references.
+attributes you name and expands their child attributes.
+
+`--live` reads the device's schema (`?action=schema`) through the selected profile and adds
+FortiOS's help text to every attribute; for the attributes named in `--fields` it also adds the
+FortiOS type, size, value range, `required`, option names and the data source of references.
 Monitor endpoints have no live schema. The live schema is fetched from the device on every call.
 
 ## Get
@@ -83,9 +91,16 @@ and `.` and `..` are refused as keys. A missing object is `not_found` (exit 5).
 
 ### Filters
 
-`--filter` takes FortiOS filter expressions: `attribute` `operator` `value`, with the operators
-`==`, `!=`, `=@` (contains), `!@` (does not contain), `<`, `<=`, `>` and `>=`. Several `--filter`
+`--filter` takes FortiOS filter expressions: `attribute` `operator` `value`. Several `--filter`
 options must all match; a comma inside one expression means OR.
+
+| Operator | Matches |
+|---|---|
+| `==` | equal |
+| `!=` | not equal |
+| `=@` | contains |
+| `!@` | does not contain |
+| `<`, `<=`, `>`, `>=` | less than, at most, greater than, at least |
 
 ```sh
 forti get firewall/policy --filter status==disable
@@ -93,9 +108,11 @@ forti get firewall/address --filter type==fqdn --filter comment=@legacy
 forti get firewall/address --filter name==web1,name==web2
 ```
 
+:::callout[Names are checked before anything is sent]{variant="tip"}
 For typed resources, forti checks every attribute named in `--filter` and `--fields` against the
 catalog before sending anything; an unknown one fails with `validation` (exit 6) and the list of
 unknown names.
+:::
 
 ### Fields
 
@@ -128,9 +145,11 @@ repeated:
 forti get monitor/system/interface --param interface_name=wan1
 ```
 
+:::callout[Reserved parameters]{variant="note"}
 Parameters that forti manages itself or that could carry a credential are refused: `vdom`,
 `filter`, `format`, `start`, `count`, `action`, `access_token`, `skip` and `with_meta` (compared
 without case). Use the options for these instead.
+:::
 
 ## Device secrets are redacted
 
@@ -146,17 +165,21 @@ with `"<redacted>"`. An unset secret stays visibly unset (`""` or `null`). `meta
 locations as JSON pointers, with `*` for list items (`["/*/psksecret"]`), and text output ends with a
 line saying how many were redacted.
 
+:::callout[Revealing secrets]{variant="warning"}
 `--reveal` shows the values, for a person who asks: it needs a terminal, or an explicit `--json`
 (where you chose to capture the output), prints a warning on standard error, and sets
 `meta.revealed`. In a pipe or file without `--json` it fails with `usage`. Nothing else turns
 redaction off: forti-mcp has no way to reveal secrets.
+:::
 
 ```sh
 forti get vpn.ipsec/phase1-interface --fields name,psksecret --reveal
 ```
 
+:::callout[Limits of name-based redaction]{variant="note"}
 Name-based redaction can miss an attribute a later FortiOS adds; `ENC ` values are caught whatever
 their name. See [Security notes](/reference/security#what-is-stored-where).
+:::
 
 ## JSON output
 

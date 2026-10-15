@@ -13,6 +13,9 @@ forti keeps one or more **profiles**, each describing how to reach one FortiGate
 connection settings, an operating mode and a *reference* to its API key, never the key itself.
 Commands use the profile named by `--profile`/`-p`, else the default profile, else the only one.
 
+:::toc[On this page]{depth="3" theme="compact"}
+:::
+
 ## Creating a profile
 
 Interactively (prompts on the terminal; the API key is typed with echo off):
@@ -26,24 +29,50 @@ Each prompt shows the current value in brackets; Enter keeps it, and `-` clears 
 If the connection check fails at the terminal for a network reason, forti offers to save the profile
 anyway, so a typed key is not lost.
 
-Non-interactively (scripts, provisioning), with `--profile` and any option other than `--skip-check`:
+Non-interactively (scripts, provisioning), with `--profile` and any option other than `--skip-check`.
+Pick where the API key comes from:
+
+:::tabs{
+  default="stdin"
+  theme="glass"
+  tabTheme="muted"
+}
+
+:::tab[Secret store]{value="stdin"}
+The key comes from standard input and is kept in the secret store.
 
 ```sh
-# The key comes from standard input and is kept in the secret store.
 op read op://ops/fw01/api-key | forti configure --profile fw01 --host fw01.example.net \
     --ca-bundle ~/certs/fw01-ca.pem --api-key-stdin --default
+```
+:::
 
-# The key stays in an environment variable; only the variable's name is saved.
+:::tab[Environment variable]{value="env"}
+The key stays in an environment variable; only the variable's name is saved.
+
+```sh
 forti configure --profile lab --host 192.0.2.10 --port 8443 --api-key-env FORTI_LAB_KEY
+```
+:::
 
-# The key is printed by a command (run without a shell; quotes group words).
+:::tab[Command]{value="command"}
+The key is printed by a command (run without a shell; quotes group words).
+
+```sh
 forti configure --profile edge --host edge.example.net --api-key-command "pass show fortigate/edge"
 ```
+:::
+
+:::
 
 Before saving, `forti configure` checks the profile with one read of `monitor/system/status`. If the
-check fails, nothing is written. An authentication failure is **never retried**, because FortiOS
-locks an API user out after a few failed attempts. `--skip-check` saves without contacting the
-device (for example while it is offline).
+check fails, nothing is written. `--skip-check` saves without contacting the device (for example
+while it is offline).
+
+:::callout[Authentication failures are never retried]{variant="warning"}
+FortiOS locks an API user out after a few failed attempts, so `forti configure` makes one attempt
+and stops on a rejected key.
+:::
 
 Running `forti configure --profile NAME` with options updates an existing profile: options that are
 not given keep their current values. A new profile needs `--host` and an API key source.
@@ -68,8 +97,10 @@ the working directory. Standard input carries only one secret: with `--api-key-s
 certificate password from `--cert-password-env` or `--cert-password-command`. The first profile you
 create becomes the default.
 
+:::callout[Autonomous mode]{variant="warning"}
 Choosing `autonomous` prints a notice of what that mode allows. Read
 [Choosing autonomous mode](/reference/security#choosing-autonomous-mode) first.
+:::
 
 ## Credential sources
 
@@ -88,11 +119,13 @@ A credential command runs on every use, without a shell (found on `PATH`), with 
 `/dev/null`. Its standard error reaches you, so a password manager can ask to be unlocked on the
 terminal. It must exit with status 0.
 
-A stored key is **bound to the profile's `host:port`**. forti releases it only to a profile that still
+:::callout[Stored keys are bound to their device]{variant="info"}
+A stored key is bound to the profile's `host:port`. forti releases it only to a profile that still
 points there, so another `config.json` that reuses the profile name cannot send your key to a
 different host. `forti configure` writes the binding and re-binds a kept key when you change the
 host or port. Keys from the environment or a command are not stored, so they are not bound. See
 [Security notes](/reference/security#stored-keys-are-bound-to-their-device).
+:::
 
 `FORTI_SECRET_STORE=file` selects the 0600 file store on macOS too, for example on a Mac reached over
 SSH where the login keychain is locked. `FORTI_SECRET_STORE=keychain` asks for the Keychain
@@ -111,8 +144,12 @@ the default.
 
 ## TLS
 
+:::callout[Verification is always on]{variant="info"}
 Certificate verification is always on, and no option, environment variable or config key disables
-it. A FortiGate with a self-signed or private-CA certificate needs one of:
+it.
+:::
+
+A FortiGate with a self-signed or private-CA certificate needs one of:
 
 - `--ca-bundle PATH`: export the device's CA certificate (or its self-signed certificate) as PEM and
   point the profile at it.

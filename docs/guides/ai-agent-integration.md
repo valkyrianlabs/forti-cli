@@ -13,7 +13,15 @@ tags:
 start `forti-mcp` themselves when they need it and stop it when they exit. There is no daemon.
 forti-mcp offers four tools (`forti_discover`, `forti_read`, `forti_plan`, `forti_apply`) over the same
 engine, profiles and [operating modes](/guides/planning-and-applying-changes#operating-modes) as `forti`.
-It can never change a mode, approve a plan or reveal a device secret.
+
+:::callout[What an agent cannot do through forti-mcp]{variant="info"}
+forti-mcp can never change a mode, approve a plan or reveal a device secret.
+:::
+
+:::toc[On this page]{depth="2" theme="compact"}
+:::
+
+## Install, check, repair, remove
 
 ```sh
 forti install mcp                                    # interactive: pick clients, scope, skill; confirm
@@ -42,8 +50,9 @@ with `--yes` or `--json`, it never prompts: `--client` and `--scope` are then re
 | `--keep-skill` | `mcp uninstall` only: leave the agent skill in place |
 
 `mcp status` reports every client and scope (for the project in `--project-dir`); `mcp repair` and
-`mcp uninstall` take `--client` and `--scope` to narrow what they touch. When a conflict or error blocks the plan, nothing is changed and the command fails with
-`policy_denied` (exit 7); when a change fails during execution, it fails with `config` (exit 3).
+`mcp uninstall` take `--client` and `--scope` to narrow what they touch. When a conflict or error
+blocks the plan, nothing is changed and the command fails with `policy_denied` (exit 7); when a
+change fails during execution, it fails with `config` (exit 3).
 
 ## What gets written where
 
@@ -76,10 +85,7 @@ The skill text is compiled into `forti`, so installing it needs no data files. f
 - **Conflicts.** An existing `forti` entry with a different command or args is reported and left
   alone. `--force` replaces it. Claude Code's `add` refuses existing names, so a replacement is
   `remove` and then `add`; if the `add` fails, forti puts the old entry back.
-- **Scopes never widen.** A project install writes project files only. In particular, Codex loads
-  `<dir>/.codex/config.toml` only for projects marked trusted in the global config, and forti does
-  **not** add that trust entry (that would be a global change). It warns instead. Codex asks to trust
-  a project the first time you run it there.
+- **Scopes never widen.** A project install writes project files only.
 - **Claude Code asks** each person to approve project servers from `.mcp.json` once.
 - **Validation.** After writing, forti reads each registration back and runs `forti-mcp --version`.
   It never runs `claude mcp get` or `claude mcp list`: both start every server to health-check it.
@@ -87,18 +93,43 @@ The skill text is compiled into `forti`, so installing it needs no data files. f
   uses `codex mcp get forti --json`, which starts nothing.
 - **Restart Codex** after a change to its config. Claude Code picks up new servers in new sessions.
 
+:::callout[Codex project scope needs a trusted project]{variant="note"}
+Codex loads `<dir>/.codex/config.toml` only for projects marked trusted in the global config, and
+forti does **not** add that trust entry (that would be a global change). It warns instead. Codex
+asks to trust a project the first time you run it there.
+:::
+
 ## Locating forti-mcp
 
 forti looks next to its own executable, then on `PATH`. The path is registered as found, without
 resolving symlinks: Homebrew's `/opt/homebrew/bin/forti-mcp` link survives upgrades, while the
 versioned `Cellar` path behind it does not (a forti running from a Cellar path registers the
-prefix's `bin/forti-mcp` link). If forti-mcp is missing, forti prints the command to install it
-and exits with status 5 (`not_found`). It never runs a package manager or `sudo`:
+prefix's `bin/forti-mcp` link).
+
+If forti-mcp is missing, forti prints the command to install it and exits with status 5
+(`not_found`). It never runs a package manager or `sudo`:
+
+:::tabs{
+  default="homebrew"
+  theme="glass"
+  tabTheme="muted"
+}
+
+:::tab[macOS (Homebrew)]{value="homebrew"}
+```sh
+brew install valkyrianlabs/tap/forti-mcp
+```
+:::
+
+:::tab[Debian, Ubuntu (APT)]{value="apt"}
+After adding apt.valkyrianlabs.com ([Installation](/getting-started/installation)):
 
 ```sh
-brew install valkyrianlabs/tap/forti-mcp     # macOS
-sudo apt install forti-mcp                   # Debian/Ubuntu, after adding apt.valkyrianlabs.com
+sudo apt install forti-mcp
 ```
+:::
+
+:::
 
 ## Undoing it
 
@@ -133,14 +164,16 @@ forti skill. Entries that point at another working forti-mcp are reported, not c
 - **Project files are shared.** `.mcp.json` and `.codex/config.toml` are meant to be committed. They
   then contain the absolute path of your forti-mcp, which may differ on a teammate's machine (they can
   run `forti install mcp --scope project --force`, or prefer `user` scope).
-- **The skill is guidance, not a control.** Changes stay bounded by the profile's mode (`read-only`,
-  `guarded`, `autonomous`) and the engine's safeguards, whatever the agent reads. The skill tells
-  agents to treat device data (comments, names) as untrusted and never to change modes or approve plans.
-  An agent that can also run shell commands as you could still do both; see
-  [What a mode does and does not stop](/reference/security#what-a-mode-does-and-does-not-stop).
 
-## Evidence: which skill directory Codex loads
+:::callout[The skill is guidance, not a control]{variant="warning"}
+Changes stay bounded by the profile's mode (`read-only`, `guarded`, `autonomous`) and the engine's
+safeguards, whatever the agent reads. The skill tells agents to treat device data (comments, names)
+as untrusted and never to change modes or approve plans. An agent that can also run shell commands
+as you could still do both; see
+[What a mode does and does not stop](/reference/security#what-a-mode-does-and-does-not-stop).
+:::
 
+:::details[Evidence: which skill directory Codex loads]{theme="muted"}
 Verified on Codex 0.162.1 with sandboxed `HOME` and `CODEX_HOME`, by placing marker skills and
 rendering the model input with `codex debug prompt-input "hi"` (no network, no model call). Its skill
 roots were `<repo>/.codex/skills`, `$CODEX_HOME/skills`, `$HOME/.agents/skills`,
@@ -151,3 +184,4 @@ and `<dir>/.agents/skills`, which work for both the installed binary and the doc
 
 The Claude Code skill location under `$CLAUDE_CONFIG_DIR` follows the same rule as its other files
 (`.claude.json` and `backups/` move there); it has not been confirmed with a live session.
+:::

@@ -9,6 +9,9 @@ tags:
 
 # Testing
 
+forti has two test suites: network-free unit tests, and integration tests that run the real `forti`
+against a mock FortiOS over TLS.
+
 ```bash
 meson setup build/dev -Dtests=enabled --buildtype=plain -Doptimization=0 -Ddebug=false
 meson compile -C build/dev -j 4
@@ -16,8 +19,13 @@ meson test -C build/dev --suite unit           # network-free
 meson test -C build/dev --suite integration    # the real forti against a mock FortiOS over TLS
 ```
 
+:::callout[No real devices]{variant="warning"}
 Nothing in either suite talks to a FortiGate. Development never sends a change to a real device,
 and reads against one happen only with the maintainer's go-ahead.
+:::
+
+:::toc[On this page]{depth="3" theme="compact"}
+:::
 
 ## Unit tests
 
@@ -29,21 +37,19 @@ GoogleTest, in three executables of the `unit` suite:
 | `cli` | the CLI in-process: arguments, `configure`, `profile`, `doctor`, rendering, terminal escaping, exit codes |
 | `install` | `.mcp.json` and `config.toml` edits and the client adapters, against fake `claude` and `codex` scripts in a temporary home directory |
 
+:::callout[macOS Keychain round trip]{variant="note"}
 `FORTI_TEST_KEYCHAIN=1` also runs a round-trip test against the macOS login keychain (service
 `forti-test`, removed afterwards). It is off by default.
+:::
 
 ## Integration tests
 
 The `integration` suite runs the built `forti` binary end to end:
 
-- `cli-e2e` (`tests/integration/test_cli.py`) starts the mock FortiOS and drives `forti` through
-  libcurl and verified TLS: configure (a wrong key saves nothing), TLS verification, doctor,
-  offline and live discover, paging, fields and filters, keyed, singleton and monitor reads,
-  read-only refusal, approvals bound to the plan digest, creates, updates and deletes with exact
-  request bodies, normalized values, stale plans, a connection dropped after a write (never sent
-  twice), partial failures, critical-plan backups and the management probe;
-- `no-second-http-stack` (`tests/integration/scan_http.py`) checks that no code outside forti-api
-  builds URLs or talks HTTP, sockets, DNS or TLS.
+| Test | Covers |
+|---|---|
+| `cli-e2e` (`tests/integration/test_cli.py`) | starts the mock FortiOS and drives `forti` through libcurl and verified TLS: configure (a wrong key saves nothing), TLS verification, doctor, offline and live discover, paging, fields and filters, keyed, singleton and monitor reads, read-only refusal, approvals bound to the plan digest, creates, updates and deletes with exact request bodies, normalized values, stale plans, a connection dropped after a write (never sent twice), partial failures, critical-plan backups and the management probe |
+| `no-second-http-stack` (`tests/integration/scan_http.py`) | checks that no code outside forti-api builds URLs or talks HTTP, sockets, DNS or TLS |
 
 It needs Python 3 (standard library only) and `openssl`; without Python the suite is not built.
 

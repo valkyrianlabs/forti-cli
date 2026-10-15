@@ -9,6 +9,12 @@ tags:
 
 # Security notes
 
+What forti stores and where, how it keeps secrets out of output, and what its operating modes do
+and do not protect against.
+
+:::toc[On this page]{depth="3" theme="compact"}
+:::
+
 ## What is stored where
 
 | Data | Where | Protection |
@@ -46,8 +52,10 @@ is enabled on the device. So:
 - **Stored plan files** keep the real values, because apply writes them and compares the device's
   current state against them. That is why they are 0600.
 
+:::callout[Limits of name-based redaction]{variant="note"}
 Name-based redaction can miss an attribute a later FortiOS adds; `ENC ` values are caught whatever
 their name.
+:::
 
 ### Stored keys are bound to their device
 
@@ -92,31 +100,70 @@ this machine is within the API user's trusted hosts, and check its admin profile
 
 ## Operating modes
 
-The **FortiOS account is the primary authorization boundary.** An API user can do exactly what its
-admin profile (accprofile), VDOM assignment and trusted hosts allow, whatever forti's settings are.
+:::callout[The FortiOS account is the primary authorization boundary]{variant="warning"}
+An API user can do exactly what its admin profile (accprofile), VDOM assignment and trusted hosts
+allow, whatever forti's settings are.
+:::
+
 A profile's mode (`read-only`, the default; `guarded`; `autonomous`) is the operator's policy on top
 of that boundary. It is stored in config.json, and the MCP server cannot change it. The modes, the
 safeguards that apply in every mode that writes, and the limits of rollback plans and backups are in
 [Planning and applying changes](/guides/planning-and-applying-changes#operating-modes).
 
-**Recovery aids are not guaranteed recovery.** The rollback plan and the configuration backup both
-need a working management path to the device. If a change cuts off management access, forti cannot
-undo it. You need an independent path: the console port, an out-of-band management interface, or a
-device-side automatic revert. Plan for that before letting an agent change critical settings.
+:::cards{
+  columns="3"
+  cardTheme="muted"
+}
 
+:::card[read-only]{eyebrow="Default"}
+Plans can be written and previewed; every apply is refused. Suits monitoring, auditing and planning.
+:::
+
+:::card[guarded]{eyebrow="Middle ground"}
+The agent prepares and validates changes, and a person approves each plan before it runs.
+:::
+
+:::card[autonomous]{eyebrow="No approval"}
+Plans run without interactive approval. Suits a capable agent doing real administration, within a
+tightly scoped FortiOS account.
+:::
+
+:::
+
+:::callout[Recovery aids are not guaranteed recovery]{variant="danger"}
+The rollback plan and the configuration backup both need a working management path to the device.
+If a change cuts off management access, forti cannot undo it. You need an independent path: the
+console port, an out-of-band management interface, or a device-side automatic revert. Plan for that
+before letting an agent change critical settings.
+:::
+
+:::callout[Treat backups like credentials]{variant="warning"}
 A configuration backup holds the device's complete configuration, including FortiOS-encrypted
-secrets, most of them reversible (see above). Treat it like a credential: keep the state directory on
-an encrypted disk (FileVault or LUKS). forti keeps the **20 most recent** backups (by modification
-time) and deletes older ones after each new backup. Copy any backup you want to keep longer somewhere
-safe, and delete ones you no longer need (`rm ~/.local/state/forti/backups/<plan id>.conf`).
+secrets, most of them reversible (see above). Keep the state directory on an encrypted disk
+(FileVault or LUKS).
+:::
+
+forti keeps the **20 most recent** backups (by modification time) and deletes older ones after each
+new backup. Copy any backup you want to keep longer somewhere safe, and delete ones you no longer
+need:
+
+```sh
+rm ~/.local/state/forti/backups/<plan id>.conf
+```
 
 ### Choosing autonomous mode
 
 Autonomous mode suits a capable agent doing real administration where approving every plan would
-defeat the purpose. With it, **the agent can do anything the FortiOS API account may do**, including
-changes that cut off your own management access. The safeguards make changes visible and verified,
-and reversible while the management path works, but they do not limit what may be changed. That
-limit is the account:
+defeat the purpose.
+
+:::callout[The agent can do anything the API account may do]{variant="danger"}
+With autonomous mode, the agent can make any change the FortiOS API account is allowed to make,
+including changes that cut off your own management access. The safeguards make changes visible and
+verified, and reversible while the management path works, but they do not limit what may be changed.
+That limit is the account.
+:::
+
+Scope the account before you choose autonomous mode:
 
 - Give the API user an admin profile that grants only what the agent manages (for example
   read-write on firewall objects and policy, read-only on system). Avoid `super_admin`.
@@ -126,22 +173,30 @@ limit is the account:
 - Keep an out-of-band path to the device (console or a separate admin account) when the agent may
   touch interfaces, routing or administrative access.
 
-`guarded` is a middle ground: the agent prepares and validates changes and a person approves each
-plan. `read-only` is the default and suits monitoring, auditing and planning.
-
 ### What a mode does and does not stop
 
 A mode governs what the **forti-mcp tools** can do: nothing an MCP client sends can change a mode,
-approve a plan, or apply a plan in a read-only profile. A mode is not a barrier against software
-running as your user account. An agent that can also run shell commands as you (Claude Code's Bash
-tool, Codex's shell) could run `forti plan approve` or `forti configure --mode autonomous`, or edit
-`config.json` and the approval files, exactly as you can. forti uses no passphrase or
-terminal-only approval, by design. For guarded mode to mean "a person approved this":
+approve a plan, or apply a plan in a read-only profile.
 
-- keep the client's shell permission prompts on for `forti` commands, or deny them outright (Claude
-  Code: `"permissions": {"deny": ["Bash(forti plan approve:*)", "Bash(forti configure:*)",
-  "Bash(forti profile:*)"]}` in your settings);
+:::callout[A mode is not a barrier against software running as you]{variant="warning"}
+An agent that can also run shell commands as you (Claude Code's Bash tool, Codex's shell) could run
+`forti plan approve` or `forti configure --mode autonomous`, or edit `config.json` and the approval
+files, exactly as you can. forti uses no passphrase or terminal-only approval, by design.
+:::
+
+For guarded mode to mean "a person approved this":
+
+- keep the client's shell permission prompts on for `forti` commands, or deny them outright (for
+  Claude Code, in your settings, as shown below);
 - read the plan (`forti plan show <id>`, which `forti plan approve` prints first) before you approve it.
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(forti plan approve:*)", "Bash(forti configure:*)", "Bash(forti profile:*)"]
+  }
+}
+```
 
 The installed agent skill tells agents never to approve plans or change modes, but that instruction
 is not enforcement. The FortiOS account's privileges remain the boundary that holds in every case.
