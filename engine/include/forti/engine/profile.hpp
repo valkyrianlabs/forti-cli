@@ -45,10 +45,12 @@ namespace forti::engine {
 
     // Where a secret comes from. The secret itself is never stored in config.json.
     struct SecretRef {
-        enum class Source { none, store, env, command };
+        enum class Source { none, store, env, command, file };
         Source source = Source::none;
         std::string env;                    // Source::env: variable name
         std::vector<std::string> command;   // Source::command: argv; stdout's first line is the secret
+        std::string path;                   // Source::file: absolute path; its first line is the secret. The file
+                                            // must be a regular file the user owns, with no group or other access
 
         [[nodiscard]] nlohmann::json to_json() const;
         static SecretRef from_json(const nlohmann::json& json);

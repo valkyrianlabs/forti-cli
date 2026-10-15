@@ -83,6 +83,7 @@ namespace forti::engine {
             case Source::store: return {{"source", "store"}};
             case Source::env: return {{"source", "env"}, {"env", env}};
             case Source::command: return {{"source", "command"}, {"command", command}};
+            case Source::file: return {{"source", "file"}, {"path", path}};
         }
         return nullptr;
     }
@@ -101,6 +102,12 @@ namespace forti::engine {
             ref.source = Source::command;
             ref.command = get_or<std::vector<std::string>>(json, "command", {});
             if (ref.command.empty()) throw Failure(Code::config, "credential source \"command\" needs a \"command\" argv");
+        } else if (source == "file") {
+            ref.source = Source::file;
+            ref.path = get_or<std::string>(json, "path", "");
+            // Like the directory overrides: a relative path would depend on the working directory.
+            if (ref.path.empty() || !fs::path(ref.path).is_absolute())
+                throw Failure(Code::config, "credential source \"file\" needs an absolute \"path\"");
         } else throw Failure(Code::config, std::format("unknown credential source: {}", source));
         return ref;
     }
@@ -145,6 +152,7 @@ namespace forti::engine {
         out["name"] = name;
         out["api_key"] = api_key.source == SecretRef::Source::env ? "env:" + api_key.env
                          : api_key.source == SecretRef::Source::command ? std::string("command")
+                         : api_key.source == SecretRef::Source::file ? "file:" + api_key.path
                          : api_key.source == SecretRef::Source::store ? std::string("secret store")
                          : std::string("none");
         out.erase("cert_password");
@@ -172,7 +180,7 @@ namespace forti::engine {
             profile.timeout_ms = get_or<unsigned>(json, "timeout_ms", 30000);
             profile.backup_before_critical = get_or<bool>(json, "backup_before_critical", true);
             profile.api_key = json.contains("api_key") ? SecretRef::from_json(json["api_key"])
-                                                       : SecretRef{SecretRef::Source::store, {}, {}};
+                                                       : SecretRef{SecretRef::Source::store, {}, {}, {}};
             if (json.contains("cert_password")) profile.cert_password = SecretRef::from_json(json["cert_password"]);
             if (json.contains("api_key_value") || json.contains("token") || json.contains("password"))
                 throw Failure(Code::config, std::format("profile {}: secrets must not be stored in config.json "

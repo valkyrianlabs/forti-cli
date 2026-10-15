@@ -23,11 +23,13 @@ if gtest_dep.found()
                             implicit_include_directories : false),
          suite : 'unit', env : test_env)
 
-    # The CLI in-process (cli::run): arguments, configure, profiles, doctor, rendering, exit codes.
+    # The CLI in-process (cli::run): arguments, configure, profiles, doctor, home, cert, rendering, exit
+    # codes. test_home.cpp runs `forti cert` with each local openssl (skipped when there is none).
     # test_keychain.cpp runs only with FORTI_TEST_KEYCHAIN=1 (it writes to the login keychain).
     test('cli', executable('cliTests',
                            'unit/test_cli.cpp',
                            'unit/test_setup.cpp',
+                           'unit/test_home.cpp',
                            'unit/test_keychain.cpp',
                            'unit/test_cli_security.cpp',
                            include_directories : include_directories('support'),

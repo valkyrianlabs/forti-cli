@@ -67,7 +67,7 @@ namespace {
         TempDir dir;
         std::shared_ptr<fake::FakeTransport> transport = std::make_shared<fake::FakeTransport>();
         std::unique_ptr<engine::Engine> sut;
-        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
+        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache", {}};
 
         void make(Mode mode) {
             auto options = fake::options(transport, mode);

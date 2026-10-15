@@ -1,4 +1,4 @@
-.Dd October 14, 2026
+.Dd October 15, 2026
 .Dt FORTI 1
 .Os
 .Sh NAME
@@ -15,6 +15,17 @@
 .Nm
 .Cm doctor
 .Op Fl -profile Ar name
+.Nm
+.Cm home
+.Op Cm migrate
+.Nm
+.Cm cert
+.Cm create | show | remove
+.Op Fl -profile Ar name
+.Nm
+.Cm profile
+.Cm set | rename | copy
+.Ar arguments
 .Nm
 .Cm get
 .Ar resource
@@ -101,6 +112,10 @@ Run
 (split like a shell, executed without one) and use the first line of its output.
 .It Fl -cert-password-stdin , Fl -cert-password-env Ar var , Fl -cert-password-command Ar cmd
 The client certificate's password, from the same kinds of source.
+.It Fl -cert-password-file Ar path
+Or from a file that only the user can read (mode 0600, not a symbolic link).
+.Cm cert create
+writes such a file and sets it.
 .It Fl -mode Ar mode
 .Cm read-only
 (default),
@@ -123,6 +138,10 @@ from the device.
 If the read fails nothing is saved.
 An authentication failure is not retried, because FortiOS locks out an API user after repeated
 failures.
+.Pp
+On an existing profile the prompts start from its current values, and Enter keeps each one.
+With options, only the options given change, for example
+.Ql forti configure --profile fw01 --port 8443 .
 .It Cm profile Op Cm list
 List profiles; the default is marked with
 .Ql * .
@@ -130,6 +149,31 @@ List profiles; the default is marked with
 is a short form.
 .It Cm profile show Op Ar name
 Show a profile and where its key comes from (never the key).
+.It Cm profile set Ar name Ar key Ns = Ns Ar value ...
+Change settings without contacting the device.
+Keys:
+.Cm host , port , vdom , ca_bundle , client_cert , resolve_ip , connect_timeout_ms , timeout_ms ,
+.Cm backup_before_critical
+.Pq Cm true | false
+and
+.Cm mode .
+An empty value restores the default.
+Values are validated as
+.Pa config.json
+is.
+A changed host or port re-binds the profile's stored secrets to the new address.
+.It Cm profile rename Ar old Ar new
+Rename a profile.
+Its stored secrets (Keychain or file store),
+.Pa <home>/certs/ Ns Ar old ,
+paths that point into that directory, and the default follow.
+Plans made before the rename name the old profile.
+.It Cm profile copy Ar source Ar new
+Create a profile with the source's settings.
+The API key reference, the client certificate and its password are not copied; run
+.Nm
+.Cm configure Fl -profile Ar new
+next.
 .It Cm profile default Ar name
 Make
 .Ar name
@@ -138,8 +182,60 @@ the default profile.
 Set the operating mode.
 .It Cm profile remove Ar name
 Delete the profile and its stored secrets.
+.It Cm home
+Print the forti home and every location in it, and flag a pre-0.2 setup.
+.It Cm home migrate
+Move a pre-0.2 setup
+.Pf ( Pa ~/.config/forti ,
+.Pa ~/.local/state/forti ,
+.Pa ~/.cache/forti ,
+or the
+.Ev XDG_*_HOME
+equivalents) into the home: config.json, credentials/, the state and the cache.
+Moves are renames, so modes are kept; config.json moves last.
+It never overwrites a config.json already in the home, and running it again is harmless.
+Keychain items need no change.
+.It Cm cert create Oo Fl -profile Ar name Oc Oo Fl -days Ar n Oc Oo Fl -force Oc Op Fl -keychain
+Create a private CA and a client certificate (CN
+.Li forti- Ns Ar profile )
+for FortiOS PKI authentication of the REST API user, in
+.Pa <home>/certs/ Ns Ar profile Ns / :
+.Pa ca.crt ,
+.Pa ca/ca.key
+(0600),
+.Pa client.crt ,
+.Pa client.p12
+and
+.Pa client.pass
+(0600).
+The profile's client certificate becomes
+.Pa client.p12 ,
+its password is read from
+.Pa client.pass
+(or, with
+.Fl -keychain ,
+kept in the secret store instead).
+The PKCS#12 uses PBE-SHA1-3DES with a SHA-1 MAC, which OpenSSL 3, LibreSSL and FortiOS all read.
+It prints the paths, the command that reads the password (never the password), and the FortiOS
+commands to import the CA
+.Pq Li config vpn certificate ca ,
+create a PKI user and peer group
+.Pq Li config user peer , config user peergrp
+and require the certificate for the API user
+.Pq Li set peer-auth enable , set peer-group .
+.Fl -days
+sets the client certificate's validity (default 1095).
+An existing CA is replaced only with
+.Fl -force .
+Needs the
+.Xr openssl 1
+command.
+.It Cm cert show Op Fl -profile Ar name
+Subject, expiry and SHA-256 fingerprint of the profile's certificates.
+.It Cm cert remove Op Fl -profile Ar name
+Delete the profile's certificate directory and clear its client certificate setting.
 .It Cm doctor
-Run ordered checks: configuration directory and file modes, profile, secret resolution, CA bundle
+Run ordered checks: the forti home (a pre-0.2 setup is a warning), configuration directory and file modes, profile, secret resolution, CA bundle
 and client certificate files, connection (DNS, TCP, TLS), authentication, FortiOS version against
 the SDK schema, operating mode (for autonomous profiles also the API account's privileges), and whether
 .Nm forti-mcp
@@ -192,21 +288,21 @@ Scope the account's admin profile and trusted hosts to what the agent should man
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width FORTI_SECRET_STORE
+.It Ev FORTI_HOME
+The forti home (default
+.Pa ~/.forti ;
+an absolute path).
 .It Ev FORTI_CONFIG_DIR
-Configuration directory (default
-.Pa $XDG_CONFIG_HOME/forti ,
-else
-.Pa ~/.config/forti ) .
+Configuration directory (default: the home).
 .It Ev FORTI_STATE_DIR
-Plans, approvals and the audit log (default
-.Pa $XDG_STATE_HOME/forti ,
-else
-.Pa ~/.local/state/forti ) .
+Plans, approvals, backups and the audit log (default
+.Pa <home>/state ) .
 .It Ev FORTI_CACHE_DIR
-Cached live schemas (default
-.Pa $XDG_CACHE_HOME/forti ,
-else
-.Pa ~/.cache/forti ) .
+Cache (default
+.Pa <home>/cache ) .
+.It Ev XDG_CONFIG_HOME , XDG_STATE_HOME , XDG_CACHE_HOME
+Used only to find a pre-0.2 setup, which stays in use until
+.Cm home migrate .
 .It Ev FORTI_SECRET_STORE
 .Cm file
 or
@@ -220,11 +316,23 @@ Disables colors.
 .El
 .Sh FILES
 .Bl -tag -width Ds
-.It Pa ~/.config/forti/config.json
-Profiles; mode 0600 in a 0700 directory.
+.It Pa ~/.forti/
+The forti home (mode 0700).
+.It Pa ~/.forti/config.json
+Profiles; mode 0600.
 Contains no secrets.
-.It Pa ~/.config/forti/credentials/
+.It Pa ~/.forti/credentials/
 The file secret store: one 0600 file per secret.
+.It Pa ~/.forti/state/
+Plans, approvals, pre-change backups and
+.Pa audit.jsonl .
+.It Pa ~/.forti/certs/ Ns Ar profile Ns /
+Certificates made by
+.Cm cert create .
+.It Pa ~/.config/forti/ , ~/.local/state/forti/
+A pre-0.2 setup, used until
+.Cm home migrate
+moves it.
 .It Login Keychain, service Dq forti
 The macOS secret store, accounts
 .Ar profile Ns /api-key
@@ -258,6 +366,19 @@ Configure a device, check it, and read its firewall policy:
 forti configure
 forti doctor
 forti get firewall/policy --fields policyid,name,action,status
+.Ed
+.Pp
+Use a client certificate as well as the API key:
+.Bd -literal -offset indent
+forti cert create --profile fw01
+cat ~/.forti/certs/fw01/client.pass   # only if you need the password
+.Ed
+.Pp
+A second device with the same settings:
+.Bd -literal -offset indent
+forti profile copy fw01 fw02
+forti profile set fw02 host=fw02.example.net
+forti configure --profile fw02
 .Ed
 .Pp
 Configure from a password manager without prompts:

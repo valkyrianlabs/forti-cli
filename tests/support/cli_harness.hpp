@@ -1,6 +1,6 @@
 //
 // Runs the `forti` CLI in-process (cli::run) against a temporary config directory, an in-memory
-// secret store and a scripted transport. Nothing touches ~/.config/forti, the login keychain or
+// secret store and a scripted transport. Nothing touches ~/.forti (or a pre-0.2 ~/.config/forti), the login keychain or
 // the network.
 //
 
@@ -35,7 +35,7 @@ namespace forti::fake {
 
     struct Cli : ::testing::Test {
         TempDir dir;
-        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
+        engine::Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache", {}};
         std::shared_ptr<engine::SecretStore> secrets = engine::memory_secret_store();
         std::shared_ptr<FakeTransport> transport = std::make_shared<FakeTransport>();
         std::ostringstream out, err;

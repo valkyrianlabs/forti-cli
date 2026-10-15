@@ -199,7 +199,7 @@ TEST_F(SetupCli, DoctorPassesInOrderAndReportsTheMode) {
     json data = json_out()["data"];
     std::vector<std::string> order;
     for (const auto& c: data["checks"]) order.push_back(c["check"]);
-    EXPECT_EQ(order, (std::vector<std::string>{"config", "profile", "secrets", "tls_files", "connection", "auth", "version",
+    EXPECT_EQ(order, (std::vector<std::string>{"home", "config", "profile", "secrets", "tls_files", "connection", "auth", "version",
                                                "mode", "mcp"}));
     for (const auto& c: data["checks"]) { EXPECT_NE(c["status"], "fail") << c.dump(); }
     EXPECT_NE(check(data["checks"], "mcp")["message"].get<std::string>().find(mcp), std::string::npos);

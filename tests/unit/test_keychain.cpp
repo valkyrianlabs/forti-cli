@@ -34,7 +34,7 @@ TEST(Keychain, RoundTripWhenExplicitlyEnabled) {
 }
 
 TEST(Keychain, DefaultStoreHonoursOverride) {
-    Paths paths{"/nonexistent/forti-test/config", "/nonexistent/forti-test/state", "/nonexistent/forti-test/cache"};
+    Paths paths{"/nonexistent/forti-test/config", "/nonexistent/forti-test/state", "/nonexistent/forti-test/cache", {}};
     const char* saved = std::getenv("FORTI_SECRET_STORE");
     std::string previous = saved ? saved : "";
     ::setenv("FORTI_SECRET_STORE", "file", 1);
