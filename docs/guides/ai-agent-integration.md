@@ -1,7 +1,19 @@
-# Connecting AI agents to forti-mcp
+---
+title: AI agent integration
+description: Register forti-mcp with Claude Code and Codex, install the forti agent skill, and check, repair or remove the registrations.
+order: 60
+status: published
+tags:
+  - guides
+---
+
+# AI agent integration
 
 `forti install mcp` registers the installed `forti-mcp` stdio server with AI clients. The clients
 start `forti-mcp` themselves when they need it and stop it when they exit. There is no daemon.
+forti-mcp offers four tools (`forti_discover`, `forti_read`, `forti_plan`, `forti_apply`) over the same
+engine, profiles and [operating modes](/guides/planning-and-applying-changes#operating-modes) as `forti`.
+It can never change a mode, approve a plan or reveal a device secret.
 
 ```sh
 forti install mcp                                    # interactive: pick clients, scope, skill; confirm
@@ -14,8 +26,24 @@ forti mcp uninstall --client codex --scope user --yes
 
 In a terminal without `--yes`, forti asks for whatever you did not pass, prints every command it
 will run and every file it will write, and changes nothing until you confirm. Without a terminal, or
-with `--yes` or `--json`, it never prompts: `--client` and `--scope` are then required. `--dry-run`
-prints the plan and stops.
+with `--yes` or `--json`, it never prompts: `--client` and `--scope` are then required (for
+`mcp uninstall` too). `--dry-run` prints the plan and stops.
+
+| Option | Meaning |
+|---|---|
+| `--client NAME` | `claude`, `codex` or `all`; for install, `all` is every supported client found on `PATH` |
+| `--scope SCOPE` | `user`: all your projects; `project`: files in the project you can commit; `local`: you, this project (Claude Code only) |
+| `--project-dir DIR` | the project for `project` and `local` scope (default: the current directory) |
+| `--profile NAME` | start forti-mcp with this profile (the only argument forti adds; never a secret) |
+| `--skill` / `--no-skill` | also install the forti agent skill (default: no; asked interactively) |
+| `--yes` | never prompt |
+| `--dry-run` | show what would change, change nothing |
+| `--force` | replace an existing `forti` entry that points elsewhere; for `mcp uninstall`, also remove a `forti` entry that is not forti-mcp |
+| `--keep-skill` | `mcp uninstall` only: leave the agent skill in place |
+
+`mcp status` reports every client and scope (for the project in `--project-dir`); `mcp repair` and
+`mcp uninstall` take `--client` and `--scope` to narrow what they touch. When a conflict or error blocks the plan, nothing is changed and the command fails with
+`policy_denied` (exit 7); when a change fails during execution, it fails with `config` (exit 3).
 
 ## What gets written where
 
@@ -65,7 +93,7 @@ forti looks next to its own executable, then on `PATH`. The path is registered a
 resolving symlinks: Homebrew's `/opt/homebrew/bin/forti-mcp` link survives upgrades, while the
 versioned `Cellar` path behind it does not (a forti running from a Cellar path registers the
 prefix's `bin/forti-mcp` link). If forti-mcp is missing, forti prints the command to install it
-and exits with status 5. It never runs a package manager or `sudo`:
+and exits with status 5 (`not_found`). It never runs a package manager or `sudo`:
 
 ```sh
 brew install valkyrianlabs/tap/forti-mcp     # macOS
@@ -108,6 +136,8 @@ forti skill. Entries that point at another working forti-mcp are reported, not c
 - **The skill is guidance, not a control.** Changes stay bounded by the profile's mode (`read-only`,
   `guarded`, `autonomous`) and the engine's safeguards, whatever the agent reads. The skill tells
   agents to treat device data (comments, names) as untrusted and never to change modes or approve plans.
+  An agent that can also run shell commands as you could still do both; see
+  [What a mode does and does not stop](/reference/security#what-a-mode-does-and-does-not-stop).
 
 ## Evidence: which skill directory Codex loads
 

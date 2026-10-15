@@ -33,10 +33,11 @@ statuses follow the error code.
 
 ## Documentation
 
-- [Configuration](docs/configuration.md): profiles, credential sources, file locations, TLS
-- [Commands](docs/commands.md): every command and option
-- [Exit codes](docs/exit-codes.md)
-- [Security notes](docs/security.md): what is stored where, operating modes and the risks of autonomous writes
+- [Docs index](docs/index.md): installation, quick start, guides, reference and development
+- [Profiles and credentials](docs/guides/profiles-and-credentials.md): profiles, credential sources, TLS
+- [Commands](docs/reference/commands.md): every command and option
+- [Exit codes](docs/reference/exit-codes.md)
+- [Security notes](docs/reference/security.md): what is stored where, operating modes and the risks of autonomous writes
 - `man forti`
 
 ## Building from source
