@@ -8,6 +8,7 @@ cli_sources = files(
     'commands_read.cpp',
     'commands_setup.cpp',
     'output.cpp',
+    'tty.cpp',
 )
 
 forti_cli_lib = static_library('forti-cli', cli_sources,

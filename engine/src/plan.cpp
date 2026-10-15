@@ -14,6 +14,7 @@
 #include "ops.hpp"
 #include "plan_store.hpp"
 #include "policy.hpp"
+#include "request.hpp"
 #include "session.hpp"
 #include "sha256.hpp"
 
@@ -42,32 +43,9 @@ namespace forti::engine {
 
         // ---- request parsing ----
 
-        void allow_keys(const json& object, std::initializer_list<std::string_view> allowed, std::string_view what) {
-            if (!object.is_object()) throw Failure(Code::usage, std::format("{}: expected a JSON object", what));
-            std::vector<std::string> unknown;
-            for (auto it = object.begin(); it != object.end(); ++it)
-                if (std::ranges::find(allowed, std::string_view(it.key())) == allowed.end()) unknown.push_back(it.key());
-            if (!unknown.empty()) {
-                std::string list;
-                for (const auto& key: unknown) list += (list.empty() ? "" : ", ") + key;
-                throw Failure(Code::usage, std::format("{}: unknown field(s): {}", what, list),
-                              {{"unknown", unknown}, {"allowed", allowed}});
-            }
-        }
-
-        std::string text(const json& object, const char* key, std::string_view what) {
-            auto it = object.find(key);
-            if (it == object.end() || it->is_null()) return {};
-            if (it->is_string()) return it->get<std::string>();
-            if (it->is_number_integer()) return it->dump();
-            throw Failure(Code::usage, std::format("{}: \"{}\" must be a string", what, key));
-        }
-
-        void validate_vdom(std::string_view vdom) {
-            bool valid = vdom.size() <= 31;
-            for (char c: vdom) valid = valid && (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.');
-            if (!valid) throw Failure(Code::usage, std::format("invalid VDOM name: {}", vdom));
-        }
+        using detail::allow_keys;
+        using detail::text;
+        using detail::validate_vdom;
 
         // One requested operation, validated for shape (attribute validation is the SDK's, in ops).
         struct OpRequest {
