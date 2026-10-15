@@ -13,6 +13,7 @@
 #define FORTI_INSTALL_INSTALLER_HPP
 
 #include "client.hpp"
+#include "workspace.hpp"
 
 #include <forti/engine/error.hpp>
 
@@ -64,7 +65,9 @@ namespace forti::install {
         fs::path skill_path;
         std::vector<Action> skill_actions;
 
-        [[nodiscard]] bool has_actions() const { return !actions.empty() || !skill_actions.empty(); }
+        std::vector<workspace::Item> workspace;   // workspace scope: the scaffold in the forti home
+
+        [[nodiscard]] bool has_actions() const;
         [[nodiscard]] bool blocked() const;   // conflict or error: the command must fail
     };
 
@@ -73,12 +76,17 @@ namespace forti::install {
         Entry desired;
         bool skill = false;
         bool force = false;
+        // Workspace scope: the person agreed to mark the forti home trusted in the global Codex config.
+        bool trust_codex_workspace = false;
     };
 
-    // States: install, replace, already_registered, conflict, unsupported, error.
+    // States: install, replace, already_registered, conflict, unsupported, error. Workspace targets
+    // also get the scaffold (workspace.hpp); its conflicts are reported, never overwritten, and do not
+    // block the registration.
     std::vector<TargetPlan> plan_install(const InstallRequest& request, const Context& context);
 
     // States: remove, not_registered, foreign (not forti-mcp; kept unless force), unsupported, error.
+    // Workspace targets also remove forti's scaffold files (never config.json, credentials, certs or state).
     std::vector<TargetPlan> plan_uninstall(const std::vector<Target>& targets, bool keep_skill, bool force,
                                            const Context& context);
 
@@ -93,7 +101,7 @@ namespace forti::install {
 
     nlohmann::json to_json(const TargetPlan& plan);
 
-    // `forti mcp status`: clients (detected or not), every scope they support, skill state.
+    // `forti mcp status`: clients (detected or not), every scope they support, skill state, workspace health.
     nlohmann::json status_report(const std::optional<fs::path>& forti_mcp, const Context& context);
 
     // Every supported (client, scope) pair for these clients.

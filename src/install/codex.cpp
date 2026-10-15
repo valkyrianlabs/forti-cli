@@ -3,8 +3,9 @@
 // only through `codex mcp add/remove` (which keep the rest of the file) and read with
 // `codex mcp get forti --json` (spawns nothing). Project scope is `<project>/.codex/config.toml`,
 // which the CLI cannot write: forti edits only the [mcp_servers.forti] block of it. Codex loads a
-// project config only for trusted projects, and forti never adds a trust entry (that would be a
-// silent change to the global config), it warns instead.
+// project config only for trusted projects, and forti never adds a trust entry for a project (that
+// would be a silent change to the global config), it warns instead. The one exception is the forti
+// home (workspace scope), trusted only with the person's explicit consent (workspace.cpp).
 //
 // Skills: Codex 0.162.1 loads $CODEX_HOME/skills, ~/.agents/skills, and <repo>/.codex/skills and
 // <repo>/.agents/skills (verified with `codex debug prompt-input`, docs/guides/ai-agent-integration.md).
@@ -33,9 +34,11 @@ namespace forti::install {
             [[nodiscard]] std::string_view id() const override { return "codex"; }
             [[nodiscard]] std::string_view display_name() const override { return "Codex"; }
             [[nodiscard]] std::string_view executable() const override { return "codex"; }
-            [[nodiscard]] std::vector<Scope> scopes() const override { return {Scope::user, Scope::project}; }
+            [[nodiscard]] std::vector<Scope> scopes() const override { return {Scope::workspace, Scope::user, Scope::project}; }
 
+            // workspace is project scope in the forti home: every method maps it onto project.
             [[nodiscard]] Registration status(Scope scope, const Context& context) const override {
+                if (scope == Scope::workspace) return status(Scope::project, context.for_scope(scope));
                 Registration registration;
                 try {
                     if (scope == Scope::project) {
@@ -57,6 +60,7 @@ namespace forti::install {
 
             [[nodiscard]] std::vector<Action> install(Scope scope, const Entry& desired, const Registration& current,
                                                       const Context& context) const override {
+                if (scope == Scope::workspace) return install(Scope::project, desired, current, context.for_scope(scope));
                 if (scope == Scope::project) {
                     auto path = project_config(context);
                     std::string summary = std::format("{} {} ({} [mcp_servers.{}])", fs::exists(path) ? "edit" : "create",
@@ -81,6 +85,7 @@ namespace forti::install {
             [[nodiscard]] std::vector<Action> uninstall(Scope scope, const Registration& current,
                                                         const Context& context) const override {
                 if (!current.registered) return {};
+                if (scope == Scope::workspace) return uninstall(Scope::project, current, context.for_scope(scope));
                 if (scope == Scope::project) {
                     auto path = project_config(context);
                     auto stop = context.project_dir;
@@ -100,6 +105,7 @@ namespace forti::install {
             }
 
             [[nodiscard]] std::vector<std::string> warnings(Scope scope, const Context& context) const override {
+                // workspace: trusting the forti home is offered (with consent) by the workspace scaffold.
                 if (scope != Scope::project || trusted(context)) return {};
                 return {std::format("Codex loads {} only for trusted projects. forti does not change trust (that is a global "
                                     "setting); Codex asks to trust the project when you start it there",
@@ -107,7 +113,7 @@ namespace forti::install {
             }
 
             [[nodiscard]] fs::path skill_file(Scope scope, const Context& context) const override {
-                auto root = scope == Scope::user ? context.home : context.project_dir;
+                auto root = scope == Scope::user ? context.home : context.for_scope(scope).project_dir;
                 return root / ".agents" / "skills" / "forti" / "SKILL.md";
             }
 
