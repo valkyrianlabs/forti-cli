@@ -17,6 +17,13 @@ meson install -C build/rel --skip-subprojects   # source installs: never install
 The default build is `buildtype=release` (-O3), as packaged and tested; CI builds -O0 and tests that.
 Packaging and release: `.claude/context/release.md`.
 
+forti keeps everything in the forti home: `$FORTI_HOME`, else `~/.forti` (config.json, credentials/,
+certs/, state/, cache/, and the MCP workspace files). `FORTI_CONFIG_DIR`, `FORTI_STATE_DIR` and
+`FORTI_CACHE_DIR` override single locations; a pre-0.2 XDG setup (`~/.config/forti`) stays in use until
+`forti home migrate`. When running `forti` by hand, set `HOME` and `FORTI_HOME` to a temporary directory
+(as `ci/smoke-test.sh` and the test harnesses do): never touch the real `~/.forti`, `~/.claude*` or
+`~/.codex`. User docs: `docs/` (payload-markdown; `pmdocs validate --source forti-cli`).
+
 ## Layout
 
 | Path | What |

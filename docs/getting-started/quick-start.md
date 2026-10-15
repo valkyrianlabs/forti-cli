@@ -1,6 +1,6 @@
 ---
 title: Quick start
-description: Configure a profile, check it, read the device, make a first change and connect an AI client.
+description: From install to an AI agent working on your FortiGate - configure, optionally add a client certificate, check, and start the agent in ~/.forti.
 order: 20
 status: published
 tags:
@@ -9,12 +9,16 @@ tags:
 
 # Quick start
 
-Go from a fresh install to a checked profile, a first read and a first planned change. Each step
-links to the guide that covers it in full.
+Five commands take you from a fresh install to an AI agent with bounded access to your FortiGate.
+Everything forti keeps (profiles, credentials, certificates, plans) lives in one directory, the forti
+home `~/.forti`, and that is also where the agent works.
 
 :::callout[Before you start]{variant="info"}
-You need `forti` installed ([Installation](/getting-started/installation)) and administrator access
-to the FortiGate, to create a REST API administrator for forti.
+You need `forti` installed ([Installation](/getting-started/installation)) and, on the FortiGate, a
+REST API administrator for forti (System, Administrators, Create New, REST API Admin). Give it an admin
+profile with only the permissions you need, restrict its trusted hosts to this machine, and copy its
+API key. The FortiOS account is the real boundary on what forti can do; see
+[Security notes](/reference/security#choosing-autonomous-mode).
 :::
 
 :::steps{
@@ -24,77 +28,85 @@ to the FortiGate, to create a REST API administrator for forti.
   stepTheme="muted"
 }
 
-### Create an API administrator
-
-On the FortiGate, create a REST API administrator (System, Administrators, Create New, REST API
-Admin). Give it an admin profile with only the permissions you need, restrict its trusted hosts to
-the machine that runs `forti`, and copy the generated API key. The FortiOS account is the real
-boundary on what forti can do; see [Security notes](/reference/security#choosing-autonomous-mode).
-
-:::callout[TLS is always verified]{variant="note"}
-If the device uses a self-signed or private-CA certificate, export its CA (or the self-signed
-certificate) as PEM. forti always verifies TLS and has no option to turn that off.
-:::
-
-### Configure a profile
+### Configure the FortiGate
 
 ```sh
 forti configure
 ```
 
-forti asks for a profile name, the host, the admin HTTPS port, an optional VDOM, CA bundle,
-connect-to address and client certificate, where the API key comes from (it is typed with echo off),
-and the operating mode. It then reads `monitor/system/status` once to check the profile, and saves
-nothing if that fails.
+forti asks for a profile name, the host, the port, a CA bundle if the device's certificate is
+self-signed or from a private CA (TLS is always verified), where the API key comes from (typed with
+echo off, it goes to the macOS Keychain or a 0600 file), and the operating mode. It checks the
+profile with one read of the device and saves nothing if that fails. Profiles are `read-only` unless
+you choose otherwise.
 
-Without prompts, for scripts:
+More devices later: `forti profile copy fw01 fw02`, then `forti configure --profile fw02`. See
+[Profiles and credentials](/guides/profiles-and-credentials).
+
+### Add a client certificate (optional)
 
 ```sh
-op read op://ops/fw01/api-key | forti configure --profile fw01 --host fw01.example.net \
-    --ca-bundle ~/certs/fw01-ca.pem --api-key-stdin --default
+forti cert create
 ```
 
-Profiles are `read-only` unless you choose otherwise. See
-[Profiles and credentials](/guides/profiles-and-credentials) for every option.
+When the FortiGate should require a client certificate as well as the API key, this makes a private
+CA and a client certificate in `~/.forti/certs/<profile>/`, points the profile at them, and prints the
+FortiGate commands to run. The certificate's password stays in a private file and is never printed.
+See [Client certificates](/guides/client-certificates).
+
+### Check everything
+
+```sh
+forti doctor
+```
+
+`doctor` checks the forti home, file modes, the profile, that the key resolves, the TLS files, the
+connection, authentication, the FortiOS version, the operating mode, and whether forti-mcp is
+installed. Each failure comes with a hint.
 
 :::callout[Authentication failures are never retried]{variant="warning"}
 FortiOS locks an API user out after repeated failures, so forti stops after one rejected attempt.
 Check the key, the API user's trusted hosts and its admin profile before trying again.
 :::
 
-### Check the profile
+### Set up the agent workspace
+
+With [forti-mcp](/getting-started/installation#forti-mcp-optional) installed:
 
 ```sh
-forti doctor
+forti install mcp
 ```
 
-`doctor` checks the configuration files and their modes, the profile, that the key resolves, the
-TLS files, the connection, authentication, the device's FortiOS version against the SDK's, the
-operating mode, and whether forti-mcp is on `PATH`. Each failure comes with a hint.
+Choose your clients (Claude Code, Codex) and the first scope, "~/.forti workspace (recommended)".
+forti registers the FortiGate tools in `~/.forti` only, with the forti agent skill, an `AGENTS.md`, and
+rules that keep the agent away from the credentials stored there. For Codex it asks before marking
+`~/.forti` as trusted. See [AI agent integration](/guides/ai-agent-integration#the-forti-workspace).
 
-### Discover and read
+### Start the agent
+
+```sh
+cd ~/.forti && claude          # or: codex
+```
+
+Claude Code asks once to approve the `forti` server; approve it. The agent can now discover
+resources, read configuration and plan changes, within the profile's mode. Agents started anywhere
+else do not get the FortiGate tools.
+
+:::
+
+## At the terminal
+
+The same engine works directly from the shell:
 
 ```sh
 forti discover addr                                  # resources whose path contains "addr"
-forti discover firewall/address                      # attributes, key, risk tier
 forti get firewall/address --fields name,subnet,comment
-forti get firewall/address "LAN 10.0.0.0/24"
-forti get monitor/system/status
-forti get firewall/policy --filter action==accept --fields policyid,name,srcaddr,dstaddr --count 100
-```
-
-See [Discovering and reading](/guides/discovering-and-reading).
-
-### Plan and apply a change
-
-A change starts as a plan. Planning reads the device and never changes it:
-
-```sh
+forti get firewall/policy --filter action==accept --fields policyid,name,srcaddr,dstaddr
 forti plan set firewall/address LAN comment="office LAN"
 ```
 
-The plan shows the before and after of every attribute, the exact request, the risk tier and an id.
-What happens next depends on the profile's mode:
+A change starts as a plan: planning reads the device and never changes it. What happens next depends
+on the profile's mode:
 
 ```sh
 forti profile mode fw01 guarded      # read-only profiles refuse every apply
@@ -108,21 +120,16 @@ and `autonomous` profiles apply without approval. forti-mcp cannot change a mode
 [Operating modes](/guides/planning-and-applying-changes#operating-modes) before you pick one.
 :::
 
-See [Planning and applying changes](/guides/planning-and-applying-changes).
+## Coming from forti 0.1
 
-### Connect an AI client (optional)
-
-With [forti-mcp](/getting-started/installation#forti-mcp-optional) installed:
+An existing `~/.config/forti` setup keeps working, and `forti doctor` points it out. Move it into
+`~/.forti` with one command:
 
 ```sh
-forti install mcp                    # pick Claude Code or Codex, a scope, and the agent skill
-forti mcp status
+forti home migrate
 ```
 
-The agent works through the same profiles and modes. See
-[AI agent integration](/guides/ai-agent-integration).
-
-:::
+See [Pre-0.2 setups](/reference/configuration-files#pre-0-2-setups).
 
 ## Next steps
 
@@ -132,7 +139,7 @@ The agent works through the same profiles and modes. See
 }
 
 :::card[Profiles and credentials]{href="/guides/profiles-and-credentials"}
-Credential sources, TLS options and every `forti doctor` check.
+Several FortiGates, credential sources, TLS and every `forti doctor` check.
 :::
 
 :::card[Planning and applying changes]{href="/guides/planning-and-applying-changes"}

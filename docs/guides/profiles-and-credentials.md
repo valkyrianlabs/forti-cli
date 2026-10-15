@@ -1,6 +1,6 @@
 ---
 title: Profiles and credentials
-description: Create and manage device profiles, choose where the API key comes from, and set up TLS.
+description: One profile per FortiGate - create the first, add, edit, rename and copy more, choose where each API key comes from, and check them with forti doctor.
 order: 30
 status: published
 tags:
@@ -9,28 +9,34 @@ tags:
 
 # Profiles and credentials
 
-forti keeps one or more **profiles**, each describing how to reach one FortiGate. A profile holds
-connection settings, an operating mode and a *reference* to its API key, never the key itself.
-Commands use the profile named by `--profile`/`-p`, else the default profile, else the only one.
+forti keeps one **profile** per FortiGate. A profile holds how to reach the device (host, port, VDOM,
+TLS files), its operating mode and a *reference* to its API key, never the key itself. All profiles
+live in one file, `~/.forti/config.json` in the [forti home](/reference/configuration-files#the-forti-home),
+so managing ten firewalls is the same as managing one.
 
 :::toc[On this page]{depth="3" theme="compact"}
 :::
 
-## Creating a profile
-
-Interactively (prompts on the terminal; the API key is typed with echo off):
+## Your first profile
 
 ```sh
-forti configure                      # asks for the profile name too
-forti configure --profile fw01       # creates or edits fw01, prompting for the rest
+forti configure
 ```
 
-Each prompt shows the current value in brackets; Enter keeps it, and `-` clears an optional value.
-If the connection check fails at the terminal for a network reason, forti offers to save the profile
-anyway, so a typed key is not lost.
+forti asks for a profile name (Enter takes `default`), the host, the admin HTTPS port, an optional
+VDOM, CA bundle, connect-to address and client certificate, where the API key comes from (it is typed
+with echo off), and the [operating mode](/guides/planning-and-applying-changes#operating-modes).
+Before saving, it checks the profile with one read of `monitor/system/status`. If the check fails,
+nothing is written; when it fails at the terminal for a network reason, forti offers to save the
+profile anyway, so a typed key is not lost. The first profile becomes the default.
 
-Non-interactively (scripts, provisioning), with `--profile` and any option other than `--skip-check`.
-Pick where the API key comes from:
+:::callout[Authentication failures are never retried]{variant="warning"}
+FortiOS locks an API user out after a few failed attempts, so `forti configure` makes one attempt and
+stops on a rejected key. Check the key, the API user's trusted hosts and its admin profile first.
+:::
+
+Non-interactively (scripts, provisioning), pass `--profile` and the settings. Pick where the API key
+comes from:
 
 :::tabs{
   default="stdin"
@@ -65,17 +71,122 @@ forti configure --profile edge --host edge.example.net --api-key-command "pass s
 
 :::
 
-Before saving, `forti configure` checks the profile with one read of `monitor/system/status`. If the
-check fails, nothing is written. `--skip-check` saves without contacting the device (for example
-while it is offline).
+`--skip-check` saves without contacting the device (for example while it is offline).
 
-:::callout[Authentication failures are never retried]{variant="warning"}
-FortiOS locks an API user out after a few failed attempts, so `forti configure` makes one attempt
-and stops on a rejected key.
-:::
+## Several FortiGates
 
-Running `forti configure --profile NAME` with options updates an existing profile: options that are
-not given keep their current values. A new profile needs `--host` and an API key source.
+Every command works on one profile: the one named by `--profile`/`-p`, else the default profile, else
+the only one.
+
+```sh
+forti devices                                  # every profile; the default is marked *
+forti -p fw02 get monitor/system/status
+forti get firewall/policy --profile branch-ber --fields policyid,name,action
+forti profile default fw02                     # change which one commands use by default
+```
+
+### Add another device
+
+Most FortiGates in a fleet share settings: port, VDOM, CA bundle, timeouts, mode. Start the new profile
+from an existing one, change what differs, then give it its own key:
+
+```sh
+forti profile copy fw01 fw02                   # settings only: no API key, no client certificate
+forti profile set fw02 host=fw02.example.net
+forti configure --profile fw02                 # prompts, prefilled from fw02; type fw02's key
+```
+
+`profile copy` never copies the API key or the client certificate and its password: they belong to the
+source device. It does copy everything else, including `resolve_ip` and `ca_bundle`, so check that
+those fit the new device (`forti profile show fw02`). To give the new device a client certificate, run
+`forti cert create --profile fw02` ([Client certificates](/guides/client-certificates)).
+
+### Change settings
+
+`forti profile set` changes settings without prompts and without contacting the device:
+
+```sh
+forti profile set fw02 host=fw02.example.net port=8443
+forti profile set lab vdom=root timeout_ms=60000
+forti profile set lab vdom=                    # an empty value restores the default
+```
+
+| Key | Value |
+|---|---|
+| `host` | host name or address, without scheme or port |
+| `port` | admin HTTPS port, 1 to 65535 |
+| `vdom` | VDOM for every request |
+| `ca_bundle` | PEM CA bundle (checked for readability, stored as an absolute path) |
+| `client_cert` | PKCS#12 client certificate; clearing it (`client_cert=`) also clears its password |
+| `resolve_ip` | connect to this IPv4 or IPv6 address while verifying TLS for `host` |
+| `connect_timeout_ms`, `timeout_ms` | 1 to 3600000 |
+| `backup_before_critical` | `true` or `false` |
+| `mode` | `read-only`, `guarded` or `autonomous` |
+
+Values are checked exactly as `config.json` is when it loads. Secrets are not settings: an API key or a
+password goes through `forti configure`. Changing `host` or `port` re-binds the profile's stored
+secrets to the new address (only secrets bound to the old address; see
+[Stored keys are bound to their device](#stored-keys-are-bound-to-their-device)).
+
+To change settings *and* check them against the device, or to change where the key comes from, run
+`forti configure --profile NAME`. On an existing profile, every prompt starts from the current value
+(including an API key command), and Enter keeps it. With options instead of prompts, only the
+options you give change:
+
+```sh
+forti configure --profile fw01 --port 8443     # checks the device, keeps everything else
+```
+
+### Rename a profile
+
+```sh
+forti profile rename lab fw-lab
+```
+
+The rename takes everything along: stored secrets (Keychain or file store) move to the new name and
+stay bound to the same device, `~/.forti/certs/lab/` moves to `certs/fw-lab/` with every profile path
+that pointed into it, and the default follows. A certificate made by `forti cert create` keeps its CN
+(`forti-lab`), so the FortiGate needs no change. Plans made before the rename name the old profile:
+plan them again.
+
+### Remove a profile
+
+```sh
+forti profile remove fw-lab
+```
+
+`remove` deletes the profile's stored secrets first; if the secret store refuses (a locked keychain),
+the profile stays so you can remove it later. When the default profile is removed and exactly one
+profile remains, that one becomes the default. Removing a profile never contacts the device, and it
+does not delete `certs/<profile>/` (use `forti cert remove` first).
+
+### Several devices and AI agents
+
+forti-mcp reads the same profiles. An agent lists them with `forti_discover {"what": "devices"}` and
+names one in each call, so one registration covers every FortiGate, each under its own mode. To pin
+forti-mcp to one profile, register it with `forti install mcp --profile NAME`; see
+[AI agent integration](/guides/ai-agent-integration).
+
+## Profile commands
+
+```sh
+forti profile list                 # also: forti profile, forti devices
+forti profile show [NAME]          # settings and where the key comes from (never the key)
+forti profile set NAME key=value...
+forti profile rename OLD NEW
+forti profile copy SOURCE NEW
+forti profile default NAME
+forti profile mode [NAME] guarded  # read-only | guarded | autonomous
+forti profile remove NAME
+```
+
+- `profile show` reports the key's source and, for the secret store, whether a key is stored and
+  bound to this host and port (`api_key_stored`, `api_key_bound`); for an environment source, whether
+  the variable is set (`api_key_set`).
+- `profile mode` without a name changes the selected profile (`--profile`, else the default).
+- No profile command contacts the device.
+
+## configure options
 
 | Option | Meaning |
 |---|---|
@@ -87,15 +198,14 @@ not given keep their current values. A new profile needs `--host` and an API key
 | `--resolve-ip IP` | connect to this IPv4 or IPv6 address, while still verifying the certificate for `--host` |
 | `--client-cert PATH` | PKCS#12 client certificate, when the device requires one |
 | `--api-key-stdin` / `--api-key-env VAR` / `--api-key-command CMD` | where the API key comes from (exactly one) |
-| `--cert-password-stdin` / `--cert-password-env VAR` / `--cert-password-command CMD` | the client certificate's password (needs `--client-cert`) |
-| `--mode MODE` | `read-only` (default), `guarded` or `autonomous` (see [Operating modes](/guides/planning-and-applying-changes#operating-modes)) |
+| `--cert-password-stdin` / `--cert-password-env VAR` / `--cert-password-command CMD` / `--cert-password-file PATH` | the client certificate's password (needs a client certificate) |
+| `--mode MODE` | `read-only` (default), `guarded` or `autonomous` |
 | `--default` | make this the default profile |
 | `--skip-check` | save without the verification read |
 
-Paths are checked for readability and stored as absolute paths, so later commands do not depend on
-the working directory. Standard input carries only one secret: with `--api-key-stdin`, take the
-certificate password from `--cert-password-env` or `--cert-password-command`. The first profile you
-create becomes the default.
+A new profile needs `--host` and an API key source. Paths are checked for readability and stored as
+absolute paths, so later commands do not depend on the working directory. Standard input carries only
+one secret: with `--api-key-stdin`, take the certificate password from another source.
 
 :::callout[Autonomous mode]{variant="warning"}
 Choosing `autonomous` prints a notice of what that mode allows. Read
@@ -109,23 +219,28 @@ users and end up in shell history. It comes from one of these sources:
 
 | Source | Stored in config.json | Where the secret lives |
 |---|---|---|
-| secret store (`--api-key-stdin`, or typed at the prompt) | `{"source": "store"}` | macOS: the login Keychain, service `forti`, account `<profile>/api-key`. Elsewhere: `<config>/credentials/<profile>.api-key`, mode 0600 |
+| secret store (`--api-key-stdin`, or typed at the prompt) | `{"source": "store"}` | macOS: the login Keychain, service `forti`, account `<profile>/api-key`. Elsewhere: `~/.forti/credentials/<profile>.api-key`, mode 0600 |
 | environment (`--api-key-env VAR`) | `{"source": "env", "env": "VAR"}` | the variable, read on every use |
 | command (`--api-key-command CMD`) | `{"source": "command", "command": [argv...]}` | whatever the command reads; the first line of its output is the key |
+| file (`--cert-password-file PATH`) | `{"source": "file", "path": "/abs/path"}` | a file only you can read; its first line is the secret |
 
-A client certificate password uses the same sources, under the account `<profile>/cert-password`.
+A client certificate password uses the same sources, under the account `<profile>/cert-password`. The
+`file` source has a `forti configure` option for the certificate password only (`forti cert create`
+sets it up); in `config.json` it works for the API key as well. A file source must be a regular file,
+not a symbolic link, owned by you, with no access for group or others (`chmod 600`).
 
 A credential command runs on every use, without a shell (found on `PATH`), with standard input from
 `/dev/null`. Its standard error reaches you, so a password manager can ask to be unlocked on the
 terminal. It must exit with status 0.
 
-:::callout[Stored keys are bound to their device]{variant="info"}
-A stored key is bound to the profile's `host:port`. forti releases it only to a profile that still
-points there, so another `config.json` that reuses the profile name cannot send your key to a
-different host. `forti configure` writes the binding and re-binds a kept key when you change the
-host or port. Keys from the environment or a command are not stored, so they are not bound. See
+### Stored keys are bound to their device
+
+A key in the secret store is bound to the profile's `host:port`. forti releases it only to a profile
+that still points there, so another `config.json` that reuses the profile name cannot send your key to
+a different host. `forti configure` writes the binding, and both `forti configure` and
+`forti profile set` re-bind a kept key when you change the host or port. Keys from the environment, a
+command or a file are not stored, so they are not bound. See
 [Security notes](/reference/security#stored-keys-are-bound-to-their-device).
-:::
 
 `FORTI_SECRET_STORE=file` selects the 0600 file store on macOS too, for example on a Mac reached over
 SSH where the login keychain is locked. `FORTI_SECRET_STORE=keychain` asks for the Keychain
@@ -160,24 +275,8 @@ A FortiGate with a self-signed or private-CA certificate needs one of:
 `forti configure` and `forti doctor` tell a DNS failure, a refused connection, a timeout, an untrusted
 certificate and a failed handshake apart, and suggest the matching fix.
 
-## Managing profiles
-
-```sh
-forti profile list                 # also: forti profile, forti devices; the default is marked *
-forti profile show [NAME]          # settings and where the key comes from (never the key)
-forti profile default NAME
-forti profile mode [NAME] guarded  # read-only | guarded | autonomous
-forti profile remove NAME          # deletes the profile and its stored secrets
-```
-
-- `profile show` reports the key's source and, for the secret store, whether a key is stored and
-  bound to this host and port (`api_key_stored`, `api_key_bound`); for an environment source,
-  whether the variable is set (`api_key_set`).
-- `profile mode` without a name changes the selected profile (`--profile`, else the default).
-- `profile remove` deletes the stored secrets first; if the secret store refuses (a locked
-  keychain), the profile stays so you can remove it later. When the default profile is removed and
-  exactly one profile remains, that one becomes the default. Removing a profile never contacts the
-  device.
+For a FortiGate that should also require a client certificate from forti, see
+[Client certificates](/guides/client-certificates).
 
 ## Checking a profile
 
@@ -189,6 +288,7 @@ Ordered checks, each reported as `ok`, `warn`, `fail`, `skip` or `info`:
 
 | Check | What it verifies |
 |---|---|
+| `home` | the forti home; a pre-0.2 setup is a warning, with `forti home migrate` as the fix ([Configuration files](/reference/configuration-files#pre-0-2-setups)) |
 | `config` | the configuration directory and config.json exist; the files are private (credential files readable by others fail, loose directory or config modes warn) |
 | `profile` | the selected profile loads and is valid |
 | `secrets` | the API key (and certificate password) resolve. Values are never shown |
@@ -203,6 +303,6 @@ Ordered checks, each reported as `ok`, `warn`, `fail`, `skip` or `info`:
 Later checks are skipped when an earlier one they depend on failed. The exit status is 0 when
 nothing failed, otherwise that of the first failure (3 for configuration, 4 for connection or
 authentication). With `--json`, a failing run returns `ok: false` with the checks in
-`error.details.checks`.
+`error.details.checks`. Run it once per device: `forti doctor -p fw02`.
 
-Where profiles, secrets, plans and caches are stored: [Configuration files](/reference/configuration-files).
+Where profiles, secrets, certificates and plans are stored: [Configuration files](/reference/configuration-files).

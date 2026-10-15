@@ -120,7 +120,7 @@ approve  forti plan approve 20261015-142233-a1b2c3
 apply    forti apply 20261015-142233-a1b2c3
 ```
 
-The plan is stored as `<state>/plans/<id>.json` (mode 0600). It records the device identity (profile,
+The plan is stored as `~/.forti/state/plans/<id>.json` (mode 0600). It records the device identity (profile,
 host, port, VDOM, serial number, FortiOS version), and for each operation the before-state and its
 SHA-256 digest, the after-state, a field diff, the exact request (method, path and body) and the risk
 tier. The plan's digest is a SHA-256 over the device identity and the operations. Plan ids look like
@@ -168,7 +168,7 @@ forti plan approve <id>
 ```
 
 At a terminal, `approve` prints the plan and asks `[y/N]`; `--yes`, `--json`, or standard output
-that is not a terminal skip the question. The approval is written to `<state>/approvals/<id>.json`:
+that is not a terminal skip the question. The approval is written to `~/.forti/state/approvals/<id>.json`:
 it names the plan's digest, is recorded as `cli:$USER`, expires after **24 hours**, and is used up by
 the apply it allows. Approving a plan of a read-only profile, or one already applied, is refused
 (`policy_denied`); for an autonomous profile nothing is written and forti says no approval is needed.
@@ -244,7 +244,7 @@ profile needs an approval for it too. It is checked for drift like any plan.
 ### Configuration backups before critical plans
 
 Before a plan with a **critical**-risk operation runs, forti downloads a full configuration backup to
-`<state>/backups/<plan id>.conf` (0600, in a 0700 directory). It is streamed to disk, never printed or
+`~/.forti/state/backups/<plan id>.conf` (0600, in a 0700 directory). It is streamed to disk, never printed or
 logged, and the 20 most recent backups are kept (older ones are deleted after each new backup). If the
 backup cannot be taken, the plan does not run (`policy_denied`, reason `backup_failed`). Setting
 `"backup_before_critical": false` on the profile in config.json turns the backup off.
@@ -289,7 +289,7 @@ run is decided by the mode and the FortiOS account.
 
 ## Audit log
 
-Every apply attempt, refused or not, and every approval is appended to `<state>/audit.jsonl` (0600),
+Every apply attempt, refused or not, and every approval is appended to `~/.forti/state/audit.jsonl` (0600),
 one JSON object per line: the event, plan id and digest, profile, host, serial, mode, risk, each
 operation's resource, key, status and the *names* of the attributes it changed, the rollback plan, the
 backup status and the outcome. Values are not recorded. If the record cannot be written after the

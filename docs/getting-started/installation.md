@@ -9,8 +9,10 @@ tags:
 
 # Installation
 
-`forti` is a single executable. Its only runtime dependency is libcurl; the forti-api SDK is
-header-only and compiled in. The package installs `forti` and its man page (`man forti`).
+`forti` is a single executable. Its only runtime library dependency is libcurl; the forti-api SDK is
+header-only and compiled in. `forti cert create` also runs the `openssl` command, which macOS ships
+(`/usr/bin/openssl`, LibreSSL) and the Debian package depends on. The package installs `forti` and its
+man page (`man forti`).
 
 :::toc[On this page]{depth="2" theme="compact"}
 :::
@@ -86,17 +88,22 @@ needing about 2 GB of RAM to compile, so limit the jobs (`-j`) on a small machin
 
 forti-mcp, the MCP server for AI clients, is a separate package with no dependency on forti-cli:
 `brew install valkyrianlabs/tap/forti-mcp` or `sudo apt install forti-mcp`. With both installed,
-`forti install mcp` registers it with your AI client ([AI agent integration](/guides/ai-agent-integration)).
+`forti install mcp` registers it with your AI clients in the `~/.forti` workspace
+([AI agent integration](/guides/ai-agent-integration)).
 
 ## Check the installation
 
 ```bash
 forti --version
 forti discover firewall/address
+forti home
 ```
 
 `--version` prints the forti version and the FortiOS schema version its models come from
-(`forti 0.1.0 (FortiOS schema 7.4.8)`). `discover` works offline: the resource catalog is compiled in.
+(`forti 0.2.0 (FortiOS schema 7.4.8)`). `discover` works offline: the resource catalog is compiled in.
+`forti home` shows where forti keeps its files: the forti home, `~/.forti` (or `$FORTI_HOME`).
+Upgrading from 0.1? Your existing setup keeps
+working; see [Pre-0.2 setups](/reference/configuration-files#pre-0-2-setups).
 
 ## Next steps
 
@@ -106,7 +113,7 @@ forti discover firewall/address
 }
 
 :::card[Quick start]{href="/getting-started/quick-start"}
-Configure a first profile and make a first read and change.
+Configure a FortiGate, check it, and start an AI agent in `~/.forti`.
 :::
 
 :::card[Profiles and credentials]{href="/guides/profiles-and-credentials"}

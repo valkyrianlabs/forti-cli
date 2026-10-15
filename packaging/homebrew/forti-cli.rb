@@ -35,7 +35,7 @@ class FortiCli < Formula
     assert_match "forti #{version}", shell_output("#{bin}/forti --version")
 
     # Offline: the resource catalog is compiled in, so no profile or device is needed.
-    ENV["FORTI_CONFIG_DIR"] = (testpath/"config").to_s
+    ENV["FORTI_HOME"] = (testpath/"forti").to_s
     output = JSON.parse(shell_output("#{bin}/forti --json discover firewall/address"))
     assert output["ok"]
     assert_includes output["data"]["fields"].map { |field| field["name"] }, "subnet"

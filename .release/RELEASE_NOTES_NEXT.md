@@ -80,3 +80,8 @@ refuses without a terminal unless you pass `--force`.
 workspace` removes the registration and the files forti wrote, and never touches `config.json`,
 credentials, certificates or state.
 
+
+## Documentation
+
+The quick start now goes from install to an agent working in `~/.forti` in five commands, and a new
+Client certificates guide walks through `forti cert create` and the FortiGate side.

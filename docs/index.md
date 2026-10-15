@@ -46,11 +46,19 @@ AI clients get the same bounded surface as you do at the terminal.
 :::
 
 ```sh
-forti configure                                     # host, CA bundle, API key (hidden) and mode
-forti doctor                                        # config, credentials, TLS, auth, FortiOS version
+forti configure                       # host, CA bundle, API key (hidden) and mode
+forti cert create                     # optional: a client certificate for the API user
+forti doctor                          # home, credentials, TLS, auth, FortiOS version
+forti install mcp                     # the FortiGate tools for Claude Code and Codex, in ~/.forti
+cd ~/.forti && claude                 # or: codex
+```
+
+At the terminal:
+
+```sh
 forti get firewall/policy --fields policyid,name,action,status
 forti plan set firewall/address LAN comment="office LAN"
-forti apply 20261015-142233-a1b2c3                  # the plan's id; needs a guarded or autonomous profile
+forti apply 20261015-142233-a1b2c3    # the plan's id; needs a guarded or autonomous profile
 ```
 
 ## What you get
@@ -83,6 +91,11 @@ Profiles are `read-only` by default. `guarded` profiles apply a plan only after 
 it; `autonomous` profiles apply without approval, with every safeguard still on.
 :::
 
+:::card[One home, many FortiGates]{eyebrow="Setup"}
+Profiles, credentials, certificates and plans live in `~/.forti`. Copy, rename and edit profiles
+for a fleet of devices, and add a client certificate with `forti cert create`.
+:::
+
 :::card[Credentials kept out of sight]{eyebrow="Security"}
 The API key is never an argument. It lives in the macOS Keychain or a 0600 file bound to its
 device, or is referenced as an environment variable or a command. TLS verification is always on.
@@ -90,8 +103,8 @@ device, or is referenced as an environment variable or a command. TLS verificati
 
 :::card[Scripts and AI clients]{eyebrow="Integrations"}
 Every command takes `--json` for one stable envelope, and the exit status follows the error code.
-`forti install mcp` registers forti-mcp with Claude Code and Codex, and can install an agent skill
-alongside it.
+`forti install mcp` gives Claude Code and Codex the FortiGate tools in the `~/.forti` workspace, with
+the agent skill and rules that keep the stored credentials out of the agent's reach.
 :::
 
 :::
@@ -110,7 +123,7 @@ APT, Homebrew or a source build, and a first check that it works.
 :::
 
 :::card[Quick start]{href="/getting-started/quick-start"}
-Configure a profile, check it, read the device, plan a first change and connect an AI client.
+Configure a FortiGate, add a certificate, check it, and start an AI agent in `~/.forti`.
 :::
 
 :::
@@ -123,7 +136,11 @@ Configure a profile, check it, read the device, plan a first change and connect 
 }
 
 :::card[Profiles and credentials]{href="/guides/profiles-and-credentials"}
-Device profiles, where the API key comes from, TLS, and `forti doctor`.
+Several FortiGates: add, copy, rename and edit profiles, credential sources, TLS and `forti doctor`.
+:::
+
+:::card[Client certificates]{href="/guides/client-certificates"}
+`forti cert create`, the FortiGate PKI user and peer group, renewal and removal.
 :::
 
 :::card[Discovering and reading]{href="/guides/discovering-and-reading"}
@@ -135,7 +152,7 @@ Stored plans, operating modes, approvals, apply, rollback plans, backups and ris
 :::
 
 :::card[AI agent integration]{href="/guides/ai-agent-integration"}
-Register forti-mcp with Claude Code and Codex, install the agent skill, repair or remove it.
+The `~/.forti` workspace for Claude Code and Codex, its deny rules, status, repair and removal.
 :::
 
 :::
@@ -152,7 +169,7 @@ Every command and option, the output formats and the JSON envelope.
 :::
 
 :::card[Configuration files]{href="/reference/configuration-files"}
-Directories, file modes, `config.json` keys and environment variables.
+The forti home and its layout, migrating from 0.1, file modes, `config.json` keys and environment.
 :::
 
 :::card[Exit codes]{href="/reference/exit-codes"}

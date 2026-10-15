@@ -19,13 +19,15 @@ and do not protect against.
 
 | Data | Where | Protection |
 |---|---|---|
-| Profiles (host, port, VDOM, paths, mode, credential *reference*) | `config.json` | 0600 file in a 0700 directory. No secrets: a config file containing one is rejected |
-| API keys and certificate passwords (secret-store source) | macOS: login Keychain (service `forti`). Elsewhere: `credentials/` | Keychain ACL; or 0600 files that forti refuses to read when group or others can access them. Bound to the profile's host:port |
+| Profiles (host, port, VDOM, paths, mode, credential *reference*) | `~/.forti/config.json` | 0600 file in a 0700 directory. No secrets: a config file containing one is rejected |
+| API keys and certificate passwords (secret-store source) | macOS: login Keychain (service `forti`). Elsewhere: `~/.forti/credentials/` | Keychain ACL; or 0600 files that forti refuses to read when group or others can access them. Bound to the profile's host:port |
 | API keys (env / command source) | not stored | only the variable name or the command's argv is saved |
-| Plans, approvals, audit log | state directory | 0600 files. Plan files keep real values (apply needs them) |
-| Pre-change configuration backups (critical plans) | `<state>/backups/<plan id>.conf` | 0600 file in a 0700 directory, streamed to disk, never logged or printed; the 20 most recent are kept |
+| Certificate passwords from `forti cert create` | `~/.forti/certs/<profile>/client.pass`, or the secret store with `--keychain` | 0600 file in a 0700 directory, read through the `file` source (refused when group or others can access it); never printed |
+| Client certificate keys and the private CA key | `~/.forti/certs/<profile>/client.p12` (encrypted), `ca/ca.key` | 0600 files in 0700 directories; the CA key never leaves the machine |
+| Plans, approvals, audit log | `~/.forti/state/` | 0600 files. Plan files keep real values (apply needs them) |
+| Pre-change configuration backups (critical plans) | `~/.forti/state/backups/<plan id>.conf` | 0600 file in a 0700 directory, streamed to disk, never logged or printed; the 20 most recent are kept |
 
-Paths: [Configuration files](/reference/configuration-files).
+Paths and overrides: [Configuration files](/reference/configuration-files).
 
 forti's own credentials (API keys, certificate passwords) never appear in arguments, output, logs,
 plans, audit records, error messages or the MCP client configuration. `forti profile show` and
@@ -63,19 +65,22 @@ A key in the secret store is saved with the `host:port` of the profile it was co
 Keychain item's generic attribute; the first line of a credential file). forti releases it only to a
 profile that still points there. Otherwise it fails with `config` ("the stored key belongs to
 host:port; run forti configure") and sends nothing. So another `config.json` that reuses a profile
-name (a different `FORTI_CONFIG_DIR`, for example one set by a repository's MCP configuration) cannot
-send your key to another host. `forti configure` writes the binding, and re-binds a kept key when you
-change the profile's host or port. Keys from `env` and `command` sources are not stored, so they are
-not bound.
+name (a different `FORTI_HOME` or `FORTI_CONFIG_DIR`, for example one set by a repository's MCP
+configuration) cannot send your key to another host. `forti configure` writes the binding, and
+`forti configure` and `forti profile set` re-bind a kept key when you change the profile's host or
+port; `forti profile rename` keeps the binding. Keys from `env`, `command` and `file` sources are not
+stored, so they are not bound.
 
 ### Other hardening
 
 - `config.json` decides each profile's mode and may name a credential command that forti runs, so it
   is refused when another user owns it or when group or others can write it (or its directory).
-  Credential files are refused when they are symbolic links, owned by another user, or accessible
-  by group or others.
-- `FORTI_CONFIG_DIR`, `FORTI_STATE_DIR` and `FORTI_CACHE_DIR` must be absolute paths, so profiles,
-  credentials and modes never depend on the working directory.
+  Credential files, and files named by a `file` source, are refused when they are symbolic links,
+  owned by another user, or accessible by group or others.
+- `FORTI_HOME`, `FORTI_CONFIG_DIR`, `FORTI_STATE_DIR` and `FORTI_CACHE_DIR` must be absolute paths, so
+  profiles, credentials and modes never depend on the working directory.
+- `forti cert create` runs `openssl` with an argument vector, never a shell, and passes the
+  certificate password to it as a `file:` reference, never in argv.
 - A credential command runs without a shell, with its standard input from `/dev/null` and only
   descriptors 0 to 2 inherited.
 - `forti` and `forti-mcp` disable core dumps at startup, because their memory holds keys and device
@@ -139,7 +144,7 @@ before letting an agent change critical settings.
 
 :::callout[Treat backups like credentials]{variant="warning"}
 A configuration backup holds the device's complete configuration, including FortiOS-encrypted
-secrets, most of them reversible (see above). Keep the state directory on an encrypted disk
+secrets, most of them reversible (see above). Keep the forti home on an encrypted disk
 (FileVault or LUKS).
 :::
 
@@ -148,7 +153,7 @@ new backup. Copy any backup you want to keep longer somewhere safe, and delete o
 need:
 
 ```sh
-rm ~/.local/state/forti/backups/<plan id>.conf
+rm ~/.forti/state/backups/<plan id>.conf
 ```
 
 ### Choosing autonomous mode
@@ -198,5 +203,8 @@ For guarded mode to mean "a person approved this":
 }
 ```
 
-The installed agent skill tells agents never to approve plans or change modes, but that instruction
-is not enforcement. The FortiOS account's privileges remain the boundary that holds in every case.
+The installed agent skill and the workspace `AGENTS.md` tell agents never to approve plans or change
+modes, but that instruction is not enforcement. Neither are the deny rules of the
+[forti workspace](/guides/ai-agent-integration#keeping-secrets-out-of-the-agents-context): they keep
+the agent's file tools away from `credentials/`, certificate keys and `config.json`, but a script the
+agent runs opens files itself. The FortiOS account's privileges remain the boundary that holds in every case.
