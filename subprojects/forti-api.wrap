@@ -3,8 +3,7 @@
 # with a checkout (or a symlink to ../forti-api) and Meson uses it instead of downloading.
 [wrap-git]
 url = https://github.com/valkyrianlabs/forti-api.git
-revision = 7d027804fcefa0f0a21b4ea66bb3af4e407eb23e
-# Pinned to the forti-api merge of PR #17 (G9 downloads + G11-G14 write safety) until forti-api 1.0.1 is released.
+revision = v1.0.1
 depth = 1
 
 [provide]

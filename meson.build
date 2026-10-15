@@ -6,7 +6,7 @@ project('forti-cli', 'cpp',
 
 # forti-api is the only FortiOS implementation. A system install (pkg-config forti-api) wins; the
 # wrap is the source-build fallback.
-forti_api_dep = dependency('forti-api', version : '>=1.0.0')
+forti_api_dep = dependency('forti-api', version : '>=1.0.1')
 
 # The command engine shared with forti-mcp, which consumes this project as a subproject and uses only
 # `forti-engine`; the CLI, installers and tests are not built there.
