@@ -91,14 +91,13 @@ jobs:
 
       # The package builds against the published SDK (libforti-api-dev, ValkyrianLabs APT, configured
       # in the CI image), never the wrap: debian/rules passes --wrap-mode=nodownload.
-      - name: Build dependencies
+      # One step: every run-ci step is a fresh, disposable container, so the build dependencies must be
+      # installed in the same step that builds.
+      - name: Build dependencies and artifacts from the prepared work tree
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libforti-api-dev
           dpkg-checkbuilddeps
-
-      - name: Build artifacts from the prepared work tree
-        run: |
           jobs="$(ci/build-jobs)"   # memory-aware: every core the memory allows
           export DEB_BUILD_OPTIONS="parallel=$jobs"
           vlr build-deb
