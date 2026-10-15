@@ -16,4 +16,11 @@ if not meson.is_subproject()
     subdir('src')
     subdir('tests')
     install_man('doc/forti.1')
+elif get_option('subproject_cli')
+    # forti-mcp's integration tests drive `forti` too (approvals, shared state). Built, never installed.
+    subdir('src')
 endif
+
+# The mock FortiOS server and test harness (Python 3 stdlib), for consumers' integration tests:
+# subproject('forti-cli').get_variable('mock_fortios_dir').
+mock_fortios_dir = meson.current_source_dir() / 'tests' / 'mock-fortios'

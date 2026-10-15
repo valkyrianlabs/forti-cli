@@ -37,3 +37,19 @@ if gtest_dep.found()
                                implicit_include_directories : false),
          suite : 'unit', timeout : 120)
 endif
+
+# Real binaries end to end: `forti` through libcurl and verified TLS against a stateful mock FortiOS
+# (mock-fortios/, Python 3 stdlib + openssl; skipped when openssl is missing). Plus a static check that
+# no code outside forti-api builds URLs or talks HTTP, sockets, DNS or TLS.
+python3 = find_program('python3', required : false)
+if python3.found() and not get_option('tests').disabled()
+    test('cli-e2e', python3, args : [files('integration/test_cli.py')],
+         env : {'FORTI_BINARY' : forti_exe.full_path(), 'PYTHONDONTWRITEBYTECODE' : '1'},
+         depends : forti_exe, suite : 'integration', timeout : 300)
+    test('no-second-http-stack', python3,
+         args : [files('integration/scan_http.py'), '--root', meson.project_source_root() / 'engine',
+                 '--root', meson.project_source_root() / 'src', '--binary', forti_exe.full_path()],
+         depends : forti_exe, suite : 'integration')
+else
+    message('python3 not found: the integration suite is not built')
+endif

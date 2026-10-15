@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""End-to-end tests of the real `forti` binary against the mock FortiOS (tests/mock-fortios), through
+libcurl and verified TLS. Every test gets its own mock device and temporary config/state/cache
+directories; the API key comes from an environment variable reference.
+
+    FORTI_BINARY=build/dev/src/cli/forti python3 tests/integration/test_cli.py [-k pattern]
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mock-fortios"))
+from harness import API_KEY, KEY_VAR, Sandbox, binary, require_tools  # noqa: E402
+from mock_fortios import BACKUP_MARKER  # noqa: E402
+
+FORTI = ""
+
+ADDRESS = {"name": "web", "subnet": "192.0.2.10 255.255.255.255", "comment": "web server"}
+
+
+def create_address(obj=None):  # type: ignore[no-untyped-def]
+    return {"op": "create", "resource": "firewall/address", "object": obj or ADDRESS}
+
+
+class CliTest(unittest.TestCase):
+    mode = "read-only"
+
+    def setUp(self) -> None:
+        self.sb = Sandbox(forti=FORTI).__enter__()
+        self.addCleanup(self.sb.__exit__, None, None, None)
+        self.outputs: list[str] = []
+        result = self.sb.configure(mode=self.mode)
+        self.assertEqual(result.code, 0, result.err)
+        self.mock = self.sb.mock
+
+    def tearDown(self) -> None:
+        # The API key never appears in any output or any file the binaries wrote; configuration
+        # backups never appear in any output or in the audit log.
+        for text in self.outputs + [self.sb.all_files_text()]:
+            self.assertNotIn(API_KEY, text)
+        for text in self.outputs + [json.dumps(self.sb.audit())]:
+            self.assertNotIn(BACKUP_MARKER, text)
+
+    def forti(self, *args: str, input: str | None = None, expect: int | None = 0):  # type: ignore[no-untyped-def]
+        result = self.sb.forti(*args, input=input)
+        self.outputs += [result.out, result.err]
+        if expect is not None:
+            self.assertEqual(result.code, expect, f"forti {' '.join(args)}\nstdout: {result.out}\nstderr: {result.err}")
+        return result
+
+    def json_of(self, *args: str, expect: int = 0, input: str | None = None):  # type: ignore[no-untyped-def]
+        return self.forti(*args, "--json", input=input, expect=expect).json()
+
+    def plan(self, *operations, expect: int = 0):  # type: ignore[no-untyped-def]
+        envelope = self.json_of("plan", "--file", "-", input=json.dumps({"operations": list(operations)}), expect=expect)
+        return envelope
+
+    def writes(self) -> list:  # type: ignore[type-arg]
+        return self.mock.writes()
+
+
+class Setup(CliTest):
+    def test_configure_saves_an_env_reference_and_doctor_passes(self) -> None:
+        config = json.loads((self.sb.config / "config.json").read_text())
+        profile = config["profiles"]["lab"]
+        self.assertEqual(profile["api_key"], {"source": "env", "env": KEY_VAR})
+        self.assertEqual(profile["mode"], "read-only")
+        self.assertEqual(stat.S_IMODE(os.stat(self.sb.config / "config.json").st_mode), 0o600)
+        # configure verified the device through the SDK: one authorized GET of monitor/system/status.
+        self.assertEqual([(r.method, r.api, r.authorized) for r in self.mock.requests],
+                         [("GET", "monitor/system/status", True)])
+
+        doctor = self.json_of("doctor")
+        checks = {c["check"]: c["status"] for c in doctor["data"]["checks"]}
+        for name in ("config", "profile", "secrets", "tls_files", "connection", "auth", "version"):
+            self.assertEqual(checks.get(name), "pass", doctor)
+
+    def test_configure_with_a_wrong_key_saves_nothing(self) -> None:
+        result = self.sb.forti("configure", "--profile", "bad", "--host", "localhost", "--port", str(self.mock.port),
+                               "--ca-bundle", str(self.mock.ca_path), "--api-key-env", "WRONG_KEY",
+                               env={"WRONG_KEY": "not-the-key"})
+        self.outputs += [result.out, result.err]
+        self.assertEqual(result.code, 4, result.err)
+        self.assertNotIn("bad", json.loads((self.sb.config / "config.json").read_text())["profiles"])
+        self.assertNotIn("not-the-key", result.out + result.err)
+        self.assertEqual(self.mock.requests[-1].status, 401)
+
+    def test_tls_verification_is_on(self) -> None:
+        # The same device without the CA bundle (system trust store): the certificate is refused.
+        result = self.sb.forti("configure", "--profile", "notrust", "--host", "localhost", "--port",
+                               str(self.mock.port), "--api-key-env", KEY_VAR, "--json")
+        self.outputs += [result.out, result.err]
+        self.assertEqual(result.code, 4, result.out)
+        self.assertEqual(result.json()["error"]["code"], "connection")
+        # 127.0.0.1 is in the certificate; "127.0.0.2" resolves to the mock but is not: refused as well.
+        bad_name = self.sb.forti("configure", "--profile", "badname", "--host", "forti-it.invalid", "--port",
+                                 str(self.mock.port), "--resolve-ip", "127.0.0.1", "--ca-bundle",
+                                 str(self.mock.ca_path), "--api-key-env", KEY_VAR, "--json")
+        self.outputs += [bad_name.out, bad_name.err]
+        self.assertEqual(bad_name.code, 4, bad_name.out)
+        self.assertTrue(all(r.authorized for r in self.mock.requests))
+
+
+class Discover(CliTest):
+    def test_offline_discovery_makes_no_request(self) -> None:
+        self.mock.clear_requests()
+        found = self.json_of("discover", "firewall/addr")
+        self.assertIn("firewall/address", [r["resource"] for r in found["data"]])
+        resource = self.json_of("discover", "firewall/address")
+        self.assertEqual(resource["data"]["key"], "name")
+        self.assertIn("subnet", [f["name"] for f in resource["data"]["fields"]])
+        self.assertEqual(self.mock.requests, [])
+
+    def test_live_discovery_merges_the_device_schema(self) -> None:
+        self.mock.clear_requests()
+        data = self.json_of("discover", "firewall/address", "--fields", "type,comment", "--live")
+        self.assertTrue(data["meta"]["live"])
+        self.assertEqual(data["data"]["live_help"], "Configure IPv4 addresses.")
+        by_name = {f["name"]: f for f in data["data"]["fields"]}
+        self.assertEqual(by_name["type"]["options"], ["ipmask", "iprange", "fqdn", "geography", "wildcard"])
+        self.assertEqual(by_name["comment"]["size"], 255)
+        self.assertEqual([(r.method, r.api, r.query) for r in self.mock.requests],
+                         [("GET", "cmdb/firewall/address", [("action", "schema")])])
+
+    def test_capabilities(self) -> None:
+        data = self.json_of("discover", "--live", "system/global")["data"]
+        self.assertEqual(data["live_help"], "Configure global attributes.")
+
+
+class Get(CliTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.mock.seed_addresses(120)
+        self.mock.clear_requests()
+
+    def test_list_pages_on_the_device(self) -> None:
+        first = self.json_of("get", "firewall/address", "--count", "50")
+        self.assertEqual(len(first["data"]), 50)
+        self.assertEqual(first["meta"]["next_start"], 50)
+        last = self.json_of("get", "firewall/address", "--start", "100", "--count", "50")
+        self.assertEqual([o["name"] for o in last["data"]], [f"host-{i:05d}" for i in range(100, 120)])
+        self.assertNotIn("next_start", last["meta"])
+        self.assertEqual(self.mock.requests[0].query, [("start", "0"), ("count", "50")])
+        self.assertEqual(self.mock.requests[1].query, [("start", "100"), ("count", "50")])
+
+    def test_fields_and_filter(self) -> None:
+        data = self.json_of("get", "firewall/address", "--fields", "name,subnet", "--filter", "name==host-00007")
+        self.assertEqual(data["data"], [{"name": "host-00007", "q_origin_key": "host-00007",
+                                         "subnet": "10.0.0.7 255.255.255.255"}])
+        self.assertEqual(self.mock.requests[-1].query,
+                         [("format", "name|subnet"), ("filter", "name==host-00007"), ("start", "0"), ("count", "50")])
+
+    def test_unknown_filter_attribute_is_refused_before_any_request(self) -> None:
+        data = self.json_of("get", "firewall/address", "--filter", "nosuch==1", expect=6)
+        self.assertEqual(data["error"]["code"], "validation")
+        self.assertEqual(self.mock.requests, [])
+
+    def test_keyed_singleton_monitor_and_404(self) -> None:
+        one = self.json_of("get", "firewall/address", "host-00003")
+        self.assertEqual(one["data"]["name"], "host-00003")
+        self.assertEqual(self.mock.requests[-1].api, "cmdb/firewall/address/host-00003")
+        self.assertEqual(self.json_of("get", "system/global")["data"]["hostname"], "fw-mock")
+        status = self.json_of("get", "monitor/system/status")
+        self.assertEqual(status["data"]["hostname"], "fw-mock")
+        self.assertEqual(status["meta"]["device"], {"serial": "FGT60FTK20000000", "version": "v7.4.8", "build": 2795})
+        untyped = self.json_of("get", "monitor/firewall/session-count-list", "--count", "2")
+        self.assertEqual(len(untyped["data"]), 2)
+        self.assertEqual(untyped["meta"]["total"], 5)
+        self.assertEqual(untyped["meta"]["next_start"], 2)
+        missing = self.forti("get", "firewall/address", "nope", "--json", expect=5).json()
+        self.assertEqual(missing["error"]["code"], "not_found")
+        # An object name with a slash is one encoded path segment.
+        self.forti("get", "firewall/address", "10.0.0.0/24", expect=5)
+        self.assertEqual(self.mock.requests[-1].path, "/api/v2/cmdb/firewall/address/10.0.0.0%2F24")
+
+
+class ReadOnly(CliTest):
+    mode = "read-only"
+
+    def test_apply_is_refused(self) -> None:
+        plan = self.plan(create_address())["data"]
+        self.assertEqual(plan["mode"], "read-only")
+        refused = self.json_of("apply", plan["id"], expect=7)
+        self.assertEqual(refused["error"]["code"], "policy_denied")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.sb.audit()[-1]["outcome"], "policy_denied")
+
+
+class Guarded(CliTest):
+    mode = "guarded"
+
+    def test_refused_then_approved_then_applied(self) -> None:
+        plan = self.plan(create_address())["data"]
+        self.assertEqual(plan["approve"], f"forti plan approve {plan['id']}")
+        refused = self.json_of("apply", plan["id"], expect=7)
+        self.assertEqual(refused["error"]["code"], "approval_required")
+        self.assertEqual(refused["error"]["details"]["approve_command"], f"forti plan approve {plan['id']}")
+        self.assertEqual(self.writes(), [])
+
+        shown = self.forti("plan", "show", plan["id"])
+        self.assertIn("create firewall/address", shown.out)
+        approved = self.json_of("plan", "approve", plan["id"], "--yes")
+        self.assertEqual(approved["data"]["plan_id"], plan["id"])
+        applied = self.json_of("apply", plan["id"])
+        self.assertEqual(applied["data"]["verified"], 1)
+        self.assertIn("web", self.mock.table("firewall/address"))
+        # A plan runs once; the approval is used up.
+        again = self.json_of("apply", plan["id"], expect=7)
+        self.assertEqual(again["error"]["details"]["reason"], "already_applied")
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_approval_is_bound_to_the_digest(self) -> None:
+        plan = self.plan(create_address())["data"]
+        self.json_of("plan", "approve", plan["id"], "--yes")
+        stored = self.sb.state / "plans" / f"{plan['id']}.json"
+        doc = json.loads(stored.read_text())
+        doc["operations"][0]["object"]["comment"] = "tampered"
+        stored.write_text(json.dumps(doc))
+        refused = self.json_of("apply", plan["id"], expect=None)
+        self.assertNotEqual(refused.get("ok"), True)
+        self.assertEqual(self.writes(), [])
+
+
+class Autonomous(CliTest):
+    mode = "autonomous"
+
+    def test_create_update_delete_with_exact_wire_bodies(self) -> None:
+        self.mock.add_address("old", "198.51.100.1 255.255.255.255", comment="old")
+        self.mock.add_address("gone", "198.51.100.2 255.255.255.255")
+        self.mock.clear_requests()
+        policy = {"name": "allow-web", "srcintf": [{"name": "port1"}], "dstintf": [{"name": "port2"}],
+                  "srcaddr": [{"name": "all"}], "dstaddr": [{"name": "web"}], "service": [{"name": "HTTPS"}],
+                  "action": "accept", "schedule": "always"}
+        planned = self.plan(create_address(),
+                            {"op": "create", "resource": "firewall/policy", "object": policy},
+                            {"op": "update", "resource": "firewall/address", "key": "old", "set": {"comment": "new"},
+                             "clear": ["color"]},
+                            {"op": "delete", "resource": "firewall/address", "key": "gone"})["data"]
+        self.assertEqual(self.writes(), [], "planning never writes")
+        self.assertEqual(planned["risk"], "elevated")
+        wires = [op["wire"] for op in planned["operations"]]
+
+        self.mock.clear_requests()
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertEqual(applied["verified"], 4, applied)
+        statuses = [op["status"] for op in applied["operations"]]
+        self.assertEqual(statuses, ["verified"] * 4)
+        self.assertEqual(applied["operations"][1]["key"], "1", "the integer key FortiOS assigned")
+
+        writes = self.writes()
+        self.assertEqual([(w.method, w.api) for w in writes],
+                         [("POST", "cmdb/firewall/address"), ("POST", "cmdb/firewall/policy"),
+                          ("PUT", "cmdb/firewall/address/old"), ("DELETE", "cmdb/firewall/address/gone")])
+        # The bytes on the wire are exactly the bodies the plan showed.
+        for write, wire in zip(writes, wires):
+            self.assertEqual(write.method, wire["method"])
+            self.assertEqual(write.json(), wire.get("body"))
+        self.assertEqual(writes[2].json(), {"comment": "new", "color": 0})
+
+        addresses = self.mock.table("firewall/address")
+        self.assertEqual(addresses["old"]["comment"], "new")
+        self.assertNotIn("gone", addresses)
+        self.assertEqual(self.mock.table("firewall/policy")["1"]["dstaddr"], [{"name": "web"}])
+
+        # Rollback: the generated inverse plan restores the before-state.
+        rollback_id = applied["rollback"]["plan_id"]
+        shown = self.json_of("plan", "show", rollback_id)["data"]
+        self.assertEqual(shown["kind"], "rollback")
+        self.assertEqual(shown["rollback_of"], planned["id"])
+        self.assertEqual([op["op"] for op in shown["operations"]], ["create", "update", "delete", "delete"])
+        rolled = self.json_of("apply", rollback_id)["data"]
+        self.assertTrue(all(op["status"] in ("verified", "applied_unverified") for op in rolled["operations"]), rolled)
+        addresses = self.mock.table("firewall/address")
+        self.assertEqual(sorted(addresses), ["gone", "old"])
+        self.assertEqual(addresses["old"]["comment"], "old")
+        self.assertEqual(self.mock.table("firewall/policy"), {})
+
+        audit = self.sb.audit()
+        self.assertEqual([e["outcome"] for e in audit if e["event"] == "apply"], ["ok", "ok"])
+        self.assertEqual(stat.S_IMODE(os.stat(self.sb.state / "audit.jsonl").st_mode), 0o600)
+        first = [e for e in audit if e["event"] == "apply"][0]
+        self.assertEqual(first["plan_id"], planned["id"])
+        self.assertEqual(first["digest"], planned["digest"])
+        self.assertEqual(first["serial"], "FGT60FTK20000000")
+        self.assertEqual(first["operations"][2]["attributes"], ["comment", "color"])
+        self.assertNotIn("new", json.dumps(first), "audit records carry attribute names, not values")
+
+    def test_normalized_value_is_applied_unverified(self) -> None:
+        planned = self.plan(create_address({"name": "net", "subnet": "192.0.2.0/24"}))["data"]
+        applied = self.json_of("apply", planned["id"])["data"]
+        op = applied["operations"][0]
+        self.assertEqual(op["status"], "applied_unverified")
+        self.assertEqual(op["mismatches"], [{"attribute": "subnet", "expected": "192.0.2.0/24",
+                                             "actual": "192.0.2.0 255.255.255.0"}])
+        self.assertEqual(applied["applied_unverified"], 1)
+
+    def test_stale_plan(self) -> None:
+        self.mock.add_address("old", comment="before")
+        planned = self.plan({"op": "update", "resource": "firewall/address", "key": "old", "set": {"comment": "x"}})["data"]
+        self.mock.set_attr("firewall/address", "old", "comment", "changed behind our back")
+        self.mock.clear_requests()
+        stale = self.json_of("apply", planned["id"], expect=7)
+        self.assertEqual(stale["error"]["code"], "stale_plan")
+        self.assertEqual(stale["error"]["details"]["reason"], "before_changed")
+        self.assertEqual(self.writes(), [])
+
+    def test_outcome_unknown_when_the_connection_drops_after_send(self) -> None:
+        planned = self.plan(create_address(), create_address({"name": "second"}))["data"]
+        # times=2: the SDK's libcurl transport re-sends once on its own (see the next test).
+        self.mock.drop_after_write("POST", apply=True, times=2)
+        failed = self.json_of("apply", planned["id"], expect=8)
+        self.assertEqual(failed["error"]["code"], "outcome_unknown")
+        ops = failed["error"]["details"]["operations"]
+        self.assertEqual([op["status"] for op in ops], ["outcome_unknown", "not_attempted"])
+        self.assertTrue(ops[0]["sent"])
+        self.assertIn("web", self.mock.table("firewall/address"), "the drop happened after the device acted")
+        self.assertNotIn("second", self.mock.table("firewall/address"))
+        self.assertEqual(self.sb.audit()[-1]["outcome"], "outcome_unknown")
+
+    @unittest.expectedFailure  # forti-api gap G12: libcurl re-sends a write on a fresh connection
+    def test_no_write_is_sent_twice(self) -> None:
+        # The device performs the create, then the connection drops before the reply. libcurl sees an
+        # empty reply on a reused connection and silently sends the POST again on a new one: FortiOS
+        # assigns a second policy id, and the first policy is in no record and no rollback plan.
+        policy = {"name": "p", "srcintf": [{"name": "port1"}], "dstintf": [{"name": "port2"}],
+                  "srcaddr": [{"name": "all"}], "dstaddr": [{"name": "all"}], "service": [{"name": "ALL"}],
+                  "action": "accept", "schedule": "always"}
+        planned = self.plan({"op": "create", "resource": "firewall/policy", "object": policy})["data"]
+        self.mock.drop_after_write("POST", apply=True, times=1)
+        self.mock.clear_requests()
+        result = self.json_of("apply", planned["id"], expect=None)
+        posts = [w for w in self.writes() if w.method == "POST"]
+        self.assertEqual(len(posts), 1, f"the device received the create {len(posts)} times "
+                                        f"(connections {[w.connection for w in posts]}); "
+                                        f"policies now: {sorted(self.mock.table('firewall/policy'))}; "
+                                        f"apply said: {result.get('ok')}")
+        self.assertEqual(result["error"]["code"], "outcome_unknown")
+
+    def test_partial_failure_when_a_create_fails_but_exists(self) -> None:
+        planned = self.plan(create_address(), create_address({"name": "second"}))["data"]
+        self.mock.error_after_create("cmdb/firewall/address", status=500)
+        self.mock.clear_requests()
+        failed = self.json_of("apply", planned["id"], expect=8)
+        self.assertEqual(failed["error"]["code"], "partial_failure")
+        ops = failed["error"]["details"]["operations"]
+        self.assertEqual([op["status"] for op in ops], ["failed", "not_attempted"])
+        self.assertTrue(ops[0]["exists_after_failure"])
+        self.assertEqual(ops[0]["error"]["details"]["http_status"], 500)
+        self.assertEqual([(w.method, w.api) for w in self.writes()], [("POST", "cmdb/firewall/address")])
+        # The rollback plan deletes what the failed create left behind.
+        rollback = failed["error"]["details"]["rollback"]["plan_id"]
+        self.json_of("apply", rollback)
+        self.assertEqual(self.mock.table("firewall/address"), {})
+
+    def test_failure_record_names_the_objects(self) -> None:
+        planned = self.plan(create_address(), create_address({"name": "second"}))["data"]
+        self.mock.error_after_create("cmdb/firewall/address", status=500)
+        ops = self.json_of("apply", planned["id"], expect=8)["error"]["details"]["operations"]
+        self.assertEqual([op.get("key") for op in ops], ["web", "second"])
+
+    def test_critical_plan_takes_a_private_backup_first(self) -> None:
+        planned = self.plan({"op": "update", "resource": "system/global", "set": {"hostname": "fw-new"}})["data"]
+        self.assertEqual(planned["risk"], "critical")
+        self.mock.clear_requests()
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertEqual(applied["operations"][0]["status"], "verified")
+        self.assertTrue(applied["operations"][0]["management_probe"]["ok"])
+        self.assertEqual(applied["backup"]["status"], "saved", applied["backup"])
+        calls = [(r.method, r.api) for r in self.mock.requests]
+        backup_at = calls.index(("GET", "monitor/system/config/backup"))
+        self.assertLess(backup_at, calls.index(("PUT", "cmdb/system/global")), "the backup precedes the change")
+        self.assertEqual(self.mock.requests[backup_at].query, [("scope", "global")])
+        files = list((self.sb.state / "backups").iterdir())
+        self.assertEqual([f.name for f in files], [f"{planned['id']}.conf"])
+        self.assertEqual(stat.S_IMODE(os.stat(files[0]).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.sb.state / "backups").st_mode), 0o700)
+        content = files[0].read_text()
+        self.assertTrue(content.startswith("#config-version="))
+        self.assertIn('set hostname "fw-mock"', content, "the backup holds the before-state")
+        self.assertIn(BACKUP_MARKER, content)
+        self.assertEqual(self.sb.audit()[-1]["backup"], "saved")
+
+    def test_failed_backup_refuses_a_critical_plan(self) -> None:
+        planned = self.plan({"op": "update", "resource": "system/global", "set": {"hostname": "fw-new"}})["data"]
+        self.mock.fail_request("GET", "monitor/system/config/backup", status=403)
+        self.mock.clear_requests()
+        refused = self.json_of("apply", planned["id"], expect=7)
+        self.assertEqual(refused["error"]["code"], "policy_denied")
+        self.assertEqual(refused["error"]["details"]["reason"], "backup_failed")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.mock.singleton("system/global")["hostname"], "fw-mock")
+        self.assertFalse(any((self.sb.state / "backups").glob("*")) if (self.sb.state / "backups").exists() else False,
+                         "no partial backup file is left behind")
+        self.assertEqual(self.sb.audit()[-1]["error"]["reason"], "backup_failed")
+
+    def test_management_probe_failure_stops_a_critical_apply(self) -> None:
+        planned = self.plan({"op": "update", "resource": "system/global", "set": {"hostname": "fw-new"}},
+                            create_address())["data"]
+        self.assertEqual(planned["risk"], "critical")
+        self.mock.fail_status_after_write()
+        failed = self.json_of("apply", planned["id"], expect=8)
+        self.assertEqual(failed["error"]["code"], "management_connectivity_lost")
+        details = failed["error"]["details"]
+        self.assertFalse(details["operations"][0]["management_probe"]["ok"])
+        self.assertEqual(details["operations"][1]["status"], "not_attempted")
+        self.assertEqual(details["before"]["hostname"], "fw-mock")
+        self.assertIn("plan_id", details["rollback"])
+        self.assertEqual(self.mock.singleton("system/global")["hostname"], "fw-new")
+        self.assertNotIn("web", self.mock.table("firewall/address"))
+        self.mock.clear_faults()
+        # Once management is back, the rollback plan restores the hostname.
+        self.json_of("apply", details["rollback"]["plan_id"])
+        self.assertEqual(self.mock.singleton("system/global")["hostname"], "fw-mock")
+
+
+def main() -> int:
+    global FORTI
+    require_tools()
+    FORTI = binary("FORTI_BINARY")
+    program = unittest.main(exit=False, verbosity=2)
+    return 0 if program.result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -22,4 +22,4 @@ forti_cli_dep = declare_dependency(include_directories : include_directories('.'
 forti_exe = executable('forti', 'main.cpp',
                        dependencies : forti_cli_dep,
                        implicit_include_directories : false,
-                       install : true)
+                       install : not meson.is_subproject())
