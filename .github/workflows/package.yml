@@ -1,0 +1,103 @@
+# Packaging: the optimized release build as packaged, the Debian release rehearsal with a clean
+# install, and the Homebrew formula. Slow by nature (an optimized build of every engine shard), so it
+# runs only when packaging can be affected and on main; ci.yml validates pull requests.
+name: Package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - debian/**
+      - packaging/**
+      - release.toml
+      - meson.build
+      - meson.options
+      - subprojects/*.wrap
+      - ci/**
+      - .github/**
+      - .release/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VL_RELEASE_TAG: v0.5.0
+  # Stock image for clean-install smoke tests (same digest as ci/Containerfile's base).
+  UBUNTU_IMAGE: docker.io/library/ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+
+jobs:
+  package:
+    name: Release contract and Debian rehearsal
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && fromJSON('["ubuntu-latest"]') || fromJSON('["self-hosted","Linux","X64","ubuntu-latest-lts"]') }}
+    defaults:
+      run:
+        shell: bash ./ci/run-ci bash -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Repository contract
+        id: state
+        run: |
+          vlr check
+          vlr install-skill --check
+          vlr status --github-output
+
+      # A full local release in this ephemeral checkout; nothing is published.
+      # Between releases (version not bumped yet) the rehearsal bumps the version in this ephemeral
+      # checkout only, so every PR still builds and validates the package.
+      - name: Release rehearsal
+        if: contains(fromJSON('["pending","prepared","unbumped"]'), steps.state.outputs.phase)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libforti-api-dev
+          dpkg-checkbuilddeps
+          if [ "${{ steps.state.outputs.phase }}" = unbumped ]; then vlr version bump minor; fi
+          vlr prepare
+          vlr build-deb
+          vlr source-archive
+          vlr homebrew formula
+          vlr checksums
+          vlr validate-artifacts
+
+      # Install the built .deb into a clean, stock Ubuntu 24.04 (container root, no host access): it
+      # must pull its runtime dependencies (libcurl) from the Ubuntu archive alone and work offline.
+      - name: Clean-install smoke test of the built package
+        if: contains(fromJSON('["pending","prepared","unbumped"]'), steps.state.outputs.phase)
+        shell: bash
+        run: |
+          # shellcheck disable=SC2016  # expanded inside the container
+          ./ci/run-ci --image "$UBUNTU_IMAGE" --root bash -euo pipefail -c '
+            apt-get update
+            apt-get install -y --no-install-recommends ./release/forti-cli_*_amd64.deb
+            ci/smoke-test.sh /usr/bin/forti
+          '
+
+  homebrew:
+    name: Homebrew formula (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # vl-release from its pinned release tag (pure Python, no install needed).
+      - name: vl-release
+        run: |
+          git clone --quiet --depth 1 --branch "$VL_RELEASE_TAG" https://github.com/valkyrianlabs/vl-release.git "$RUNNER_TEMP/vl-release"
+          echo "$RUNNER_TEMP/vl-release/bin" >> "$GITHUB_PATH"
+
+      - name: Homebrew formula
+        run: |
+          phase="$(vlr status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["phase"])')"
+          case "$phase" in
+            pending | prepared | unbumped) bash .github/scripts/homebrew-local-install.sh ;;
+            *) echo "release phase $phase: no staged release docs, skipping the formula install" ;;
+          esac
