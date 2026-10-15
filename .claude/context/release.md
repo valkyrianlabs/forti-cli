@@ -72,10 +72,16 @@ repository access).
 
 ## Build profile
 
-Default (meson.build): `buildtype=release` + `optimization=s` (meson emits `-Oz` on clang, `-Os` on
-GCC), `engine_shards=8`, no LTO; on ELF, non-debug builds add `-ffunction-sections -fdata-sections
--Wl,--gc-sections`. Packaging: Debian swaps dpkg's `-O2` for `-Os` and sets `b_ndebug=true`
-(`debian/rules`; debhelper strips into `-dbgsym`); Homebrew passes `-Doptimization=s -Dstrip=true`.
+Current (maintainer decision, 2026-10-15): release builds are `buildtype=release` (-O3) and are tested
+as built; pull-request CI builds -O0 and tests that; no job builds twice. `engine_shards=10`, no LTO;
+on ELF, non-debug builds add `-ffunction-sections -fdata-sections -Wl,--gc-sections`. Packaging:
+Debian swaps dpkg's `-O2` for `-O3`, drops Ubuntu's default `-flto=auto -ffat-lto-objects` and `-g`,
+sets `b_ndebug=true` and ships no `-dbgsym` package; Homebrew passes `-Doptimization=3 -Dstrip=true`;
+parallelism comes from `ci/build-jobs` (memory-aware). GCC 13 per shard (4-core runner, dpkg
+hardening flags): -O0 30 s / 1.9 GB, -O1 49 s, -O2 64 s, -O3 76 s / 2.3 GB.
+
+The table below is the 2026-10-14 size study that chose `optimization=s` before that decision; kept
+for its numbers (an -O3 stripped `forti` is ~24 MB, -Oz ~12 MB).
 
 Measured 2026-10-14 on the development Mac (Apple clang 21, meson 1.8, `ninja -j4` building only
 `forti`, forti-api from the wrap with its tests disabled, a quiet machine except other agents). Peak

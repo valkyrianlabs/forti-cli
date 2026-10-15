@@ -34,7 +34,7 @@ namespace forti::engine {
     nlohmann::json show_plan(Engine& engine, std::string_view plan_id);
 
     // Stored plans, newest first: {id, kind, created_at, profile, host, risk, operations, summary, state}.
-    // state: pending | approved | applied | tampered.
+    // state: pending | approved | approval_expired | applied | invalid | tampered.
     nlohmann::json list_plans(Engine& engine);
 
 }  // namespace forti::engine

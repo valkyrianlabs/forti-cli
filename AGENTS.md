@@ -6,15 +6,15 @@ implementation). The ecosystem architecture and contracts are in `../.claude/con
 in the parent workspace. A copy of the engine contract is in `.claude/context/engine.md`.
 
 ```sh
-ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api   # SDK co-development (else the wrap downloads v1.0.0)
+ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api   # SDK co-development (else the wrap downloads v1.0.1)
 meson setup build/dev -Dtests=enabled --buildtype=debugoptimized
-ninja -C build/dev -j4                 # engine shard TUs: ~1.8 GB each at -Os, ~3.9 GB with -g
+meson compile -C build/dev -j "$(ci/build-jobs)"   # every core memory allows (~2 GB per engine shard with GCC)
 meson test -C build/dev --suite unit   # network-free; what CI runs
 meson test -C build/dev --suite integration   # real `forti` vs a mock FortiOS over TLS (python3 + openssl)
 meson install -C build/rel --skip-subprojects   # source installs: never install the SDK from the wrap
 ```
 
-The default build is `buildtype=release` with `optimization=s` (a stripped `forti` is about 12 MB).
+The default build is `buildtype=release` (-O3), as packaged and tested; CI builds -O0 and tests that.
 Packaging and release: `.claude/context/release.md`.
 
 ## Layout

@@ -51,8 +51,24 @@ or keep a resource list. They reach FortiOS only through:
 | Errors | `ApiError` (status, FortiOS code, CLI messages), `TransportError::before_send()`, `DecodeError` |
 
 Reads return the device JSON as FortiOS sent it, through the SDK `Client`, instead of decoding and
-re-serializing. `to_json` omits read-only attributes, so a round-trip would lose data (gap G2). Writes
-always go through the typed SDK objects, so `Field<T>` semantics decide exactly what is sent.
+re-serializing, with **device secrets redacted** (see "Read redaction" below). `to_json` omits read-only
+attributes, so a round-trip would lose data (gap G2). Writes always go through the typed SDK objects,
+so `Field<T>` semantics decide exactly what is sent.
+
+Every device reply is checked iteratively for nesting depth (limit 256) before the engine copies it:
+nlohmann's copy and `dump()` recurse, so a hostile reply could otherwise overflow the stack (gap G14).
+Deeper replies fail with `api`.
+
+### Read redaction (contract)
+
+`Engine::read` replaces, at any depth, every string value starting with `ENC ` (FortiOS's reversible
+secret form) and every non-empty value of an attribute that `detail::sensitive_name` marks as secret
+with `"<redacted>"`. `meta.redacted` lists the locations as JSON pointers relative to `data`, with `*`
+for array items (`["/*/psksecret"]`). This is the default for every caller. No request field turns it
+off, so MCP cannot. Only the C++ argument `Engine::Secrets::reveal` disables it, and only the CLI's
+`forti get --reveal` passes it (a terminal, or explicit `--json`, plus a stderr warning). Plan and apply
+read the device separately and keep real values, so before-digests and drift checks use unredacted data.
+`plan` refuses `"<redacted>"` as a value to write (`validation`).
 
 ### Compile-time sharding (no duplication)
 
@@ -84,7 +100,10 @@ public:
 - `firewall/address` and `cmdb/firewall/address` both name the cmdb table. FortiOS-dotted paths
   (`firewall.service/custom`) are canonical. `monitor/system/status` names a monitor GET: typed when
   the SDK has a spec, untyped through `fortiapi::Monitor::get` otherwise.
-- Table objects are addressed by `key` (string; numeric keys are parsed to the SDK key type).
+- Table objects are addressed by `key` (string; numeric keys are parsed to the SDK key type). `.` and
+  `..` are never keys: the SDK leaves '.' unescaped and libcurl removes dot segments, so
+  `DELETE …/address/.` would address the whole table (gap G13). The engine rejects them in requests,
+  created object names, stored plans and device-reported mkeys.
 
 ### Requests
 
@@ -93,7 +112,7 @@ public:
 {"what": "devices"}                                    // profiles, no secrets
 {"what": "resources", "query": "addr", "kind": "table|singleton|monitor", "start": 0, "count": 50}
 {"what": "resource", "resource": "firewall/address", "fields": ["name","type"], "live": false}
-                                                       // live=true merges device ?action=schema (cached per FortiOS version)
+                                                       // live=true merges the device's ?action=schema (fetched per request)
 {"what": "capabilities", "profile": "home"}            // device identity, version vs SDK schema version, mode
 
 // read
@@ -138,21 +157,32 @@ public:
 | `approval_required` | apply without a valid human approval | 7 |
 | `policy_denied` | profile is read-only, or a risk tier needs an extra step | 7 |
 | `partial_failure` | apply stopped part-way; the record says what happened | 8 |
+| `management_connectivity_lost` | the management probe after a critical change failed; execution stopped | 8 |
 | `outcome_unknown` | a mutation may have reached the device (`!before_send`) | 8 |
 
 ## Profiles and credentials
 
 - Config dir: `$FORTI_CONFIG_DIR`, else `$XDG_CONFIG_HOME/forti`, else `~/.config/forti` (macOS
   included). State: `$XDG_STATE_HOME/forti` or `~/.local/state/forti` (plans, approvals, audit log).
-  Cache: `$XDG_CACHE_HOME/forti` (live schemas). Never derived from the working directory.
+  Cache: `$XDG_CACHE_HOME/forti` (reserved; live schemas are fetched per request). Never derived from the working directory.
 - `config.json` (0600, dir 0700) holds profiles: host, port, vdom, ca_bundle, client_cert path,
   resolve_ip, timeouts, `mode` (default **read-only**), and a credential *reference*, never a secret.
 - Secret sources, in order: OS store (macOS Keychain via Security.framework: service `forti`, account
-  `<profile>/api-key`); file `credentials/<profile>.token` (0600); `env` (variable name stored, not
-  the value); `command` (argv, git-credential style). The P12 password uses the same mechanism.
+  `<profile>/api-key`); file `credentials/<profile>.api-key` (0600); `env` (variable name stored, not
+  the value); `command` (argv, git-credential style, stdin `/dev/null`, only fds 0-2 inherited). The P12
+  password uses the same mechanism.
+- Stored secrets are **bound to the profile's `host:port`**: the Keychain item's `kSecAttrGeneric`, or the
+  credential file's first line (`binding host:port`). `resolve_secret` refuses an unbound or
+  differently bound secret (`config`, "…belongs to host:port; run forti configure"). This stops another
+  config.json that reuses a profile name from sending the key elsewhere. `forti configure` writes the
+  binding and re-binds a kept key when the host or port changes. env/command sources are unbound.
+- config.json is refused when owned by another user or writable by group or others; the `FORTI_*_DIR`
+  overrides must be absolute. Both executables set `RLIMIT_CORE` to 0 at startup.
 - TLS verification is always on (the SDK hardcodes VERIFYPEER/VERIFYHOST=2). No flag disables it.
   Self-signed devices use `ca_bundle` or `resolve_ip`.
-- Secrets never appear in argv, output, logs, plans, audit records, MCP client config, or project files.
+- forti's own credentials never appear in argv, output, logs, plans, audit records, MCP client config,
+  or project files. Device secrets are redacted in reads, diffs, audit records and error details (stored
+  plan files keep real values, 0600).
 
 ## Operating modes and mutation safety
 
@@ -188,7 +218,8 @@ Automatic safeguards (every mode that writes):
      before-state).
    - Critical plans take a **pre-change config backup** through forti-api's raw download (G9
      upstream). It is stored only under `state/backups/` (0600 file, 0700 dir, never a shared temp
-     dir), never logged, and never included in output.
+     dir), never logged, and never included in output. Only the 20 most recent `.conf` files (by mtime)
+     are kept; older ones are deleted after each successful backup.
    - After each **critical**-risk operation, a fresh `fortiapi::Client` probes management
      connectivity (`monitor/system/status`). On failure, execution stops with
      `management_connectivity_lost`, the rollback plan id, the backup reference and the before-state.
@@ -198,16 +229,25 @@ Automatic safeguards (every mode that writes):
    recover from a management lockout. That needs an independently executable mechanism (e.g. a
    device-side auto-revert) or a verified alternate management path (console, out-of-band
    interface), which the operator must provide.
-4. **Audit and redaction.** Every apply is appended to `state/audit.jsonl` (0600). Sensitive
-   attributes (passwords, PSKs, secrets, keys, tokens; plus the live schema's `password` type) are
-   redacted in diffs, output, audit records and error details. Stored plan files keep real values
-   because apply needs them, so they are 0600.
+4. **Audit and redaction.** Every apply is appended to `state/audit.jsonl` (0600). Before the first
+   mutation, apply checks that the log can be opened for appending, and refuses with `config`
+   (nothing sent) when it cannot. A write failure after execution is reported in the result
+   (`audit_error`), never dropped. Sensitive attributes (passwords, PSKs, secrets, keys, tokens, `*-key`;
+   plus the live schema's `password*` types) are redacted in reads, diffs, audit records and error
+   details. Stored plan files keep real values because apply needs them, so they are 0600.
 5. **Risk tiers** are reported by `discover` and `plan`:
    - `low`: objects inert unless referenced
-   - `elevated`: policies, VIPs, users, VPN, most `system/*`, monitor actions
-   - `critical`: management access, routing, interfaces, admins, HA, VDOMs, global settings
+   - `elevated`: policies, VIPs, users, VPN, most `system/*`, monitor actions not listed below
+   - `critical`: management access, routing, interfaces, admins, HA, VDOMs, global settings; and the
+     monitor actions that restart or reconfigure the device or cut a management path: `system/os/*`
+     (reboot, shutdown), `system/config/restore|reload|revert`, `system/config-revision/*`,
+     `system/firmware/*`, `system/factory-reset`, `system/change-password`,
+     `system/admin/change-vdom-mode`, `system/disconnect-admins/*`, `system/ha-*`, `system/interface/*`,
+     `system/vmlicense/*`, `system/certificate/*`, `vpn/ike/clear`, `vpn/ssl/delete`,
+     `firewall/session/close-all` (list in `engine/src/policy.cpp`)
 
-   Tiers drive the connectivity probe and the audit emphasis, not interactive gates.
+   Tiers drive the connectivity probe (critical monitor actions included), the pre-change backup and
+   the audit emphasis, not interactive gates.
 
 Discovering a capability never authorizes it. Execution policy is the profile mode plus the FortiOS
 account.
@@ -218,5 +258,8 @@ Four tools, mirroring the engine: `forti_discover`, `forti_read`, `forti_plan`, 
 In guarded mode `forti_apply` returns `approval_required` with the exact `forti plan approve <id>`
 command for the human. In autonomous mode it executes. MCP can never change the mode or approve. Responses are bounded (default 50 items and 48 KiB of JSON, with `next_start` continuation).
 Field schemas are returned selectively (`fields`). No arbitrary SSH/CLI execution, ever: REST only.
-Protocol: JSON-RPC 2.0 over stdio, newline-delimited; `initialize`, `tools/list`, `tools/call`,
-`ping`, and notifications. stdout carries protocol only; logs go to stderr without secrets.
+Protocol: JSON-RPC 2.0 over stdio, newline-delimited, dual-era. MCP `2026-07-28` is served
+statelessly (per-request `_meta` protocol version and client capabilities; `server/discover`,
+`tools/list`, `tools/call`); the `initialize` lifecycle of `2025-11-25` / `2025-06-18` (with `ping`) is
+kept for clients that still use it. No JSON-RPC batches. stdout carries protocol only; logs go to
+stderr without secrets.

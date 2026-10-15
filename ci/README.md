@@ -13,11 +13,13 @@ conventions are described in [payload-markdown's `ci/README.md`](https://github.
 - Workflows set `defaults.run.shell: bash ./ci/run-ci bash -euo pipefail {0}` on their Linux jobs.
   Clean-install checks of the `.deb` use a stock image instead:
   `./ci/run-ci --image "$UBUNTU_IMAGE" --root bash -c 'apt-get install -y ./release/…'`.
-- The container is capped at 12 GB (`CI_MEMORY`). Each engine shard TU needs about 2 GB at -O2/-O3
-  (more with `-g` or sanitizers), so builds run with `-j 4` at most.
+- Memory and parallelism: `ci/run-ci` gives the container three quarters of the host's RAM
+  (`CI_MEMORY` overrides it), and `ci/build-jobs` runs every core that memory allows, budgeting 2.2 GB
+  per job (an engine shard TU with GCC 13: ~1.9 GB at -O0, ~2.3 GB at -O3). Each CI job builds once:
+  pull requests -O0 (ASan/UBSan) with every suite run against it; release builds -O3, tested as built.
 
 Build locally the way CI does (needs Podman):
 
 ```sh
-./ci/run-ci bash -c 'meson setup build/ci -Dtests=enabled -Dwerror=true && meson compile -C build/ci -j 4 && meson test -C build/ci --suite unit'
+./ci/run-ci bash -c 'meson setup build/ci -Dtests=enabled -Dwerror=true && meson compile -C build/ci -j "$(ci/build-jobs)" && meson test -C build/ci --suite unit --suite integration'
 ```

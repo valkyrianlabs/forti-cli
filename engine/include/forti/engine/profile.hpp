@@ -4,7 +4,7 @@
 //
 //   config  $FORTI_CONFIG_DIR | $XDG_CONFIG_HOME/forti | ~/.config/forti   config.json, credentials/
 //   state   $FORTI_STATE_DIR  | $XDG_STATE_HOME/forti  | ~/.local/state/forti   plans/, approvals/, audit.jsonl
-//   cache   $FORTI_CACHE_DIR  | $XDG_CACHE_HOME/forti  | ~/.cache/forti   schema/<fortios version>/
+//   cache   $FORTI_CACHE_DIR  | $XDG_CACHE_HOME/forti  | ~/.cache/forti   reserved (live schemas are not cached yet)
 //
 
 #ifndef FORTI_ENGINE_PROFILE_HPP

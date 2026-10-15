@@ -7,7 +7,7 @@
 // silent change to the global config), it warns instead.
 //
 // Skills: Codex 0.162.1 loads $CODEX_HOME/skills, ~/.agents/skills, and <repo>/.codex/skills and
-// <repo>/.agents/skills (verified with `codex debug prompt-input`, docs/agent-integration.md).
+// <repo>/.agents/skills (verified with `codex debug prompt-input`, docs/guides/ai-agent-integration.md).
 // forti uses the documented ~/.agents/skills and <project>/.agents/skills.
 //
 

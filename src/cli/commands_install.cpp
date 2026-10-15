@@ -380,8 +380,8 @@ namespace forti::cli {
              "       forti mcp repair              point broken registrations at the installed forti-mcp\n"
              "       forti mcp uninstall           remove forti's registrations (and skill)\n"
              "\n"
-             "  --client claude|codex|all   limit to a client\n"
-             "  --scope user|project|local  limit to a scope (uninstall without a terminal needs both)\n"
+             "  --client claude|codex|all   repair/uninstall: limit to a client (status shows every client)\n"
+             "  --scope user|project|local  repair/uninstall: limit to a scope (uninstall without a terminal needs both)\n"
              "  --project-dir DIR           project for project/local scope (default: current directory)\n"
              "  --keep-skill                uninstall: leave the agent skill in place\n"
              "  --yes  --dry-run  --force   as for install; --force also removes a `forti` entry that is not forti-mcp\n",

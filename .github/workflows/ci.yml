@@ -101,6 +101,3 @@ jobs:
           ci/smoke-test.sh build/src/cli/forti
           ccache --show-stats | head -5
 
-  # Installs the formula (with forti-api from valkyrianlabs/tap) from a throwaway local tap and runs
-  # its test block. Homebrew builds from source in its own sandbox, so this job is separate and runs
-  # in parallel. Skipped while no release docs are staged, since `vlr prepare` would refuse.
