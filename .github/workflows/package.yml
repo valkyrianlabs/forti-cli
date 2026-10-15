@@ -48,6 +48,8 @@ jobs:
           dpkg-checkbuilddeps
           if [ "${{ steps.state.outputs.phase }}" = unbumped ]; then vlr version bump minor; fi
           vlr prepare
+          jobs="$(ci/build-jobs)"   # memory-aware: every core the memory allows
+          export DEB_BUILD_OPTIONS="parallel=$jobs"
           vlr build-deb
           vlr source-archive
           vlr homebrew formula

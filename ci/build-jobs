@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Prints how many compile jobs this machine can run at once: every core, unless memory runs out
-# first. The engine's shard TUs are the memory peak (~1.1 GB each with clang at -O0, about twice that
-# with GCC), so each job is budgeted 2.5 GB. Linux reads the container's cgroup limit (ci/run-ci sets
+# first. The engine's shard TUs are the memory peak (GCC 13: ~1.9 GB at -O0, ~2.3 GB at -O3 with 8
+# shards; less with the default 10), so each job is budgeted 2.2 GB. Linux reads the container's cgroup limit (ci/run-ci sets
 # one), falling back to MemTotal; macOS reads hw.memsize.
 set -euo pipefail
-per_job=$((2500 * 1024 * 1024))
+per_job=$((2200 * 1024 * 1024))
 if [ "$(uname)" = Darwin ]; then
   cores=$(sysctl -n hw.ncpu)
   memory=$(sysctl -n hw.memsize)

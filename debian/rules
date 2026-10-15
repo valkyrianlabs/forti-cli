@@ -7,10 +7,14 @@
 # buildtype=plain and dpkg-buildflags (hardening on), so meson.build's release optimization (-O3) is
 # applied here in place of dpkg's -O2, and NDEBUG explicitly
 # (b_ndebug=if-release does not fire for buildtype=plain). meson.build adds -ffunction-sections
-# -fdata-sections -Wl,--gc-sections for non-debug ELF builds. debhelper strips into forti-cli-dbgsym.
+# -fdata-sections -Wl,--gc-sections for non-debug ELF builds. debhelper strips it; no -dbgsym package ships.
 
-export DEB_BUILD_MAINT_OPTIONS = hardening=+all
-export DEB_CXXFLAGS_MAINT_STRIP = -O2
+# Ubuntu's dpkg defaults add -flto=auto -ffat-lto-objects and -g. The engine's generated shards make
+# both expensive (fat LTO compiles every shard twice and re-optimizes the whole program at link; -g
+# roughly doubles shard memory), and the binary is stripped with no debug package shipped, so both
+# are off: -O3 as built is what is tested.
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=-lto
+export DEB_CXXFLAGS_MAINT_STRIP = -O2 -g
 export DEB_CXXFLAGS_MAINT_APPEND = -O3
 
 include /usr/share/dpkg/architecture.mk
@@ -27,3 +31,7 @@ override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	meson test -C obj-$(DEB_HOST_GNU_TYPE) --suite unit --print-errorlogs
 endif
+
+# No -dbgsym package: the build has no debug info (-g is stripped above), so it would be empty.
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym

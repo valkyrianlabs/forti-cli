@@ -27,7 +27,7 @@ maintainer = "Cooper Larson <cooper@valkyrianlabs.com>"
 # against the system libforti-api-dev (debian/rules: --wrap-mode=nodownload).
 # dpkg-buildpackage defaults to one job; -J4 lets debhelper run four (each engine shard TU needs ~2 GB
 # with GCC, and the CI container is capped at 12 GB).
-build_command = ["dpkg-buildpackage", "-us", "-uc", "-b", "-J4"]
+build_command = ["dpkg-buildpackage", "-us", "-uc", "-b"]
 build_excludes = [".env", ".certs", ".idea", ".claude", ".agents", ".DS_Store", ".cache", "subprojects/forti-api", "compile_commands.json"]
 
 [[debian.packages]]
