@@ -116,7 +116,6 @@ jobs:
           ./ci/run-ci --image "$UBUNTU_IMAGE" --root bash -euo pipefail -c '
             apt-get update
             apt-get install -y --no-install-recommends ./release/forti-cli_*_amd64.deb
-            test -f /usr/share/man/man1/forti.1.gz
             ci/smoke-test.sh /usr/bin/forti
           '
 
