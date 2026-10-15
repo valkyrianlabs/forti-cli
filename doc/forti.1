@@ -158,6 +158,11 @@ Search the resource catalog, or show a resource's attributes
 .It Cm get Ar resource Op Ar key
 Read configuration or monitor data
 .Pq Fl -filter , Fl -fields , Fl -start , Fl -count , Fl -param .
+Device secrets are shown as
+.Dq <redacted> ;
+.Fl -reveal
+shows them on a terminal, or with
+.Fl -json .
 .El
 .Ss Changes and integrations
 .Cm plan ,

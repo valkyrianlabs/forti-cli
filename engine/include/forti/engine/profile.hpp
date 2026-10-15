@@ -73,6 +73,10 @@ namespace forti::engine {
 
         // Secret-store account names.
         [[nodiscard]] std::string api_key_account() const { return name + "/api-key"; }
+        // The device a stored secret belongs to ("host:port"). A secret is released only to a profile
+        // that still points there, so another config.json (FORTI_CONFIG_DIR, a planted file) reusing
+        // a profile name cannot send the key to a different host.
+        [[nodiscard]] std::string secret_binding() const { return host + ":" + std::to_string(port); }
         [[nodiscard]] std::string cert_password_account() const { return name + "/cert-password"; }
     };
 
@@ -103,13 +107,21 @@ namespace forti::engine {
         void save(const ProfileSet& set) const;
     };
 
-    // Secret storage backends. Accounts are "<profile>/api-key", "<profile>/cert-password".
+    // A stored secret and the device it is bound to (Profile::secret_binding(); empty: unbound).
+    struct StoredSecret {
+        std::string secret;
+        std::string binding;
+    };
+
+    // Secret storage backends. Accounts are "<profile>/api-key", "<profile>/cert-password". Every secret
+    // is stored with its binding: the Keychain keeps it in the item's generic attribute, the file store
+    // on the file's first line.
     class SecretStore {
     public:
         virtual ~SecretStore() = default;
         [[nodiscard]] virtual std::string_view kind() const = 0;   // "keychain", "file", "memory"
-        virtual std::optional<std::string> get(std::string_view account) = 0;
-        virtual void put(std::string_view account, std::string_view secret) = 0;
+        virtual std::optional<StoredSecret> get(std::string_view account) = 0;
+        virtual void put(std::string_view account, std::string_view secret, std::string_view binding) = 0;
         virtual bool erase(std::string_view account) = 0;
     };
 
@@ -124,8 +136,11 @@ namespace forti::engine {
     // In-memory, for tests and embedding.
     std::shared_ptr<SecretStore> memory_secret_store();
 
-    // Resolves a SecretRef. Throws Failure(config) naming the profile and source, never the value.
-    std::string resolve_secret(const SecretRef& ref, std::string_view account, SecretStore& store);
+    // Resolves a SecretRef. Throws Failure(config) naming the profile and source, never the value. A
+    // store secret must be bound to `binding` (Profile::secret_binding()); an unbound or differently
+    // bound one is refused. env and command sources are not bound.
+    std::string resolve_secret(const SecretRef& ref, std::string_view account, SecretStore& store,
+                               std::string_view binding);
 
     // Creates `dir` (and parents) and restricts it to the owner (0700).
     void ensure_private_dir(const std::filesystem::path& dir);

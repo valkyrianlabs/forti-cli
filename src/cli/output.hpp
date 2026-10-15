@@ -28,6 +28,7 @@ namespace forti::cli {
         bool color = false;           // ANSI styles on `out` (a TTY, NO_COLOR unset)
         bool err_color = false;       // ANSI styles on `err`
         std::size_t width = 0;        // terminal columns for tables; 0: no limit (not a TTY)
+        bool tty = false;             // stdout is a terminal (`forti get --reveal` needs one, or --json)
     };
 
     // Decides format, color and width from the environment (FORTI_OUTPUT, NO_COLOR, isatty, COLUMNS).

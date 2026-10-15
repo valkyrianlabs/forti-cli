@@ -64,7 +64,7 @@ namespace forti::fake {
         engine::Options options;
         options.paths = {"/nonexistent/forti-test/config", "/nonexistent/forti-test/state", "/nonexistent/forti-test/cache"};
         options.secrets = engine::memory_secret_store();
-        options.secrets->put("lab/api-key", "test-key");
+        options.secrets->put("lab/api-key", "test-key", "fortigate.test:8443");
         engine::ProfileSet profiles;
         engine::Profile lab;
         lab.name = "lab";

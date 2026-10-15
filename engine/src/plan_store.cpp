@@ -351,6 +351,39 @@ namespace forti::engine::detail {
         return out;
     }
 
+    void redact_read(json& value, std::set<std::string, std::less<>>& paths) {
+        // Iterative: device replies are depth-checked, but this keeps the walk off the stack anyway.
+        std::vector<std::pair<json*, std::string>> stack{{&value, ""}};
+        auto escaped = [](std::string_view key) {
+            std::string out;
+            for (char c: key) out += c == '~' ? "~0" : c == '/' ? "~1" : std::string(1, c);
+            return out;
+        };
+        while (!stack.empty()) {
+            auto [node, pointer] = std::move(stack.back());
+            stack.pop_back();
+            if (node->is_array()) {
+                for (auto& item: *node) stack.emplace_back(&item, pointer + "/*");
+            } else if (node->is_object()) {
+                for (auto it = node->begin(); it != node->end(); ++it) {
+                    std::string at = pointer + "/" + escaped(it.key());
+                    json& child = it.value();
+                    bool empty = child.is_null() || (child.is_string() && child.get_ref<const std::string&>().empty()) ||
+                                 (child.is_structured() && child.empty());
+                    if (sensitive_name(it.key()) && !empty) {
+                        child = redacted;
+                        paths.insert(std::move(at));
+                    } else {
+                        stack.emplace_back(&child, std::move(at));
+                    }
+                }
+            } else if (node->is_string() && node->get_ref<const std::string&>().starts_with("ENC ")) {
+                *node = redacted;
+                paths.insert(pointer.empty() ? "/" : pointer);
+            }
+        }
+    }
+
     std::string summarize(const json& plan) {
         const json operations = plan.value("operations", json::array());
         const json device = plan.value("device", json::object());
@@ -431,6 +464,18 @@ namespace forti::engine::detail {
 
     // ---- audit ----
 
+    bool audit_writable(const Paths& paths) {
+        try {
+            ensure_private_dir(paths.state);
+            int fd = ::open((paths.state / "audit.jsonl").c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+            if (fd < 0) return false;
+            ::close(fd);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     bool audit(const Paths& paths, json event) {
         try {
             ensure_private_dir(paths.state);
@@ -438,7 +483,7 @@ namespace forti::engine::detail {
             line.update(event);
             std::string text = canonical(line) + "\n";
             fs::path file = paths.state / "audit.jsonl";
-            int fd = ::open(file.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+            int fd = ::open(file.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
             if (fd < 0) return false;
             ::fchmod(fd, 0600);
             // One write() per line: O_APPEND keeps concurrent writers' lines whole.

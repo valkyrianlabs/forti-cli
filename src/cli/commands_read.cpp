@@ -40,7 +40,19 @@ namespace forti::cli {
                 }
                 request["params"] = std::move(object);
             }
-            return emit(context.output, engine::Engine::envelope([&] { return context.engine.read(request); }),
+            // Device secrets (ENC values, passwords, keys) are redacted unless a person asks for them.
+            // --reveal prints them only to a terminal, or as --json where the caller chose the format
+            // deliberately; never into a pipe or file by accident.
+            auto secrets = engine::Engine::Secrets::redact;
+            if (args.flag("reveal")) {
+                if (!context.output.tty && context.output.format != Format::json)
+                    throw Failure(Code::usage, "--reveal prints device secrets: it needs a terminal, or --json",
+                                  {{"hint", "run it in a terminal, or add --json if you mean to capture the secrets"}});
+                *context.output.err << "forti: --reveal: the output contains device secrets (ENC values, keys, "
+                                       "passwords); do not paste or share it\n";
+                secrets = engine::Engine::Secrets::reveal;
+            }
+            return emit(context.output, engine::Engine::envelope([&] { return context.engine.read(request, secrets); }),
                         table_renderer(fields));
         }
 
@@ -113,12 +125,16 @@ namespace forti::cli {
              "  --start N          first item (default 0)\n"
              "  --count N          items per page (default 50, max 1000)\n"
              "  --param name=val   extra query parameter (monitor endpoints)\n"
+             "  --reveal           show device secrets (ENC values, keys, passwords) instead of <redacted>;\n"
+             "                     needs a terminal or --json, and warns on stderr\n"
+             "\n"
+             "Device secrets are redacted by default (meta.redacted lists where). The MCP server cannot reveal them.\n"
              "\n"
              "examples:\n"
              "  forti get firewall/policy --fields policyid,name,action\n"
              "  forti get firewall/address \"LAN 10.0.0.0/24\"\n"
              "  forti get monitor/system/status\n",
-             {{"filter", "fields", "start", "count", "param"}, {}, {}}, run_get},
+             {{"filter", "fields", "start", "count", "param"}, {"reveal"}, {}}, run_get},
         };
     }
 

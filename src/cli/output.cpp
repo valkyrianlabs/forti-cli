@@ -307,6 +307,12 @@ namespace forti::cli {
                 out << styled(pad(key, width), Style::bold) << "  " << (nested ? value.dump() : scalar(value)) << "\n";
             }
         } else out << scalar(data) << "\n";
+        if (meta.is_object() && meta.contains("redacted") && meta["redacted"].is_array())
+            out << styled(std::format("({} secret attribute{} redacted: {}; forti get --reveal shows them)",
+                                      meta["redacted"].size(), meta["redacted"].size() == 1 ? "" : "s",
+                                      scalar(meta["redacted"])),
+                          Style::dim)
+                << "\n";
     }
 
     Renderer table_renderer(std::vector<std::string> columns) {
@@ -394,7 +400,8 @@ namespace forti::cli {
         bool may_color = !(no_color && *no_color) && !(term && std::string_view(term) == "dumb");
         output.color = may_color && ::isatty(STDOUT_FILENO);
         output.err_color = may_color && ::isatty(STDERR_FILENO);
-        if (::isatty(STDOUT_FILENO)) {
+        output.tty = ::isatty(STDOUT_FILENO) == 1;
+        if (output.tty) {
             winsize size{};
             if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0) output.width = size.ws_col;
             else if (const char* columns = std::getenv("COLUMNS")) {

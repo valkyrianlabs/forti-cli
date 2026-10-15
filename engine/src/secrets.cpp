@@ -42,7 +42,9 @@ namespace forti::engine {
 
             std::string_view kind() const override { return "file"; }
 
-            std::optional<std::string> get(std::string_view account) override {
+            // File format: "binding <host:port>\n<secret>\n". A file without the binding line (or any
+            // other first line) is read as unbound, which resolve_secret refuses.
+            std::optional<StoredSecret> get(std::string_view account) override {
                 auto path = file(account);
                 // Open first, then check what was opened (fstat): no window between the check and the
                 // read in which the file could be swapped. O_NOFOLLOW refuses a symlink; O_NONBLOCK keeps
@@ -77,12 +79,22 @@ namespace forti::engine {
                     text.append(buffer, static_cast<std::size_t>(n));
                     if (text.size() > 65536) throw Failure(Code::config, std::format("{} is too large", path.string()));
                 }
-                return trim_line(std::move(text));
+                constexpr std::string_view prefix = "binding ";
+                if (text.starts_with(prefix)) {
+                    auto newline = text.find('\n');
+                    if (newline != std::string::npos) {
+                        std::string binding = trim_line(text.substr(prefix.size(), newline - prefix.size()));
+                        return StoredSecret{trim_line(text.substr(newline + 1)), std::move(binding)};
+                    }
+                }
+                return StoredSecret{trim_line(std::move(text)), {}};
             }
 
-            void put(std::string_view account, std::string_view secret) override {
+            void put(std::string_view account, std::string_view secret, std::string_view binding) override {
+                if (binding.find_first_of("\r\n") != std::string_view::npos || secret.find_first_of("\r\n") != std::string_view::npos)
+                    throw Failure(Code::config, "a secret or its binding cannot contain a line break");
                 ensure_private_dir(dir_);
-                write_private_file(file(account), std::string(secret) + "\n");
+                write_private_file(file(account), std::format("binding {}\n{}\n", binding, secret));
             }
 
             bool erase(std::string_view account) override {
@@ -92,18 +104,18 @@ namespace forti::engine {
         };
 
         class MemorySecretStore final : public SecretStore {
-            std::map<std::string, std::string, std::less<>> secrets_;
+            std::map<std::string, StoredSecret, std::less<>> secrets_;
 
         public:
             std::string_view kind() const override { return "memory"; }
 
-            std::optional<std::string> get(std::string_view account) override {
+            std::optional<StoredSecret> get(std::string_view account) override {
                 auto it = secrets_.find(account);
                 return it == secrets_.end() ? std::nullopt : std::optional(it->second);
             }
 
-            void put(std::string_view account, std::string_view secret) override {
-                secrets_.insert_or_assign(std::string(account), std::string(secret));
+            void put(std::string_view account, std::string_view secret, std::string_view binding) override {
+                secrets_.insert_or_assign(std::string(account), StoredSecret{std::string(secret), std::string(binding)});
             }
 
             bool erase(std::string_view account) override {
@@ -196,14 +208,22 @@ namespace forti::engine {
 #endif
     }
 
-    std::string resolve_secret(const SecretRef& ref, std::string_view account, SecretStore& store) {
+    std::string resolve_secret(const SecretRef& ref, std::string_view account, SecretStore& store, std::string_view binding) {
         std::string secret;
         switch (ref.source) {
             case SecretRef::Source::none:
                 throw Failure(Code::config, std::format("no credential is configured for {}", account));
             case SecretRef::Source::store:
-                if (auto stored = store.get(account)) secret = std::move(*stored);
-                else throw Failure(Code::config, std::format("no secret stored for {} in the {} store (run `forti configure`)",
+                if (auto stored = store.get(account)) {
+                    if (stored->binding != binding)
+                        throw Failure(Code::config,
+                                      stored->binding.empty()
+                                              ? std::format("the stored key for {} is not bound to a device; run forti configure", account)
+                                              : std::format("the stored key for {} belongs to {}, not {}; run forti configure",
+                                                            account, stored->binding, binding),
+                                      {{"account", account}, {"reason", "secret_binding"}});
+                    secret = std::move(stored->secret);
+                } else throw Failure(Code::config, std::format("no secret stored for {} in the {} store (run `forti configure`)",
                                                              account, store.kind()));
                 break;
             case SecretRef::Source::env:

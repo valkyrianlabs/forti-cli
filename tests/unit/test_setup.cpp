@@ -52,7 +52,8 @@ TEST_F(SetupCli, ConfigureFromStdinVerifiesThenSavesWithoutTheSecretInConfig) {
     EXPECT_EQ(transport->requests[0].url, "https://fw.example.net:8443/api/v2/monitor/system/status?vdom=root");
     EXPECT_TRUE(has_header(transport->requests[0], "Authorization: Bearer s3cret-key"));
 
-    EXPECT_EQ(secrets->get("home/api-key"), "s3cret-key");
+    EXPECT_EQ(secrets->get("home/api-key")->secret, "s3cret-key");
+    EXPECT_EQ(secrets->get("home/api-key")->binding, "fw.example.net:8443");   // configure writes the binding
     std::string config = slurp(paths.config_file());
     EXPECT_EQ(config.find("s3cret"), std::string::npos);
     EXPECT_EQ(out.str().find("s3cret"), std::string::npos);
