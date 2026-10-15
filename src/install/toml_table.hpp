@@ -59,6 +59,22 @@ namespace forti::install::toml {
     // Removes the table block and the blank line forti added before it; unchanged when absent.
     std::string remove_table(std::string_view text, const Path& path);
 
+    // A top-level `key = value` line (before any table header): [begin, end) including its newline,
+    // and the raw value. nullopt when absent; a dotted key that starts with `key` is refused.
+    struct Line {
+        std::size_t begin = 0;
+        std::size_t end = 0;
+        std::string_view value;
+    };
+    std::optional<Line> find_top_level(std::string_view text, std::string_view key);
+
+    // Inserts `line` (ending in a newline) after the last top-level key, else at the very start (with
+    // a blank line before what follows).
+    std::string insert_top_level(std::string_view text, std::string_view line);
+
+    // Removes the line and the blank line insert_top_level added; unchanged when absent.
+    std::string remove_top_level(std::string_view text, std::string_view key);
+
     // ---- Codex specifics ----
 
     // [mcp_servers.<name>] as an Entry (command, args; anything else sets `extra`).

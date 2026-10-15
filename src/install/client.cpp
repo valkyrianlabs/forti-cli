@@ -2,6 +2,7 @@
 #include "process.hpp"
 
 #include <forti/engine/error.hpp>
+#include <forti/engine/profile.hpp>
 
 #include <algorithm>
 #include <format>
@@ -16,6 +17,7 @@ namespace forti::install {
             case Scope::user: return "user";
             case Scope::project: return "project";
             case Scope::local: return "local";
+            case Scope::workspace: return "workspace";
         }
         return "user";
     }
@@ -24,6 +26,7 @@ namespace forti::install {
         if (text == "user" || text == "global") return Scope::user;
         if (text == "project") return Scope::project;
         if (text == "local") return Scope::local;
+        if (text == "workspace") return Scope::workspace;
         return std::nullopt;
     }
 
@@ -37,7 +40,15 @@ namespace forti::install {
         context.project_dir = canonical_or_absolute(project_dir ? *project_dir : fs::current_path());
         if (auto dir = env("CLAUDE_CONFIG_DIR")) context.claude_config_dir = fs::path(*dir);
         if (auto dir = env("CODEX_HOME")) context.codex_home = fs::path(*dir);
+        context.forti_home = canonical_or_absolute(engine::Paths::from_env().home);
         return context;
+    }
+
+    Context Context::for_scope(Scope scope) const {
+        if (scope != Scope::workspace) return *this;
+        Context workspace = *this;
+        workspace.project_dir = forti_home;
+        return workspace;
     }
 
     // ---- ClientAdapter defaults ----
@@ -73,7 +84,7 @@ namespace forti::install {
         auto path = skill_file(scope, context);
         std::string text(content);
         std::optional<fs::path> root;
-        if (scope != Scope::user) root = context.project_dir;   // .claude/skills, .agents/skills in the project
+        if (scope != Scope::user) root = context.for_scope(scope).project_dir;   // .claude/skills, .agents/skills in the project
         return {{"write", std::format("write {}", path.string()), [path, text, root] {
                      if (root) require_inside(path, *root);
                      write_file_atomic(path, text, 0644);
@@ -86,7 +97,7 @@ namespace forti::install {
         if (!content || !is_forti_skill(*content)) return {};
         // Remove SKILL.md, then directories left empty: up to the project for project files, up to the
         // client's own directory (~/.claude, ~/.agents) for user files, which is never removed itself.
-        auto stop = scope == Scope::user ? path.parent_path().parent_path().parent_path() : context.project_dir;
+        auto stop = scope == Scope::user ? path.parent_path().parent_path().parent_path() : context.for_scope(scope).project_dir;
         bool confined = scope != Scope::user;
         return {{"remove", std::format("remove {}", path.string()), [path, stop, confined] {
                      if (confined) require_inside(path, stop);

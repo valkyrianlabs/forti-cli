@@ -325,6 +325,45 @@ namespace forti::install::toml {
         return before + std::string(after);
     }
 
+    std::optional<Line> find_top_level(std::string_view text, std::string_view key) {
+        for (const auto& kv: scan(text).values) {
+            if (!kv.table.empty() || kv.key.front() != key) continue;
+            if (kv.key.size() != 1)
+                throw Failure(Code::config, std::format("{} is defined with dotted keys; change it by hand", key));
+            auto value_end = static_cast<std::size_t>(kv.value.data() + kv.value.size() - text.data());
+            auto newline = text.find('\n', value_end);
+            return Line{kv.begin, newline == std::string_view::npos ? text.size() : newline + 1, kv.value};
+        }
+        return std::nullopt;
+    }
+
+    std::string insert_top_level(std::string_view text, std::string_view line) {
+        std::optional<std::size_t> after;
+        for (const auto& kv: scan(text).values) {
+            if (!kv.table.empty()) continue;
+            auto value_end = static_cast<std::size_t>(kv.value.data() + kv.value.size() - text.data());
+            auto newline = text.find('\n', value_end);
+            after = newline == std::string_view::npos ? text.size() : newline + 1;
+        }
+        if (after) {
+            std::string out(text.substr(0, *after));
+            if (!out.empty() && out.back() != '\n') out += '\n';
+            return out + std::string(line) + std::string(text.substr(*after));
+        }
+        std::string out(line);
+        if (!text.empty()) out += text.starts_with('\n') ? "" : "\n";
+        return out + std::string(text);
+    }
+
+    std::string remove_top_level(std::string_view text, std::string_view key) {
+        auto line = find_top_level(text, key);
+        if (!line) return std::string(text);
+        std::string_view after = text.substr(line->end);
+        // insert_top_level put a blank line after a key it placed at the start: take it back out.
+        if (line->begin == 0 && after.starts_with('\n')) after.remove_prefix(1);
+        return std::string(text.substr(0, line->begin)) + std::string(after);
+    }
+
     std::optional<Entry> read_server(std::string_view text, std::string_view name) {
         Path path = server_path(name);
         if (!find_table(text, path)) return std::nullopt;

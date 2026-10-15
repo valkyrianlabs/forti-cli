@@ -43,6 +43,7 @@ if gtest_dep.found()
                                'install/test_files.cpp',
                                'install/test_adapters.cpp',
                                'install/test_install_security.cpp',
+                               'install/test_workspace.cpp',
                                dependencies : [forti_install_dep, gtest_dep],
                                implicit_include_directories : false),
          suite : 'unit', env : test_env, timeout : 120)

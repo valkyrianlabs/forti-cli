@@ -9,6 +9,11 @@ Four tools, all over the FortiOS REST API. There is no SSH and no CLI command ex
 try to run `execute`, `diagnose` or `config` commands, and do not ask for them. Runtime state
 (sessions, routes, HA, VPN status) comes from `monitor/...` resources.
 
+Usually you run in the **forti workspace**, the forti home (`~/.forti`, set up by
+`forti install mcp --scope workspace`, started with `cd ~/.forti && claude` or `codex`). The same
+directory holds forti's `config.json`, `credentials/`, `certs/` and `state/`: never read, print or
+edit them. Everything you need comes through the tools.
+
 ## 1. Discover before you read or write
 
 - `forti_discover {"what":"devices"}`: configured profiles (no secrets). Pass `"profile"` to other calls when there are several.

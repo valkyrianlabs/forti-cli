@@ -1,5 +1,5 @@
 # AI client adapters for `forti install mcp` and `forti mcp status|repair|uninstall`. CLI-only code:
-# it uses the engine's Failure type and nothing else from the engine.
+# it uses the engine's Failure type and Paths (the forti home, the workspace scope's directory).
 
 python = import('python').find_installation()
 skill_header = custom_target('forti-skill-header',
@@ -16,6 +16,7 @@ install_sources = files(
     'mcp_json.cpp',
     'process.cpp',
     'toml_table.cpp',
+    'workspace.cpp',
 )
 
 install_lib = static_library('forti-install', install_sources, skill_header,

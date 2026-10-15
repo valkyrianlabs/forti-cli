@@ -26,9 +26,13 @@ namespace forti::install {
             [[nodiscard]] std::string_view id() const override { return "claude"; }
             [[nodiscard]] std::string_view display_name() const override { return "Claude Code"; }
             [[nodiscard]] std::string_view executable() const override { return "claude"; }
-            [[nodiscard]] std::vector<Scope> scopes() const override { return {Scope::local, Scope::user, Scope::project}; }
+            [[nodiscard]] std::vector<Scope> scopes() const override {
+                return {Scope::workspace, Scope::local, Scope::user, Scope::project};
+            }
 
+            // workspace is project scope in the forti home: every method maps it onto project.
             [[nodiscard]] Registration status(Scope scope, const Context& context) const override {
+                if (scope == Scope::workspace) return status(Scope::project, context.for_scope(scope));
                 Registration registration;
                 try {
                     if (scope == Scope::project) {
@@ -66,6 +70,7 @@ namespace forti::install {
 
             [[nodiscard]] std::vector<Action> install(Scope scope, const Entry& desired, const Registration& current,
                                                       const Context& context) const override {
+                if (scope == Scope::workspace) return install(Scope::project, desired, current, context.for_scope(scope));
                 if (scope == Scope::project) return write_project(desired, current.registered, context);
                 auto exe = require_cli();
                 std::vector<Action> actions;
@@ -96,6 +101,7 @@ namespace forti::install {
             [[nodiscard]] std::vector<Action> uninstall(Scope scope, const Registration& current,
                                                         const Context& context) const override {
                 if (!current.registered) return {};
+                if (scope == Scope::workspace) return uninstall(Scope::project, current, context.for_scope(scope));
                 if (scope == Scope::project) {
                     auto path = mcp_json_path(context);
                     auto root = context.project_dir;
@@ -112,7 +118,7 @@ namespace forti::install {
             }
 
             [[nodiscard]] std::vector<std::string> warnings(Scope scope, const Context&) const override {
-                if (scope == Scope::project)
+                if (in_directory(scope))
                     return {"Claude Code asks each person to approve project servers (.mcp.json) the first time they open the project"};
                 return {};
             }
@@ -121,7 +127,7 @@ namespace forti::install {
                 if (scope == Scope::user)
                     return (context.claude_config_dir ? *context.claude_config_dir : context.home / ".claude") / "skills" / "forti" / "SKILL.md";
                 // local has no skill location of its own: the project's skills directory is the closest.
-                return context.project_dir / ".claude" / "skills" / "forti" / "SKILL.md";
+                return context.for_scope(scope).project_dir / ".claude" / "skills" / "forti" / "SKILL.md";
             }
 
         private:

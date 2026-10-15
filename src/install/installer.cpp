@@ -73,7 +73,12 @@ namespace forti::install {
 
     bool TargetPlan::blocked() const {
         return state == "conflict" || state == "error" || state == "failed" || skill_state == "conflict" ||
-               skill_state == "error";
+               skill_state == "error" || std::ranges::any_of(workspace, [](const auto& item) { return item.state == "error"; });
+    }
+
+    bool TargetPlan::has_actions() const {
+        return !actions.empty() || !skill_actions.empty() ||
+               std::ranges::any_of(workspace, [](const auto& item) { return !item.actions.empty(); });
     }
 
     namespace {
@@ -143,6 +148,7 @@ namespace forti::install {
 
     std::vector<TargetPlan> plan_install(const InstallRequest& request, const Context& context) {
         std::vector<TargetPlan> plans;
+        bool shared_done = false;
         for (const auto& target: request.targets) {
             auto plan = start(target, context);
             plan.desired = request.desired;
@@ -165,6 +171,14 @@ namespace forti::install {
                 }
             }
             if (request.skill && plan.state != "unsupported") plan_skill_install(plan, request.force, context);
+            if (target.scope == Scope::workspace && !plan.blocked() && plan.state != "unsupported") {
+                // The first workspace target creates the home (before .mcp.json lands in it) and AGENTS.md.
+                bool first = !shared_done;
+                shared_done = true;
+                if (first)
+                    if (auto action = workspace::create_home(context)) plan.actions.insert(plan.actions.begin(), std::move(*action));
+                plan.workspace = workspace::plan_install(*target.client, first, request.trust_codex_workspace, context);
+            }
             plans.push_back(std::move(plan));
         }
         return plans;
@@ -173,6 +187,7 @@ namespace forti::install {
     std::vector<TargetPlan> plan_uninstall(const std::vector<Target>& targets, bool keep_skill, bool force,
                                            const Context& context) {
         std::vector<TargetPlan> plans;
+        bool shared_done = false;
         for (const auto& target: targets) {
             auto plan = start(target, context);
             if (plan.state.empty()) {
@@ -200,6 +215,17 @@ namespace forti::install {
                     plan.skill_state = "error";
                     plan.skill_message = failure.what();
                 }
+            }
+            if (target.scope == Scope::workspace && (plan.state == "remove" || plan.state == "not_registered")) {
+                // AGENTS.md serves every client: it goes with the last workspace registration.
+                bool shared = !shared_done && std::ranges::none_of(adapters(), [&](const auto& adapter) {
+                    bool leaving = std::ranges::any_of(targets, [&](const Target& t) {
+                        return t.client == adapter.get() && t.scope == Scope::workspace;
+                    });
+                    return !leaving && adapter->status(Scope::workspace, context).registered;
+                });
+                shared_done = true;
+                plan.workspace = workspace::plan_uninstall(*target.client, shared, context);
             }
             plans.push_back(std::move(plan));
         }
@@ -305,6 +331,18 @@ namespace forti::install {
                 plan.skill_state = "error";
                 plan.skill_message = failure.what();
             }
+            static const std::map<std::string, std::string, std::less<>> done = {
+                    {"create", "created"}, {"update", "updated"}, {"remove", "removed"}, {"trust", "trusted"}};
+            for (auto& item: plan.workspace) {
+                if (item.actions.empty()) continue;
+                try {
+                    for (auto& action: item.actions) action.run();
+                    if (auto it = done.find(item.state); it != done.end()) item.state = it->second;
+                } catch (const Failure& failure) {
+                    item.state = "error";
+                    item.message = failure.what();
+                }
+            }
         }
     }
 
@@ -317,7 +355,18 @@ namespace forti::install {
         json actions = json::array();
         for (const auto& action: plan.actions) actions.push_back(action.summary);
         for (const auto& action: plan.skill_actions) actions.push_back(action.summary);
+        for (const auto& item: plan.workspace)
+            for (const auto& action: item.actions) actions.push_back(action.summary);
         out["actions"] = std::move(actions);
+        if (!plan.workspace.empty()) {
+            json items = json::array();
+            for (const auto& item: plan.workspace) {
+                json row = {{"name", item.name}, {"path", item.path.string()}, {"state", item.state}};
+                if (!item.message.empty()) row["message"] = item.message;
+                items.push_back(std::move(row));
+            }
+            out["workspace"] = std::move(items);
+        }
         if (!plan.warnings.empty()) out["warnings"] = plan.warnings;
         if (!plan.current.notes.empty()) out["notes"] = plan.current.notes;
         if (!plan.skill_state.empty()) {
@@ -382,6 +431,7 @@ namespace forti::install {
             clients.push_back(std::move(client));
         }
         report["clients"] = std::move(clients);
+        report["workspace"] = workspace::status(context);
         return report;
     }
 

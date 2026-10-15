@@ -88,7 +88,7 @@ namespace forti::cli {
             auto value = args.value("scope");
             if (!value) return std::nullopt;
             auto scope = inst::parse_scope(*value);
-            if (!scope) throw Failure(Code::usage, "--scope expects user, project or local");
+            if (!scope) throw Failure(Code::usage, "--scope expects workspace, user, project or local");
             return scope;
         }
 
@@ -102,21 +102,25 @@ namespace forti::cli {
             return inst::Context::from_environment(project);
         }
 
-        std::string scope_label(inst::Scope scope) {
-            switch (scope) {
-                case inst::Scope::user: return "user: every project, for you";
-                case inst::Scope::project: return "project: files in the project you can commit and share";
-                case inst::Scope::local: return "local: you only, this project (Claude Code only)";
-            }
-            return "";
-        }
-
         // ---- Output ----
 
         std::string tilde(const std::string& text, const inst::Context& context) {
             auto home = context.home.string();
             if (!home.empty() && text.starts_with(home + "/")) return "~" + text.substr(home.size());
             return text;
+        }
+
+        std::string scope_label(inst::Scope scope, const inst::Context& context) {
+            switch (scope) {
+                case inst::Scope::workspace:
+                    return std::format("{} workspace (recommended): agents started there get the firewall tools, nowhere else",
+                                       tilde(context.forti_home.string(), context));
+                case inst::Scope::project: return std::format("this project ({})", tilde(context.project_dir.string(), context));
+                case inst::Scope::user: return "user-wide (every project)";
+                case inst::Scope::local: return std::format("this project, only you ({}; Claude Code only)",
+                                                            tilde(context.project_dir.string(), context));
+            }
+            return "";
         }
 
         void render_plans_raw(std::ostream& out, const std::vector<inst::TargetPlan>& plans, const inst::Context& context,
@@ -146,6 +150,15 @@ namespace forti::cli {
                 if (!plan.skill_state.empty() && (plan.skill_actions.empty() || !show_actions))
                     out << std::format("    skill {}: {}\n", plan.skill_state,
                                        tilde(plan.skill_message.empty() ? plan.skill_path.string() : plan.skill_message, context));
+                for (const auto& item: plan.workspace) {
+                    if (show_actions && !item.actions.empty()) {
+                        for (const auto& action: item.actions) out << std::format("    {}\n", tilde(action.summary, context));
+                        continue;
+                    }
+                    out << std::format("    workspace {}: {}", item.state, item.name);
+                    if (!item.message.empty()) out << " — " << tilde(item.message, context);
+                    out << "\n";
+                }
                 for (const auto& warning: plan.warnings) out << "    note: " << tilde(warning, context) << "\n";
             }
         }
@@ -181,6 +194,7 @@ namespace forti::cli {
                     if (dry_run) stream << "\n(dry run: nothing was changed)\n";
                     if (executed && data.contains("forti_mcp") && data["forti_mcp"].contains("check"))
                         stream << "\n" << data["forti_mcp"]["check"].get<std::string>() << "\n";
+                    if (executed && data.contains("start")) stream << "Start an agent with the forti tools: " << data["start"].get<std::string>() << "\n";
                 });
             };
 
@@ -218,6 +232,9 @@ namespace forti::cli {
             auto install = install_context(args);
             auto mode = interaction(context, args);
             auto scope = scope_option(args);
+            if (scope == inst::Scope::workspace && args.value("project-dir"))
+                throw Failure(Code::usage, "--project-dir does not apply to --scope workspace (the workspace is the forti home, "
+                                           "~/.forti or $FORTI_HOME)");
             auto clients = clients_option(args, install, true);
             if (!mode.interactive && (!clients || !scope))
                 throw Failure(Code::usage, "non-interactive install needs --client and --scope "
@@ -244,28 +261,61 @@ namespace forti::cli {
                     if (found.size() == 1) tty.say(std::format("Client: {}\n", found[0]->display_name()));
                 }
                 if (!scope) {
+                    // Workspace first and the default; local only when a chosen client has it (Claude Code).
                     std::vector<inst::Scope> offered;
-                    for (auto s: {inst::Scope::user, inst::Scope::project, inst::Scope::local})
+                    for (auto s: {inst::Scope::workspace, inst::Scope::project, inst::Scope::user, inst::Scope::local})
                         if (std::ranges::any_of(*clients, [&](const auto* client) { return client->supports(s); })) offered.push_back(s);
                     std::vector<std::string> options;
-                    for (auto s: offered) options.push_back(scope_label(s));
-                    tty.say(std::format("Project directory: {}\n", install.project_dir.string()));
-                    scope = offered[tty.choose("Scope:", options, 0)];
+                    for (auto s: offered) options.push_back(scope_label(s, install));
+                    scope = offered[tty.choose("Where should agents get the forti tools?", options, 0)];
                 }
             }
             if (clients->size() == 1 && !clients->front()->supports(*scope))
                 throw Failure(Code::usage, std::format("{} has no {} scope", clients->front()->display_name(), inst::to_string(*scope)));
 
-            bool skill = args.flag("skill");
-            if (mode.interactive && !args.flag("skill") && !args.flag("no-skill"))
+            // $HOME as the project: every agent started under it would get the tools.
+            if (!inst::workspace::allow_home_directory(
+                        *scope, install, mode.interactive, args.flag("force"),
+                        [&](std::string_view text) { mode.tty->say(text); },
+                        [&](std::string_view question, bool fallback) { return mode.tty->confirm(question, fallback); })) {
+                mode.tty->say("Nothing changed. Run `forti install mcp --scope workspace` for the recommended setup.\n");
+                return 0;
+            }
+
+            bool workspace = *scope == inst::Scope::workspace;
+            // The skill belongs to the workspace scaffold; elsewhere it is asked for (default no).
+            bool skill = args.flag("skill") || (workspace && !args.flag("no-skill"));
+            if (mode.interactive && !workspace && !args.flag("skill") && !args.flag("no-skill"))
                 skill = mode.tty->confirm("Also install the forti agent skill (how to use the tools safely)?", false);
+
+            // Codex reads the workspace's .codex/config.toml only for a trusted project. Trusting the forti
+            // home is a change to the global Codex config, so it needs a yes (or --trust-codex-workspace).
+            bool trust = args.flag("trust-codex-workspace");
+            bool codex = std::ranges::any_of(*clients, [](const auto* client) { return client->id() == "codex"; });
+            if (workspace && codex && !trust && mode.interactive && inst::workspace::codex_trust_needed(install)) {
+                auto home = tilde(install.forti_home.string(), install);
+                mode.tty->say(std::format("\nCodex loads {}/.codex/config.toml (the forti server and its deny rules) only for trusted "
+                                          "projects.\nTrusting {} adds exactly this to {}:\n    [projects.\"{}\"]\n    trust_level = \"trusted\"\n",
+                                          home, home,
+                                          tilde(((install.codex_home ? *install.codex_home : install.home / ".codex") / "config.toml").string(), install),
+                                          install.forti_home.string()));
+                trust = mode.tty->confirm(std::format("Trust {} in Codex?", home), false);
+            }
 
             inst::InstallRequest request{.targets = inst::all_targets(*clients, scope),
                                          .desired = inst::desired_entry(*forti_mcp, profile),
                                          .skill = skill,
-                                         .force = args.flag("force")};
+                                         .force = args.flag("force"),
+                                         .trust_codex_workspace = trust};
             auto plans = inst::plan_install(request, install);
             json data = {{"forti_mcp", {{"path", forti_mcp->string()}}}, {"project_dir", install.project_dir.string()}};
+            if (workspace) {
+                data["workspace"] = install.forti_home.string();
+                std::string agents;
+                for (const auto* client: *clients) agents += (agents.empty() ? "" : " (or ") + std::string(client->executable());
+                if (clients->size() > 1) agents += ")";
+                data["start"] = std::format("cd {} && {}", tilde(install.forti_home.string(), install), agents);
+            }
             return run_plans(context, plans, install, mode, args.flag("dry-run"), std::move(data), forti_mcp);
         }
 
@@ -297,8 +347,27 @@ namespace forti::cli {
                     std::string skill = row["skill"]["installed"].get<bool>()
                                                 ? (row["skill"].value("current", false) ? "skill: yes" : "skill: outdated")
                                                 : "skill: no";
-                    out << std::format("  {:<8} {}   {}\n", row["scope"].get<std::string>(), state, skill);
-                    for (const auto& note: row.value("notes", json::array())) out << "           note: " << note.get<std::string>() << "\n";
+                    out << std::format("  {:<9} {}   {}\n", row["scope"].get<std::string>(), state, skill);
+                    for (const auto& note: row.value("notes", json::array())) out << "            note: " << note.get<std::string>() << "\n";
+                }
+            }
+            if (data.contains("workspace")) {
+                const auto& ws = data["workspace"];
+                out << std::format("\nworkspace  {}{}\n", ws["path"].get<std::string>(), ws["exists"].get<bool>() ? "" : " (does not exist yet)");
+                // Files of a client that is not registered in the workspace are not expected to be there.
+                auto registered = [&](const std::string& id) {
+                    for (const auto& client: data["clients"])
+                        if (id == "all" || client["id"] == id)
+                            for (const auto& row: client["scopes"])
+                                if (row["scope"] == "workspace" && row["registered"].get<bool>()) return true;
+                    return false;
+                };
+                for (const auto& file: ws["files"]) {
+                    auto name = file["name"].get<std::string>();
+                    auto state = file["state"].get<std::string>();
+                    if (name == "Codex trust" && ws.value("codex_trust_added_by_forti", false)) state += " (added by forti install mcp)";
+                    if (!registered(file["client"].get<std::string>())) state = std::format("{} (not registered in the workspace)", state);
+                    out << std::format("  {:<26} {}\n", name, state);
                 }
             }
         }
@@ -340,7 +409,7 @@ namespace forti::cli {
                 if (!clients || !scope) {
                     // Interactive and open-ended: show only what is actually there.
                     std::erase_if(plans, [](const auto& plan) {
-                        return plan.state == "unsupported" || (plan.state == "not_registered" && plan.skill_actions.empty());
+                        return plan.state == "unsupported" || (plan.state == "not_registered" && !plan.has_actions());
                     });
                 }
                 json data = {{"project_dir", install.project_dir.string()}};
@@ -360,28 +429,37 @@ namespace forti::cli {
              "what is missing, shows every command and file it will change, and asks before changing them.\n"
              "\n"
              "  --client claude|codex|all   which client (all = every client found on PATH)\n"
-             "  --scope user|project|local  user: all your projects; project: files in --project-dir to commit\n"
-             "                              (.mcp.json, .codex/config.toml); local: you, this project (Claude only)\n"
+             "  --scope SCOPE               workspace (recommended): the forti home (~/.forti), so only agents\n"
+             "                                started there (cd ~/.forti && claude) get the tools; with AGENTS.md,\n"
+             "                                the skill and deny rules that keep credentials out of the agent\n"
+             "                              project: files in --project-dir to commit (.mcp.json, .codex/config.toml)\n"
+             "                              user: every project; local: you, this project (Claude Code only)\n"
              "  --project-dir DIR           project for project/local scope (default: current directory)\n"
              "  --profile NAME              start forti-mcp with this profile (no secrets are ever written)\n"
-             "  --skill / --no-skill        also install the forti agent skill (default: no; asked interactively)\n"
+             "  --skill / --no-skill        also install the forti agent skill (workspace: yes; else no, asked interactively)\n"
+             "  --trust-codex-workspace     workspace + Codex: mark the forti home trusted in the global Codex config\n"
+             "                              (Codex ignores project config otherwise; asked interactively)\n"
              "  --yes                       never prompt (needs --client and --scope)\n"
              "  --dry-run                   show what would change, change nothing\n"
-             "  --force                     replace an existing `forti` entry that points elsewhere\n"
+             "  --force                     replace an existing `forti` entry that points elsewhere; allow project or\n"
+             "                              local scope in your home directory without a terminal\n"
              "\n"
              "examples:\n"
              "  forti install mcp\n"
+             "  forti install mcp --client all --scope workspace --trust-codex-workspace --yes\n"
              "  forti install mcp --client claude --scope user --skill --yes\n"
              "  forti install mcp --client all --scope project --project-dir ~/src/netops --dry-run\n",
-             {{"client", "scope", "project-dir"}, {"skill", "no-skill", "yes", "dry-run", "force"}, {{'y', "yes"}}},
+             {{"client", "scope", "project-dir"}, {"skill", "no-skill", "trust-codex-workspace", "yes", "dry-run", "force"}, {{'y', "yes"}}},
              run_install},
             {"mcp", "Status, repair and removal of forti-mcp client registrations",
-             "usage: forti mcp status              where forti-mcp is registered, and whether it still matches\n"
+             "usage: forti mcp status              where forti-mcp is registered, whether it still matches, workspace health\n"
              "       forti mcp repair              point broken registrations at the installed forti-mcp\n"
-             "       forti mcp uninstall           remove forti's registrations (and skill)\n"
+             "       forti mcp uninstall           remove forti's registrations (and skill; for the workspace, the files\n"
+             "                                     forti wrote there, never config.json, credentials, certs or state)\n"
              "\n"
              "  --client claude|codex|all   repair/uninstall: limit to a client (status shows every client)\n"
-             "  --scope user|project|local  repair/uninstall: limit to a scope (uninstall without a terminal needs both)\n"
+             "  --scope SCOPE               workspace|user|project|local: limit to a scope (uninstall without a\n"
+             "                              terminal needs --client and --scope)\n"
              "  --project-dir DIR           project for project/local scope (default: current directory)\n"
              "  --keep-skill                uninstall: leave the agent skill in place\n"
              "  --yes  --dry-run  --force   as for install; --force also removes a `forti` entry that is not forti-mcp\n",

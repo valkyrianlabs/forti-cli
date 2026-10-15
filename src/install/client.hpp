@@ -23,9 +23,13 @@ namespace forti::install {
     // The name every client registers forti-mcp under.
     inline constexpr std::string_view server_name = "forti";
 
-    enum class Scope { user, project, local };
+    // workspace is project scope in the forti home (~/.forti, $FORTI_HOME): the recommended place for
+    // the firewall tools, so an agent started anywhere else does not get them (workspace.hpp).
+    enum class Scope { user, project, local, workspace };
     std::string_view to_string(Scope scope);
     std::optional<Scope> parse_scope(std::string_view text);
+    // project and workspace: files in a directory (.mcp.json, .codex/config.toml, skills).
+    inline bool in_directory(Scope scope) { return scope == Scope::project || scope == Scope::workspace; }
 
     // A stdio MCP server entry, as far as forti cares: the command and its arguments. `extra` notes
     // keys beyond those (env, cwd, timeouts...), which forti never writes.
@@ -58,12 +62,16 @@ namespace forti::install {
     struct Context {
         fs::path home;
         fs::path project_dir;                        // absolute and canonical
+        fs::path forti_home;                         // the forti home, the workspace scope's directory
         std::optional<fs::path> claude_config_dir;   // $CLAUDE_CONFIG_DIR
         std::optional<fs::path> codex_home;          // $CODEX_HOME
         std::chrono::milliseconds timeout{30'000};   // per client CLI call
 
-        // From $HOME, $CLAUDE_CONFIG_DIR, $CODEX_HOME; the project directory defaults to the cwd.
+        // From $HOME, $CLAUDE_CONFIG_DIR, $CODEX_HOME, $FORTI_HOME; the project directory defaults to the cwd.
         static Context from_environment(const std::optional<fs::path>& project_dir = std::nullopt);
+
+        // The context a scope's files live in: for workspace, the project directory is the forti home.
+        [[nodiscard]] Context for_scope(Scope scope) const;
     };
 
     struct Action {
