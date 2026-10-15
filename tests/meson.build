@@ -1,6 +1,14 @@
 # Network-free tests (CI runs them; nothing here talks to a FortiGate). The engine is exercised
 # through a scripted fortiapi::Transport (support/fake_transport.hpp).
 gtest_dep = dependency('gtest', main : true, required : get_option('tests'))
+
+# Sanitizer builds leave the engine shards uninstrumented (engine/meson.build). libc++ annotates
+# std::vector for ASan, so a vector filled by an uninstrumented shard and read by instrumented code
+# is reported as a "container-overflow" that is not one. Every other ASan check stays on.
+test_env = environment()
+if get_option('b_sanitize').contains('address')
+    test_env.set('ASAN_OPTIONS', 'detect_container_overflow=0')
+endif
 if gtest_dep.found()
     test('unit', executable('unitTests',
                             'unit/test_catalog.cpp',
@@ -13,7 +21,7 @@ if gtest_dep.found()
                             include_directories : include_directories('support', '../engine/src'),
                             dependencies : [forti_engine_dep, gtest_dep],
                             implicit_include_directories : false),
-         suite : 'unit')
+         suite : 'unit', env : test_env)
 
     # The CLI in-process (cli::run): arguments, configure, profiles, doctor, rendering, exit codes.
     # test_keychain.cpp runs only with FORTI_TEST_KEYCHAIN=1 (it writes to the login keychain).
@@ -25,7 +33,7 @@ if gtest_dep.found()
                            include_directories : include_directories('support'),
                            dependencies : [forti_cli_dep, gtest_dep],
                            implicit_include_directories : false),
-         suite : 'unit')
+         suite : 'unit', env : test_env)
 
     # src/install: .mcp.json and config.toml edits, and the client adapters against fake
     # `claude`/`codex` scripts (no real client, no real home directory).
@@ -35,7 +43,7 @@ if gtest_dep.found()
                                'install/test_install_security.cpp',
                                dependencies : [forti_install_dep, gtest_dep],
                                implicit_include_directories : false),
-         suite : 'unit', timeout : 120)
+         suite : 'unit', env : test_env, timeout : 120)
 endif
 
 # Real binaries end to end: `forti` through libcurl and verified TLS against a stateful mock FortiOS
