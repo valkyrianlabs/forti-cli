@@ -69,10 +69,11 @@ TEST(Secrets, FileStoreIsPrivateAndRefusesLooseModes) {
     TempDir dir;
     Paths paths{dir.path / "config", dir.path / "state", dir.path / "cache"};
     auto store = file_secret_store(paths);
-    store->put("home/api-key", "s3cret");
+    store->put("home/api-key", "s3cret", "fw.home:443");
     EXPECT_EQ(mode(paths.config / "credentials"), 0700u);
     EXPECT_EQ(mode(paths.config / "credentials" / "home.api-key"), 0600u);
-    EXPECT_EQ(store->get("home/api-key"), "s3cret");
+    EXPECT_EQ(store->get("home/api-key")->secret, "s3cret");
+    EXPECT_EQ(store->get("home/api-key")->binding, "fw.home:443");
     ::chmod((paths.config / "credentials" / "home.api-key").c_str(), 0644);
     EXPECT_THROW((void) store->get("home/api-key"), Failure);
     EXPECT_TRUE(store->erase("home/api-key"));
@@ -82,15 +83,15 @@ TEST(Secrets, ResolutionNamesTheSourceNeverTheValue) {
     auto store = memory_secret_store();
     SecretRef ref{SecretRef::Source::env, "FORTI_TEST_UNSET_VARIABLE", {}};
     try {
-        (void) resolve_secret(ref, "home/api-key", *store);
+        (void) resolve_secret(ref, "home/api-key", *store, "h:443");
         FAIL();
     } catch (const Failure& failure) {
         EXPECT_EQ(failure.code(), Code::config);
         EXPECT_NE(std::string(failure.what()).find("FORTI_TEST_UNSET_VARIABLE"), std::string::npos);
     }
     ::setenv("FORTI_TEST_SECRET", "from-env", 1);
-    EXPECT_EQ(resolve_secret({SecretRef::Source::env, "FORTI_TEST_SECRET", {}}, "a", *store), "from-env");
-    EXPECT_EQ(resolve_secret({SecretRef::Source::command, {}, {"printf", "from-command\\nignored"}}, "a", *store),
+    EXPECT_EQ(resolve_secret({SecretRef::Source::env, "FORTI_TEST_SECRET", {}}, "a", *store, "h:443"), "from-env");
+    EXPECT_EQ(resolve_secret({SecretRef::Source::command, {}, {"printf", "from-command\\nignored"}}, "a", *store, "h:443"),
               "from-command");
 }
 

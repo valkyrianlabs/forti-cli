@@ -111,6 +111,23 @@ namespace forti::engine {
                 if (!it->is_object()) throw Failure(Code::usage, where + ": \"body\" must be an object");
                 request.body = *it;
             }
+            // Reads redact secrets; an agent that copies a read object into a plan would otherwise set a
+            // password or PSK to the literal placeholder.
+            for (const json* values: {&request.set, &request.object, &request.body}) {
+                std::vector<const json*> stack{values};
+                while (!stack.empty()) {
+                    const json* node = stack.back();
+                    stack.pop_back();
+                    if (node->is_string() && node->get_ref<const std::string&>() == detail::redacted)
+                        throw Failure(Code::validation,
+                                      std::format("{}: \"{}\" is the placeholder reads show for a secret, not a value; "
+                                                  "leave the attribute out to keep the current secret", where,
+                                                  detail::redacted),
+                                      {{"reason", "redacted_placeholder"}});
+                    if (node->is_structured())
+                        for (const auto& child: *node) stack.push_back(&child);
+                }
+            }
             return request;
         }
 
@@ -468,6 +485,31 @@ namespace forti::engine {
 
     namespace {
 
+        constexpr std::string_view audit_failure_note =
+                "the audit record of this apply could not be appended to audit.jsonl (disk full, permissions?)";
+
+        // Backups hold the device's reversible secrets: keep only the most recent ones (by mtime), always
+        // including the one just written. Best effort: a backup that cannot be pruned is left in place.
+        constexpr std::size_t kept_backups = 20;
+
+        void prune_backups(const std::filesystem::path& dir, const std::filesystem::path& keep) {
+            namespace fs = std::filesystem;
+            std::vector<std::pair<fs::file_time_type, fs::path>> backups;
+            std::error_code error;
+            for (const auto& entry: fs::directory_iterator(dir, error)) {
+                std::error_code ignored;
+                if (entry.path().extension() != ".conf" || !entry.is_regular_file(ignored) || entry.is_symlink(ignored)) continue;
+                if (entry.path() == keep) continue;
+                backups.emplace_back(entry.last_write_time(ignored), entry.path());
+            }
+            if (backups.size() < kept_backups) return;
+            std::ranges::sort(backups, std::greater<>{}, &std::pair<fs::file_time_type, fs::path>::first);
+            for (std::size_t i = kept_backups - 1; i < backups.size(); ++i) {
+                std::error_code ignored;
+                fs::remove(backups[i].second, ignored);
+            }
+        }
+
         // The device's full configuration, taken before a critical-risk plan runs. Streamed through the
         // SDK's bounded download straight into <state>/backups/<plan id>.conf (0600, directory 0700): never
         // buffered whole, logged, or echoed. A recovery *aid*: restoring it needs a working management
@@ -524,6 +566,7 @@ namespace forti::engine {
                     ::unlink(partial.c_str());
                     throw Failure(Code::config, std::format("cannot store {}", file.string()));
                 }
+                prune_backups(dir, file);
                 return {{"status", "saved"}, {"path", file.string()}, {"bytes", download.bytes},
                         {"sha256", detail::hex(hash.finish())}};
             } catch (const Failure&) {
@@ -740,6 +783,13 @@ namespace forti::engine {
                                           profile.host, identity.serial.empty() ? "(none)" : identity.serial,
                                           device.value("serial", "")),
                               {{"plan_id", id}, {"reason", "device_serial"}});
+
+            // The audit record is written after execution; make sure it can be before anything changes.
+            if (!detail::audit_writable(paths))
+                throw Failure(Code::config,
+                              std::format("cannot open the audit log {} for appending; apply refused before any change",
+                                          (paths.state / "audit.jsonl").string()),
+                              {{"plan_id", id}, {"reason", "audit_unwritable"}});
 
             json backup = nullptr;
             if (risk == Risk::critical) backup = pre_change_backup(client, paths, profile, id);
@@ -958,15 +1008,20 @@ namespace forti::engine {
                                           "applied", id),
                               std::move(record));
             event["outcome"] = "ok";
-            detail::audit(paths, event);
             record["status"] = "applied";
+            // The changes are made; a failed audit write does not undo them, but it is never silent.
+            if (!detail::audit(paths, event)) record["audit_error"] = audit_failure_note;
             return ok(std::move(record), {{"profile", profile.name}, {"vdom", vdom}});
         } catch (...) {
             Failure failure = redacted_failure(translate(std::current_exception()));
             event["outcome"] = to_string(failure.code());
             event["error"] = {{"code", to_string(failure.code())}, {"message", failure.what()}};
             if (auto it = failure.details().find("reason"); it != failure.details().end()) event["error"]["reason"] = *it;
-            detail::audit(paths, event);
+            if (!detail::audit(paths, event) && failure.details().contains("operations")) {
+                json details = failure.details();
+                details["audit_error"] = audit_failure_note;
+                throw Failure(failure.code(), failure.what(), std::move(details));
+            }
             throw failure;
         }
     }

@@ -86,3 +86,63 @@ TEST_F(SecurityCli, ErrorMessagesFromTheDeviceAreEscaped) {
     EXPECT_NE(as_guarded({"get", "firewall/address"}), 0);
     EXPECT_FALSE(has_control(err.str())) << err.str();
 }
+
+// ---- S-03: forti get redacts; --reveal is for a person at a terminal (or an explicit --json) ----
+
+namespace {
+
+    struct RevealCli : fake::Cli {
+        int get(std::vector<std::string> arguments, bool tty) {
+            out.str("");
+            err.str("");
+            cli::Output output{.out = &out, .err = &err, .tty = tty};
+            auto options = fake::options(transport);
+            options.paths = paths;
+            arguments.insert(arguments.begin(), "get");
+            return cli::run(arguments, output, options);
+        }
+        void secret_reply() {
+            transport->reply(200, fake::envelope(json::array({{{"name", "hq"}, {"psksecret", "ENC c2VjcmV0"}}})));
+        }
+    };
+
+}  // namespace
+
+TEST_F(RevealCli, RedactedByDefaultWithANote) {
+    secret_reply();
+    ASSERT_EQ(get({"vpn.ipsec/phase1-interface"}, true), 0) << err.str();
+    EXPECT_EQ(out.str().find("c2VjcmV0"), std::string::npos);
+    EXPECT_NE(out.str().find("<redacted>"), std::string::npos);
+    EXPECT_NE(out.str().find("--reveal"), std::string::npos);
+}
+
+TEST_F(RevealCli, RevealNeedsATerminalOrJsonAndWarns) {
+    EXPECT_EQ(get({"vpn.ipsec/phase1-interface", "--reveal"}, false), 2);   // into a pipe: refused
+    EXPECT_TRUE(transport->requests.empty());
+    EXPECT_EQ(out.str().find("c2VjcmV0"), std::string::npos);
+
+    secret_reply();
+    ASSERT_EQ(get({"vpn.ipsec/phase1-interface", "--reveal"}, true), 0) << err.str();
+    EXPECT_NE(out.str().find("ENC c2VjcmV0"), std::string::npos);
+    EXPECT_NE(err.str().find("device secrets"), std::string::npos);
+
+    secret_reply();
+    ASSERT_EQ(get({"--json", "vpn.ipsec/phase1-interface", "--reveal"}, false), 0) << err.str();
+    EXPECT_EQ(json_out()["data"][0]["psksecret"], "ENC c2VjcmV0");
+    EXPECT_TRUE(json_out()["meta"]["revealed"]);
+    EXPECT_NE(err.str().find("device secrets"), std::string::npos);
+}
+
+// ---- S-19: forti configure writes the binding, and re-binds a kept key when the host changes ----
+
+TEST_F(SecurityCli, ConfigureBindsAndRebindsTheStoredKey) {
+    configure_lab();
+    EXPECT_EQ(secrets->get("lab/api-key")->binding, "fortigate.test:443");
+
+    device_replies();   // verification against the new host, with the kept key
+    ASSERT_EQ(run({"configure", "--profile", "lab", "--host", "fw2.test", "--port", "8443"}), 0) << err.str();
+    EXPECT_EQ(secrets->get("lab/api-key")->secret, "lab-key");
+    EXPECT_EQ(secrets->get("lab/api-key")->binding, "fw2.test:8443");
+    ASSERT_EQ(transport->requests.size(), 1u);
+    EXPECT_EQ(transport->requests[0].url.find("https://fw2.test:8443/"), 0u);
+}

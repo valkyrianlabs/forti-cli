@@ -92,6 +92,10 @@ namespace forti::engine::detail {
     json redact(const json& value, const std::set<std::string, std::less<>>& extra = {});
     // "2 operations on lab (fortigate.test): 1 create, 1 update; risk elevated", from digest-covered fields.
     std::string summarize(const json& plan);
+    // Read results: replaces, at any depth, string values starting "ENC " (FortiOS's reversible secret
+    // form) and non-empty values of sensitive_name() attributes with "<redacted>". Adds each redacted
+    // location to `paths` once, as a JSON pointer with "*" for array indices ("/*/psksecret").
+    void redact_read(json& value, std::set<std::string, std::less<>>& paths);
     // A plan as shown to people and agents: before/after objects (only with `full`), diffs and wire
     // bodies redacted. The stored file keeps real values, because apply needs them.
     json plan_view(const json& plan, bool full = false);
@@ -120,6 +124,8 @@ namespace forti::engine::detail {
     // Appends one line to <state>/audit.jsonl (0600), adding "time". The event must already be
     // redacted. Returns false (never throws) when the log cannot be written.
     bool audit(const Paths& paths, json event);
+    // True when <state>/audit.jsonl can be opened for appending (created 0600 if missing). Never throws.
+    bool audit_writable(const Paths& paths);
 
 }  // namespace forti::engine::detail
 

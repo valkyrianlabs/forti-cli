@@ -99,8 +99,11 @@ forti discover <resource>        a resource's attributes, operations and risk ti
 
 ```text
 forti get <resource> [key]
-  --filter EXPR   --fields a,b   --start N   --count N   --param name=value
+  --filter EXPR   --fields a,b   --start N   --count N   --param name=value   --reveal
 ```
+
+Device secrets (`ENC ...` values, passwords, keys) print as `<redacted>`; `meta.redacted` lists
+where. `--reveal` shows them to a person: it needs a terminal, or `--json`, and warns on stderr.
 
 ```sh
 forti get firewall/policy --fields policyid,name,action,status

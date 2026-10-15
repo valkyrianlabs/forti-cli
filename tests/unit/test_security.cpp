@@ -150,7 +150,7 @@ TEST(FileSecretStore, RefusesSymlinksForeignModesAndFifos) {
     fs::path credentials = paths.config / "credentials";
 
     write(credentials / "lab.api-key", "real-key\n", 0600);
-    EXPECT_EQ(store->get("lab/api-key"), "real-key");
+    EXPECT_EQ(store->get("lab/api-key")->secret, "real-key");
 
     write(dir.path / "elsewhere", "planted\n", 0600);
     fs::create_symlink(dir.path / "elsewhere", credentials / "sym.api-key");
@@ -181,7 +181,7 @@ TEST(CredentialCommand, DoesNotReadTheCallersStdinOrInheritDescriptors) {
     ::dup2(fds[0], STDIN_FILENO);
     ::close(fds[0]);
     ref.command = {"/bin/sh", "-c", "IFS= read -r line; printf 'got:%s\\n' \"$line\""};
-    std::string secret = engine::resolve_secret(ref, "lab/api-key", *store);
+    std::string secret = engine::resolve_secret(ref, "lab/api-key", *store, "fortigate.test:8443");
     ::dup2(saved_stdin, STDIN_FILENO);
     ::close(saved_stdin);
     EXPECT_EQ(secret, "got:");
@@ -190,12 +190,12 @@ TEST(CredentialCommand, DoesNotReadTheCallersStdinOrInheritDescriptors) {
     int held = ::open("/dev/null", O_RDONLY);   // deliberately without O_CLOEXEC
     ASSERT_GE(held, 3);
     ref.command = {"/bin/sh", "-c", std::format("if [ -e /dev/fd/{} ]; then echo leaked; else echo clean; fi", held)};
-    EXPECT_EQ(engine::resolve_secret(ref, "lab/api-key", *store), "clean");
+    EXPECT_EQ(engine::resolve_secret(ref, "lab/api-key", *store, "fortigate.test:8443"), "clean");
     ::close(held);
 
     // stderr stays open for helper prompts.
     ref.command = {"/bin/sh", "-c", ": >&2 && echo open || echo closed"};
-    EXPECT_EQ(engine::resolve_secret(ref, "lab/api-key", *store), "open");
+    EXPECT_EQ(engine::resolve_secret(ref, "lab/api-key", *store, "fortigate.test:8443"), "open");
 }
 
 // ---- S-05: configuration locations and config.json integrity ----

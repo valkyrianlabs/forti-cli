@@ -174,9 +174,10 @@ namespace forti::engine {
             config.connect_timeout = std::chrono::milliseconds(profile.connect_timeout_ms);
             config.timeout = std::chrono::milliseconds(profile.timeout_ms);
             if (retries) config.retries = *retries;
-            config.api_key = resolve_secret(profile.api_key, profile.api_key_account(), secrets);
+            config.api_key = resolve_secret(profile.api_key, profile.api_key_account(), secrets, profile.secret_binding());
             if (profile.cert_password.source != SecretRef::Source::none)
-                config.client_cert_password = resolve_secret(profile.cert_password, profile.cert_password_account(), secrets);
+                config.client_cert_password = resolve_secret(profile.cert_password, profile.cert_password_account(), secrets,
+                                                             profile.secret_binding());
             return options.transport ? std::make_shared<fortiapi::Client>(config, options.transport(config))
                                      : std::make_shared<fortiapi::Client>(config);
         }
@@ -300,7 +301,7 @@ namespace forti::engine {
 
     // ---- read ----
 
-    json Engine::read(const json& request) {
+    json Engine::read(const json& request, Secrets secrets) {
         allow_keys(request, {"resource", "key", "filter", "fields", "start", "count", "vdom", "profile", "params"}, "read");
         Resource resource = Catalog::instance().resolve(text(request, "resource"));
         const Profile& profile = this->profile(text(request, "profile"));
@@ -384,6 +385,13 @@ namespace forti::engine {
                 }
             }
             meta["returned"] = results.size();
+        }
+        if (secrets == Secrets::redact) {
+            std::set<std::string, std::less<>> redacted;
+            detail::redact_read(results, redacted);
+            if (!redacted.empty()) meta["redacted"] = redacted;
+        } else {
+            meta["revealed"] = true;
         }
         return ok(std::move(results), std::move(meta));
     }

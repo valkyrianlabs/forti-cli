@@ -9,8 +9,13 @@
 
 #include <iostream>
 
+#include <sys/resource.h>
+
 int main(int argc, char** argv) {
     using namespace forti;
+    // No core dumps: the process holds API keys and device secrets in memory.
+    struct rlimit no_core{0, 0};
+    ::setrlimit(RLIMIT_CORE, &no_core);
     std::vector<std::string> arguments(argv + 1, argv + argc);
     cli::Output output = cli::terminal_output();
     try {
