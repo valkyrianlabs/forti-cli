@@ -323,11 +323,12 @@ class Autonomous(CliTest):
         self.assertNotIn("second", self.mock.table("firewall/address"))
         self.assertEqual(self.sb.audit()[-1]["outcome"], "outcome_unknown")
 
-    @unittest.expectedFailure  # forti-api gap G12: libcurl re-sends a write on a fresh connection
     def test_no_write_is_sent_twice(self) -> None:
-        # The device performs the create, then the connection drops before the reply. libcurl sees an
-        # empty reply on a reused connection and silently sends the POST again on a new one: FortiOS
-        # assigns a second policy id, and the first policy is in no record and no rollback plan.
+        # The device performs the create, then the connection drops before the reply. Before forti-api
+        # fixed gap G12 (PR #17), libcurl took the empty reply on a reused connection for a stale
+        # keep-alive and silently re-sent the POST: FortiOS assigned a second policy id, and the first
+        # policy was in no record and no rollback plan. Now the write is sent once and reported as
+        # outcome_unknown.
         policy = {"name": "p", "srcintf": [{"name": "port1"}], "dstintf": [{"name": "port2"}],
                   "srcaddr": [{"name": "all"}], "dstaddr": [{"name": "all"}], "service": [{"name": "ALL"}],
                   "action": "accept", "schedule": "always"}
