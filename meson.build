@@ -2,7 +2,7 @@ project('forti-cli', 'cpp',
         version : '0.1.0',
         meson_version : '>=1.3.0',
         license : 'MIT',
-        default_options : ['warning_level=3', 'cpp_std=c++23', 'buildtype=release', 'b_ndebug=if-release'])
+        default_options : ['warning_level=3', 'cpp_std=c++23', 'buildtype=release', 'b_ndebug=if-release', 'forti-api:tests=disabled'])
 
 # forti-api is the only FortiOS implementation. A system install (pkg-config forti-api) wins; the
 # wrap is the source-build fallback.
