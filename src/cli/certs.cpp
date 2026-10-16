@@ -110,7 +110,7 @@ namespace forti::cli::certs {
         // "subject=O=forti, CN=x" and "sha256 Fingerprint=…", LibreSSL "subject= /O=forti/CN=x" and
         // "SHA256 Fingerprint=…"; both print "notAfter=Oct 14 19:48:33 2029 GMT".
         json certificate_info(const fs::path& program, const fs::path& file) {
-            std::string text = openssl(program, {"x509", "-in", file.filename().string(), "-noout", "-subject", "-enddate",
+            std::string text = openssl(program, {"x509", "-in", file.filename().string(), "-noout", "-subject", "-issuer", "-enddate",
                                                  "-fingerprint", "-sha256"}, file.parent_path());
             json info = json::object();
             std::size_t start = 0;
@@ -121,7 +121,8 @@ namespace forti::cli::certs {
                 auto equals = line.find('=');
                 if (equals == std::string::npos) continue;
                 std::string key = line.substr(0, equals), value = trim(line.substr(equals + 1));
-                if (key == "subject") {
+                if (key == "issuer") info["issuer"] = value;
+                else if (key == "subject") {
                     info["subject"] = value;
                     if (auto cn = common_name(value)) info["cn"] = *cn;
                 } else if (key == "notAfter") {
@@ -422,6 +423,84 @@ namespace forti::cli::certs {
         throw Failure(Code::config, std::format("certificate \"{}\" has no client.pass, and no profile holds its password", name),
                       {{"hint", std::format("give the password with forti configure --profile {} --cert {} --cert-password-stdin",
                                             profile.name, name)}});
+    }
+
+    json inspect_pem(const std::string& pem) {
+        fs::path program = openssl_program();
+        std::string pattern = (fs::temp_directory_path() / "forti-peer.XXXXXX").string();
+        if (!::mkdtemp(pattern.data())) throw Failure(Code::internal, "cannot create a temporary directory");
+        fs::path dir = pattern;
+        json info;
+        try {
+            std::ofstream(dir / "peer.pem") << pem;
+            info = certificate_info(program, dir / "peer.pem");
+            // Subject Alternative Names, from the text form (the -ext option is newer than LibreSSL's).
+            std::string text = openssl(program, {"x509", "-in", "peer.pem", "-noout", "-text"}, dir);
+            json names = json::array();
+            if (auto at = text.find("X509v3 Subject Alternative Name:"); at != std::string::npos) {
+                auto start = text.find('\n', at);
+                auto end = start == std::string::npos ? std::string::npos : text.find('\n', start + 1);
+                if (start != std::string::npos) {
+                    std::string line = trim(text.substr(start + 1, end == std::string::npos ? std::string::npos : end - start - 1));
+                    std::size_t from = 0;
+                    while (from < line.size()) {
+                        auto comma = line.find(',', from);
+                        std::string name = trim(line.substr(from, comma == std::string::npos ? std::string::npos : comma - from));
+                        if (name.starts_with("IP Address:")) name = "IP:" + name.substr(11);
+                        if (name.starts_with("DNS:") || name.starts_with("IP:")) names.push_back(name);
+                        from = comma == std::string::npos ? line.size() : comma + 1;
+                    }
+                }
+            }
+            info["names"] = names;
+            info["self_signed"] = info.value("subject", "") == info.value("issuer", "-");
+        } catch (...) {
+            std::error_code error;
+            fs::remove_all(dir, error);
+            throw;
+        }
+        std::error_code error;
+        fs::remove_all(dir, error);
+        return info;
+    }
+
+    bool covers(const json& inspected, std::string_view host) {
+        std::string want(host);
+        if (want.starts_with('[') && want.ends_with(']')) want = want.substr(1, want.size() - 2);
+        auto lower = [](std::string text) {
+            std::ranges::transform(text, text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return text;
+        };
+        want = lower(want);
+        const json& names = inspected.contains("names") ? inspected["names"] : json::array();
+        auto matches = [&](std::string name) {
+            name = lower(std::move(name));
+            if (name == want) return true;
+            // *.example.net covers exactly one label.
+            if (name.starts_with("*.")) {
+                auto dot = want.find('.');
+                return dot != std::string::npos && dot > 0 && want.substr(dot) == name.substr(1);
+            }
+            return false;
+        };
+        for (const auto& entry: names) {
+            std::string name = entry.get<std::string>();
+            if (name.starts_with("DNS:") && matches(name.substr(4))) return true;
+            if (name.starts_with("IP:") && lower(name.substr(3)) == want) return true;
+        }
+        // Without names the common name counts (as libcurl's verification does).
+        return names.empty() && inspected.contains("cn") && matches(inspected["cn"].get<std::string>());
+    }
+
+    fs::path pin(const engine::Paths& paths, std::string_view host, unsigned port, const std::string& pem) {
+        std::string stem;
+        for (char c: host) stem += std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' ? c : '_';
+        fs::path dir = paths.certs().parent_path() / "tls";
+        engine::ensure_private_dir(dir);
+        fs::path file = dir / std::format("{}-{}.pem", stem, port);
+        engine::write_private_file(file, pem);
+        restrict(file, 0644);   // a certificate: public
+        return file;
     }
 
     json fortigate(const engine::Paths& paths, const std::string& name) {

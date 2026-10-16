@@ -13,6 +13,8 @@
 #include "setup_support.hpp"
 #include "tty.hpp"
 
+#include <forti_api/tls.hpp>
+
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
@@ -357,6 +359,7 @@ namespace forti::cli {
             std::optional<std::string> certificate;   // a forti certificate newly chosen: the FortiGate may not know it
             bool created_certificate = false;
             bool named = false;                       // the name is known (--profile); else it is asked after the check
+            std::string source_ip;                    // this machine's address as the device sees it (TLS probe)
             std::string like;                         // the profile whose settings this one started from
         };
 
@@ -633,7 +636,7 @@ namespace forti::cli {
             bool have = p.api_key.source == SecretRef::Source::env || p.api_key.source == SecretRef::Source::command ||
                         (draft.existed && p.api_key.source == SecretRef::Source::store && store.get(p.api_key_account()));
             if (!have && offer_steps && !tty.confirm("\nDo you have a REST API key for this FortiGate?", true))
-                tty.say(std::format("\n{}\n", api_user_steps("")));
+                tty.say(std::format("\n{}\n", api_user_steps(draft.source_ip)));
             tty.say(std::format("\nThe API key is typed hidden and kept in the {}. To read it from elsewhere instead,\n"
                                 "type env:VARIABLE or cmd:COMMAND (a password manager, for example).\n",
                                 describe_source({SecretRef::Source::store, {}, {}, {}}, store.kind())));
@@ -678,6 +681,101 @@ namespace forti::cli {
                 } catch (const Failure& failure) {
                     tty.say(std::format("  {}{}\n", failure.what(),
                                         failure.details().contains("hint") ? " (" + failure.details()["hint"].get<std::string>() + ")" : ""));
+                }
+            }
+        }
+
+        // Trust on first use. When the device's certificate does not verify, show it and, on the
+        // operator's word, pin it as the profile's CA bundle. Verification stays on: forti verifies the
+        // device against the pinned certificate, for the names it carries. No request and no credential
+        // goes to the device here (fortiapi::probe_tls).
+        void tls_step(const Context& context, Draft& draft, const Tty& tty) {
+            Profile& p = draft.profile;
+            if (context.engine.options().transport) return;   // a scripted transport (tests): no TLS to look at
+            bool pinned = false;
+            for (;;) {
+                fortiapi::Config config;
+                config.host = p.host;
+                config.port = p.port;
+                config.resolve_ip = p.resolve_ip;
+                config.ca_bundle = p.ca_bundle;
+                config.connect_timeout = std::chrono::milliseconds(p.connect_timeout_ms);
+                fortiapi::TlsProbe probe;
+                try {
+                    probe = fortiapi::probe_tls(config);
+                } catch (const fortiapi::TransportError& error) {
+                    Advice advice = connection_advice(error.code(), p);
+                    tty.say(std::format("\n{}\n{}\n", advice.summary, advice.hint));
+                    if (tty.choose("\nWhat now?", {"change the address", "go on (forti checks the connection at the end)"}, 0) == 0) {
+                        address_step(draft, tty);
+                        continue;
+                    }
+                    return;
+                }
+                draft.source_ip = probe.local_ip;
+                if (probe.trusted) {
+                    if (pinned) tty.say("  The FortiGate's certificate now verifies.\n");
+                    return;
+                }
+                if (pinned || probe.chain.empty()) {
+                    tty.say(std::format("  The certificate still does not verify: {}\n", probe.verify_error));
+                    return;
+                }
+                json cert;
+                try {
+                    cert = certs::inspect_pem(probe.chain.front());
+                } catch (const Failure& failure) {
+                    tty.say(std::format("\nThe certificate of {} is not trusted, and forti cannot show it ({}).\n"
+                                        "Give a CA bundle with forti configure --advanced.\n", format_address(p.host, p.port), failure.what()));
+                    return;
+                }
+                std::string names;
+                for (const auto& name: cert.value("names", json::array())) names += (names.empty() ? "" : ", ") + name.get<std::string>();
+                tty.say(std::format("\nThe certificate of {} is not trusted ({}).\n"
+                                    "  subject   {}\n"
+                                    "  issuer    {}{}\n"
+                                    "  names     {}\n"
+                                    "  expires   {}\n"
+                                    "  SHA-256   {}\n"
+                                    "Trusting it pins this exact certificate: forti keeps verifying the FortiGate against it, and a\n"
+                                    "different certificate later (another device, or one in between) is refused. Compare the\n"
+                                    "fingerprint with the FortiGate's (System > Certificates) if you can.\n",
+                                    format_address(p.host, p.port), probe.verify_error, cert.value("subject", "?"),
+                                    cert.value("issuer", "?"), cert.value("self_signed", false) ? " (self-signed)" : "",
+                                    names.empty() ? "(none)" : names, cert.value("expires", cert.value("not_after", "?")),
+                                    cert.value("fingerprint_sha256", "?")));
+                if (!tty.confirm("Trust this certificate for this FortiGate?", false)) {
+                    tty.say("  Not trusted: the connection check will fail unless you give a CA bundle then.\n");
+                    return;
+                }
+                const auto& paths = context.engine.options().paths;
+                p.ca_bundle = certs::pin(paths, p.host, p.port, probe.chain.front()).string();
+                tty.say(std::format("  Saved as {}\n", display_path(p.ca_bundle)));
+                pinned = true;
+                // A certificate for another name (a factory certificate names the serial number):
+                // connect to the address, and verify the certificate for its own name.
+                if (!certs::covers(cert, p.host)) {
+                    std::string name;
+                    for (const auto& entry: cert.value("names", json::array()))
+                        if (entry.get<std::string>().starts_with("DNS:")) {
+                            name = entry.get<std::string>().substr(4);
+                            break;
+                        }
+                    if (name.empty()) name = cert.value("cn", "");
+                    bool usable = !name.empty() && !name.starts_with("*.") && !probe.peer_ip.empty();
+                    if (usable) {
+                        try {
+                            validate_host(name);
+                            validate_ip(probe.peer_ip);
+                        } catch (const Failure&) {
+                            usable = false;
+                        }
+                    }
+                    if (usable && tty.confirm(std::format("The certificate is for {}, not {}. Connect to {} and verify it as {}?", name,
+                                                          p.host, probe.peer_ip, name), true)) {
+                        p.resolve_ip = probe.peer_ip;
+                        p.host = name;
+                    }
                 }
             }
         }
@@ -758,6 +856,7 @@ namespace forti::cli {
             }
             address_step(draft, tty);
             if (args.flag("advanced")) advanced_step(draft, tty);
+            tls_step(context, draft, tty);
             api_key_step(context, draft, tty);
             if (!draft.like.empty() && draft.certificate)
                 tty.say(std::format("\nClient certificate: \"{}\" (as {})\n", *draft.certificate, draft.like));
@@ -828,7 +927,7 @@ namespace forti::cli {
             if (failure.code() == Code::auth) {
                 options.emplace_back("type the API key again (FortiOS locks the API user out after a few failures)", retype_key);
                 options.emplace_back("show the FortiOS commands that create a REST API admin, then type its key", [&] {
-                    tty.say(std::format("\n{}\n", api_user_steps("")));
+                    tty.say(std::format("\n{}\n", api_user_steps(draft.source_ip)));
                     return retype_key();
                 });
             } else if (failure.code() == Code::connection) {
@@ -836,6 +935,11 @@ namespace forti::cli {
                     address_step(draft, tty);
                     return Recovery::retry;
                 });
+                if (stage == "tls")
+                    options.emplace_back("look at the certificate the FortiGate presents, and decide whether to trust it", [&] {
+                        tls_step(context, draft, tty);
+                        return Recovery::retry;
+                    });
                 if (stage == "tls")
                     options.emplace_back("use a CA bundle (a PEM file with the FortiGate's certificate or its CA)", [&] {
                         for (;;) {
