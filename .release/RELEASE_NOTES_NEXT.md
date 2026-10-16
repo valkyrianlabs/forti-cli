@@ -9,6 +9,9 @@ for users and operators; keep it representative of what actually ships.
 -->
 # One command per change, one approval for agents
 
+(0.4.1 is the first published 0.4 release: 0.4.0 was tagged, but its release stopped before
+publishing anything, at a packaging check. Nothing else changed.)
+
 forti 0.4 makes a routine firewall change one command, with at most one question, and lets an agent
 make one with a single approval in the chat. Planning, validation, drift checks, verification,
 rollback plans and the audit log all still happen; you just no longer handle them by hand.
@@ -65,6 +68,7 @@ packages install the scripts; `forti completion bash|zsh|fish` prints them.
 - **401 errors** no longer imply a wrong key: FortiOS answers the same when this machine is outside
   the API user's trusted hosts, which forti now says first. 403 points at the admin profile.
 - **Startup** is back to about 6 ms (0.3 took about 25 ms).
-- **Homebrew** pours bottles on Apple silicon and Intel Macs running macOS 15 or later.
+- **Homebrew** pours a bottle on Apple silicon Macs running macOS 26 or later; other Macs build from
+  source.
 - **APT** packages depend on `valkyrianlabs-archive-keyring`, which keeps the repository signing key
   current through normal upgrades.

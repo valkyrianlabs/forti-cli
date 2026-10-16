@@ -40,4 +40,5 @@ One level of nested "  - " detail bullets is allowed. Consolidate; don't paste c
   403 points at the admin profile.
 - Build: hidden symbol visibility: `forti` starts in ~6 ms again (forti-api's inline schema tables
   were coalesced by dyld at every start, ~20 ms).
-- Release: Homebrew bottles for arm64 and Intel, built on macOS 15.
+- Release: the clean-install smoke test adds the ValkyrianLabs repository (the keyring dependency).
+  0.4.0 was tagged but not published.

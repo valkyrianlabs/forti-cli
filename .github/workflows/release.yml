@@ -3,8 +3,7 @@
 #   vlr cut patch|minor|major|X.Y.Z --push      (locally) -> pushes vX.Y.Z -> this workflow
 #
 # build ─▶ homebrew-check ─▶ publish-apt ─▶ github-release ─▶ homebrew-tap ─▶ finalize
-# (homebrew-check also makes the macOS bottles, arm64 and Intel: github-release attaches them,
-# homebrew-tap names them)
+# (homebrew-check also makes the macOS bottle: github-release attaches it, homebrew-tap names it)
 #                              └─▶ docs (pmdocs push of docs/ over GitHub OIDC)
 #
 # build: prepare, build the .deb against libforti-api-dev, source archive, formula, validate, then a
@@ -145,8 +144,10 @@ jobs:
           path: release
           if-no-files-found: error
 
-  # One bottle per architecture, built on macOS 15 (older Xcodes lack C++23 pieces forti uses): Homebrew pours a
-  # bottle on that macOS and every later one (arm64_sequoia serves 15, 26 and 27).
+  # The bottle is built on the newest macOS runner. Older SDKs cannot build forti-api 1.1's runtime
+  # schema (floating-point std::from_chars arrived in Xcode 26's libc++), so macOS 15 and Intel bottles
+  # wait for forti-api to parse numbers portably (forti-api-gaps G16). Homebrew pours a bottle on the
+  # macOS it was built for and every later one.
   homebrew-check:
     name: Homebrew formula install and bottle (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -154,7 +155,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [macos-15, macos-15-intel]
+        os: [macos-latest]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

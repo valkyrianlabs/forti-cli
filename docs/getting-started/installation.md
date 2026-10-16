@@ -61,7 +61,7 @@ recommends (unless recommends are turned off).
 brew install valkyrianlabs/tap/forti-cli
 ```
 
-Homebrew pours a prebuilt bottle on macOS 15 or later (Apple silicon and Intel), and installs
+Homebrew pours a prebuilt bottle on Apple silicon Macs running macOS 26 or later, and installs
 forti-mcp with it. Elsewhere it builds from source against the `forti-api` formula, which it needs
 only at build time.
 
