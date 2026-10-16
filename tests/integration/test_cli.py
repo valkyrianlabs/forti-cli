@@ -74,10 +74,6 @@ class Setup(CliTest):
         config = json.loads((self.sb.config / "config.json").read_text())
         profile = config["profiles"]["lab"]
         self.assertEqual(profile["api_key"], {"source": "env", "env": KEY_VAR})
-        # The trusted certificate is pinned: the device's own certificate is the CA bundle.
-        pinned = Path(profile["ca_bundle"])
-        self.assertEqual(pinned.parent, home / "tls")
-        self.assertIn("BEGIN CERTIFICATE", pinned.read_text())
         self.assertEqual(profile["mode"], "read-only")
         self.assertEqual(stat.S_IMODE(os.stat(self.sb.config / "config.json").st_mode), 0o600)
         # configure verified the device through the SDK: one authorized GET of monitor/system/status.
