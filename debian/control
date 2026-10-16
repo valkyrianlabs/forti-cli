@@ -21,6 +21,7 @@ Depends:
  ${misc:Depends},
  ${shlibs:Depends},
  openssl,
+ valkyrianlabs-archive-keyring,
 Recommends:
  forti-mcp,
 Description: FortiOS command-line interface
