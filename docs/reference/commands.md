@@ -36,7 +36,9 @@ command's options, and `man forti` has a summary. A mistyped command gets sugges
 | [`approve`](#approve) | Change | approve a plan an agent made (guarded mode), one at a time or `--watch` | never |
 | [`plan`](#plan) | Change | preview, save, show and list plans | when writing a plan (reads only) |
 | [`apply`](#apply) | Change | apply a saved plan | yes |
+| [`history`](#history) | Change | what was applied: when, on which profile, approved by whom, what changed | never |
 | [`mcp`](#mcp) | Integrations | register forti-mcp with AI clients (recommended: the `~/.forti` workspace); status, repair or uninstall the registrations | never |
+| [`completion`](#completion) | Integrations | print the bash, zsh or fish completion script | never |
 
 ## Global options
 
@@ -292,6 +294,34 @@ terminal, none for a plan already approved). Without an id, at a terminal: the p
 profile; when several are, you pick one. Without a terminal the plan must be named. See
 [Applying a plan](/guides/planning-and-applying-changes#applying-a-plan).
 
+### history
+
+```text
+forti history [-p NAME] [-n N] [--all] [--verbose]
+```
+
+Reads the audit log (`~/.forti/state/audit.jsonl`) and shows the applies in it, newest last: the
+local time, the profile, the result (`applied`, `partial`, `failed`, `unknown`, `lost management`,
+`refused: ...`), the plan (the last part of its id, which `forti plan show` accepts), the approval
+(`approved by cli:alice`, or `autonomous` with the agent that applied it) and what changed.
+Rollbacks say which plan they undo. It needs no configuration and never contacts a device.
+
+| Option | Meaning |
+|---|---|
+| `-p, --profile NAME` | only this profile's entries (default: every profile) |
+| `-n, --limit N` | the last N entries (default 20; `0`: all) |
+| `--all` | also the attempts refused before anything changed: a read-only profile, a missing approval, a stale or already applied plan. They are hidden by default, and standard error says how many |
+| `--verbose` | every operation with its result, the approval, the error, the rollback plan and the `forti rollback` command that undoes the change; approve events too |
+
+`--json` prints the audit events as recorded, with `meta.hidden` (refusals left out), `meta.older`
+(entries beyond the limit) and `meta.malformed` (lines that could not be read, which are skipped).
+Text output escapes terminal control characters in everything taken from the log.
+
+```sh
+forti history
+forti history -p fw01 --verbose -n 5
+```
+
 ## Integrations
 
 ### mcp
@@ -316,6 +346,48 @@ terminal. Without a terminal, or with `--yes`, `--client` and `--scope` are requ
 `status` includes the workspace and the health of its files. `uninstall --scope workspace` removes
 the registrations and the files forti wrote in the workspace, never `config.json`, credentials,
 certificates or state. `-y` is short for `--yes`. See [AI agent integration](/guides/ai-agent-integration).
+
+### completion
+
+```text
+forti completion bash|zsh|fish
+```
+
+Prints the shell completion script: commands, subcommands, options, profile names after `-p`,
+resource paths (one segment at a time: `firewall/` then `firewall/address`), modes after
+`profile mode`, and the ids of plans waiting to be applied after `apply`, `rollback` and
+`plan show|approve`. On each Tab the script runs `forti`, which reads only the profile names in
+`config.json` and the plans directory: never a device or a secret.
+
+The Homebrew formula and the Debian package install the scripts; nothing else is needed (bash needs
+the bash-completion package, zsh `compinit`). For a source build or a copy in your home directory:
+
+:::tabs{default="bash"}
+
+:::tab[bash]{value="bash"}
+```bash
+echo 'source <(forti completion bash)' >> ~/.bashrc
+```
+:::
+
+:::tab[zsh]{value="zsh"}
+```bash
+# in ~/.zshrc, after compinit
+source <(forti completion zsh)
+```
+:::
+
+:::tab[fish]{value="fish"}
+```bash
+forti completion fish > ~/.config/fish/completions/forti.fish
+```
+:::
+
+:::
+
+`meson install` puts them in `share/bash-completion/completions/forti`,
+`share/zsh/site-functions/_forti` and `share/fish/vendor_completions.d/forti.fish` under the prefix
+(`-Dcompletions=disabled` leaves them out).
 
 ## Environment
 

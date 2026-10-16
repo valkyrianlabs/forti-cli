@@ -106,6 +106,13 @@ forti home
 Upgrading from 0.1? Your existing setup keeps
 working; see [Pre-0.2 setups](/reference/configuration-files#pre-0-2-setups).
 
+## Shell completion
+
+The APT package and the Homebrew formula install Tab completion for bash, zsh and fish: commands,
+options, profile names, resource paths and pending plan ids. A source build installs it with
+`meson install`; for a copy in your home directory instead, see
+[`forti completion`](/reference/commands#completion).
+
 ## Next steps
 
 :::cards{

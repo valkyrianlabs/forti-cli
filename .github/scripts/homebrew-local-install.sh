@@ -40,6 +40,10 @@ brew install --build-bottle "$tap/forti-cli"
 brew test "$tap/forti-cli"
 "$(brew --prefix)/bin/forti" --version
 test -f "$(brew --prefix)/share/man/man1/forti.1"
+# Shell completion, linked into the prefix where bash-completion@2, zsh and fish look.
+test -f "$(brew --prefix)/share/bash-completion/completions/forti"
+test -f "$(brew --prefix)/share/zsh/site-functions/_forti"
+test -f "$(brew --prefix)/share/fish/vendor_completions.d/forti.fish"
 
 # The bottle: a release asset of this version, which the published formula names (root_url), so
 # users pour it instead of compiling. brew writes name--version...; the asset is the JSON's filename.

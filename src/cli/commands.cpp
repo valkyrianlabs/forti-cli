@@ -24,12 +24,17 @@ namespace forti::cli {
         return emit(context.output, engine::Engine::envelope(operation), render);
     }
 
+    static std::vector<Command> joined(std::vector<Command> first, const std::vector<Command>& more) {
+        first.insert(first.end(), more.begin(), more.end());
+        return first;
+    }
+
     const std::vector<CommandGroup>& command_groups() {
         static const std::vector<CommandGroup> groups = {
             {"setup", setup_commands()},
             {"read", read_commands()},
-            {"change", plan_commands()},
-            {"integrations", install_commands()},
+            {"change", joined(plan_commands(), history_commands())},
+            {"integrations", joined(install_commands(), completion_commands())},
         };
         return groups;
     }

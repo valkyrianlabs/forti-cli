@@ -1,6 +1,7 @@
 #include "app.hpp"
 
 #include "commands.hpp"
+#include "completion.hpp"
 
 #include <algorithm>
 #include <format>
@@ -140,6 +141,8 @@ namespace forti::cli {
         }
 
         std::string name = arguments[command_at];
+        // Before option parsing: its arguments are words being completed ("--pro"), not options.
+        if (name == "__complete") return complete(std::span(arguments).subspan(command_at + 1), output, options);
         const auto& table = commands();
         if (name == "help") {
             if (command_at + 1 >= arguments.size()) {

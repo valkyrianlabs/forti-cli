@@ -99,6 +99,7 @@ compiles it once, in `engine/src/schema_ops.cpp`.
 |---|---|---|
 | `tests` | `auto` | build the unit and integration tests |
 | `subproject_cli` | `false` | also build (never install) `forti` when forti-cli is a subproject, for forti-mcp's integration tests |
+| `completions` | `auto` | install the bash, zsh and fish completion scripts from `completions/` under `share/`; `disabled` leaves them out |
 
 ## Release profile
 

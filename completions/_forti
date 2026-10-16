@@ -1,0 +1,128 @@
+#compdef forti
+#
+# zsh completion for forti(1). Installed as share/zsh/site-functions/_forti (on $fpath), or, in
+# ~/.zshrc after compinit:
+#   source <(forti completion zsh)
+#
+# The candidates come from forti itself (`forti __complete WHAT [PREFIX]`), so the script stays right
+# as commands and options change. That call reads only profile names and the plans directory: no
+# device, no secret.
+
+_forti_query() {
+    ${~_forti_bin} __complete "$@" 2>/dev/null
+}
+
+_forti() {
+    local _forti_bin=${words[1]} cmd= word skip= valued_for=- i
+    local -a args valued candidates dirs leaves
+
+    # The command and its positional arguments, without options and option values.
+    for (( i = 2; i < CURRENT; i++ )); do
+        word=${words[i]}
+        if [[ -n $skip ]]; then
+            skip=
+            continue
+        fi
+        case $word in
+            --*=* | -) ;;
+            -*)
+                if [[ $valued_for != "$cmd" ]]; then
+                    valued=(${(f)"$(_forti_query valued "$cmd")"})
+                    valued_for=$cmd
+                fi
+                (( ${valued[(Ie)$word]} )) && skip=1
+                ;;
+            *)
+                if [[ -z $cmd ]]; then cmd=$word; else args+=("$word"); fi
+                ;;
+        esac
+    done
+
+    # An option's value (--opt VALUE or --opt=VALUE).
+    local option=
+    if [[ -n $skip ]]; then
+        option=${words[CURRENT-1]}
+    elif [[ $PREFIX == --*=* ]]; then
+        option=${PREFIX%%=*}
+        compset -P '*='
+    fi
+    if [[ -n $option ]]; then
+        case $option in
+            -p | --profile) candidates=(${(f)"$(_forti_query profiles)"}); _describe -t profiles 'profile' candidates ;;
+            --mode) candidates=(${(f)"$(_forti_query modes)"}); _describe -t modes 'mode' candidates ;;
+            -f | --file | --ca-bundle | --client-cert | --cert-password-file) _files ;;
+            --project-dir) _files -/ ;;
+            *) _message 'value' ;;
+        esac
+        return
+    fi
+
+    if [[ $PREFIX == -* ]]; then
+        candidates=(${(f)"$(_forti_query options "$cmd")"})
+        _describe -t options 'option' candidates
+        return
+    fi
+    if [[ -z $cmd ]]; then
+        candidates=(${(f)"$(_forti_query commands)"})
+        _describe -t commands 'command' candidates
+        return
+    fi
+
+    local what= sub=${args[1]-} n=${#args}
+    case $cmd in
+        help) (( n == 0 )) && what=commands ;;
+        get | discover | set | create | delete) (( n == 0 )) && what=resources ;;
+        apply | approve | rollback) (( n == 0 )) && what=plans ;;
+        plan)
+            if (( n == 0 )); then
+                what=subcommands
+            elif (( n == 1 )); then
+                case $sub in
+                    set | create | delete | action) what=resources ;;
+                    show | approve) what=plans ;;
+                esac
+            fi
+            ;;
+        profile)
+            if (( n == 0 )); then
+                what=subcommands
+            elif [[ $sub == mode ]]; then
+                (( n == 1 )) && what='profiles modes'
+                (( n == 2 )) && what=modes
+            elif (( n == 1 )); then
+                case $sub in
+                    show | set | rename | copy | default | remove) what=profiles ;;
+                esac
+            fi
+            ;;
+        *) (( n == 0 )) && what=subcommands ;;
+    esac
+
+    local w
+    for w in ${=what}; do
+        case $w in
+            resources)
+                # Directories ("firewall/") are completed further, without a trailing space.
+                candidates=(${(f)"$(_forti_query resources "$PREFIX")"})
+                dirs=(${(M)candidates:#*/})
+                leaves=(${candidates:#*/})
+                if (( $#dirs )); then compadd -S '' -- $dirs; fi
+                if (( $#leaves )); then compadd -- $leaves; fi
+                ;;
+            subcommands)
+                candidates=(${(f)"$(_forti_query subcommands "$cmd")"})
+                _describe -t subcommands 'subcommand' candidates
+                ;;
+            *)
+                candidates=(${(f)"$(_forti_query "$w")"})
+                _describe -t "$w" "${w%s}" candidates
+                ;;
+        esac
+    done
+}
+
+if [[ $funcstack[1] == _forti ]]; then
+    _forti "$@"   # autoloaded from $fpath
+else
+    compdef _forti forti   # sourced
+fi
