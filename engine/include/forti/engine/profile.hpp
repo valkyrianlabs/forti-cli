@@ -83,6 +83,9 @@ namespace forti::engine {
         bool backup_before_critical = true;   // critical-risk plans take a config backup first (refused if it fails)
         unsigned connect_timeout_ms = 5000;
         unsigned timeout_ms = 30000;
+        // The serial number the last configure check saw: spots two profiles for one FortiGate.
+        // Informational only; plans and apply check the live serial.
+        std::string serial;
 
         [[nodiscard]] nlohmann::json to_json() const;          // config.json form (no secrets)
         [[nodiscard]] nlohmann::json describe() const;         // safe summary for output

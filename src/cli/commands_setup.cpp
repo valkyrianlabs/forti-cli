@@ -1111,8 +1111,24 @@ namespace forti::cli {
                     secrets.bind(profile.secret_binding());
                 }
             }
+            // The device seen by this check; a profile saved unchecked keeps no serial.
+            profile.serial = capabilities.is_object() ? capabilities["device"].value("serial", "") : "";
             if (capabilities.is_object()) {
                 result["device"] = capabilities.value("device", json::object());
+                // Another profile for the same FortiGate works, but is usually a mistake (or a stale
+                // profile): say so before it is named.
+                std::vector<std::string> same;
+                for (const auto& [other_name, other]: set.profiles)
+                    if (other_name != profile.name && ((!profile.serial.empty() && other.serial == profile.serial) ||
+                                                       (other.host == profile.host && other.port == profile.port)))
+                        same.push_back(other_name);
+                if (!same.empty()) {
+                    result["same_device_as"] = same;
+                    if (tty)
+                        tty->say(std::format("\nNote: profile {} already points at this FortiGate{}. To change that profile "
+                                             "instead: forti configure -p {}\n", same.front(),
+                                             profile.serial.empty() ? "" : " (serial " + profile.serial + ")", same.front()));
+                }
                 if (!capabilities.value("schema_matches_device", true))
                     result["schema_note"] = std::format(
                             "the device runs {}; forti's models are generated from FortiOS {}. Reads work; some "

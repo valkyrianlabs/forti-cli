@@ -330,3 +330,15 @@ TEST_F(SetupCli, DoctorWarnsWhenAutonomousUsesSuperAdmin) {
     ASSERT_EQ(run({"--json", "doctor"}), 0) << out.str();
     EXPECT_EQ(check(json_out()["data"]["checks"], "privileges")["status"], "pass");
 }
+
+TEST_F(SetupCli, ConfigureNotesASecondProfileForTheSameDevice) {
+    configure_lab();
+    device_replies();
+    ASSERT_EQ(run({"--json", "configure", "--profile", "lab2", "--host", "fortigate.test", "--api-key-stdin"}, "lab-key\n"), 0)
+            << err.str();
+    json data = json_out()["data"];
+    EXPECT_EQ(data["same_device_as"], json::array({"lab"})) << data.dump();
+    // The serial seen by the check is kept, so a device reached by another name is recognized too.
+    ASSERT_EQ(run({"--json", "profile", "show", "lab2"}), 0);
+    EXPECT_FALSE(json_out()["data"].value("serial", "").empty()) << out.str();
+}
