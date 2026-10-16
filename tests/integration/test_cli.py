@@ -608,6 +608,42 @@ class GuardedAtTerminal(CliTest):
         self.assertNotIn("web", self.mock.table("firewall/address"))
 
 
+class ConcurrentAgents(CliTest):
+    """Several agents planning for one profile at once: every plan is its own, and none is guessed."""
+
+    mode = "autonomous"
+
+    def test_parallel_plans_are_distinct_and_applied_only_by_id(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        names = [f"agent{i}" for i in range(6)]
+
+        def plan_one(name: str):  # type: ignore[no-untyped-def]
+            body = json.dumps({"operations": [create_address({"name": name, "subnet": "192.0.2.20 255.255.255.255"})]})
+            return self.sb.forti("plan", "--file", "-", "--json", input=body)
+
+        with ThreadPoolExecutor(max_workers=len(names)) as pool:
+            results = list(pool.map(plan_one, names))
+        for result in results:
+            self.assertEqual(result.code, 0, result.err)
+        ids = [r.json()["data"]["id"] for r in results]
+        self.assertEqual(len(set(ids)), len(ids), "every plan has its own id")
+        self.assertEqual(self.writes(), [])
+
+        # Without a terminal, nothing picks "the newest" for an agent.
+        self.assertEqual(self.json_of("apply", "latest", expect=2)["error"]["code"], "usage")
+        self.forti("apply", expect=2)
+        self.assertEqual(self.writes(), [])
+
+        # Each agent applies its own plan by id, in parallel.
+        with ThreadPoolExecutor(max_workers=len(ids)) as pool:
+            applied = list(pool.map(lambda i: self.sb.forti("apply", i, "--json"), ids))
+        for result in applied:
+            self.assertEqual(result.code, 0, result.err)
+        self.assertEqual(set(names) <= set(self.mock.table("firewall/address")), True)
+        audit = [e for e in self.sb.audit() if e.get("event") == "apply" and e.get("outcome") == "ok"]
+        self.assertEqual(sorted(e["plan_id"] for e in audit), sorted(ids))
+
+
 class AutonomousAtTerminal(CliTest):
     mode = "autonomous"
 
