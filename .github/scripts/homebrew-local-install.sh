@@ -34,9 +34,26 @@ trap 'brew uninstall --formula "$tap/forti-cli" >/dev/null 2>&1 || true; brew un
 cp "$formula" "$tap_formula"
 brew style "$tap/forti-cli"
 
-# Then install it from the locally built archive and run its test block.
+# Then install it from the locally built archive as a bottle build and run its test block.
 sed -E "s#^  url \".*\"#  url \"file://${archive}\"#" "$formula" > "$tap_formula"
-brew install --build-from-source "$tap/forti-cli"
+brew install --build-bottle "$tap/forti-cli"
 brew test "$tap/forti-cli"
 "$(brew --prefix)/bin/forti" --version
 test -f "$(brew --prefix)/share/man/man1/forti.1"
+
+# The bottle: a release asset of this version, which the published formula names (root_url), so
+# users pour it instead of compiling. brew writes name--version...; the asset is the JSON's filename.
+mkdir -p bottle
+(
+  cd bottle
+  brew bottle --json --root-url "https://github.com/valkyrianlabs/forti-cli/releases/download/v${version}" "$tap/forti-cli"
+  python3 - <<'PY'
+import json, pathlib
+for path in pathlib.Path(".").glob("*.bottle.json"):
+    for entry in json.loads(path.read_text()).values():
+        for info in entry["bottle"]["tags"].values():
+            if info["local_filename"] != info["filename"]:
+                pathlib.Path(info["local_filename"]).rename(info["filename"])
+            print("bottle:", info["filename"], info["sha256"])
+PY
+)

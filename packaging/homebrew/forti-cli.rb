@@ -16,6 +16,9 @@ class FortiCli < Formula
   depends_on "ninja" => :build
   depends_on "pkgconf" => :build
 
+  # The MCP server for AI clients (forti mcp install): installed alongside, still its own formula.
+  depends_on "valkyrianlabs/tap/forti-mcp"
+
   uses_from_macos "curl"
 
   def install

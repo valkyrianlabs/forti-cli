@@ -21,14 +21,19 @@ Depends:
  ${misc:Depends},
  ${shlibs:Depends},
  openssl,
+Recommends:
+ forti-mcp,
 Description: FortiOS command-line interface
  forti discovers, reads, plans and applies FortiGate configuration over the
  FortiOS REST API (v2). Every resource of FortiOS 7.4.8 is addressable, with
  field validation from the SDK's typed models.
  .
- Changes are planned first: a plan validates the operations, shows the field
- diff and is applied only after a human approved it at an interactive
- terminal. Profiles are read-only unless writes are enabled, and credentials
- come from a credential store, never from the command line.
+ Changes are planned first: a plan validates the operations and shows the
+ field diff. Profiles are read-only unless their mode allows changes (guarded:
+ a person approves each plan; autonomous), and credentials come from a
+ credential store, never from the command line.
+ .
+ forti-mcp (recommended) gives AI clients the same tools: forti mcp install
+ registers it.
  .
  Built on forti-api (libforti-api-dev), the header-only FortiOS SDK.
