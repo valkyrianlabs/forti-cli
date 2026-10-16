@@ -33,6 +33,7 @@ if gtest_dep.found()
                            'unit/test_keychain.cpp',
                            'unit/test_cli_security.cpp',
                            'unit/test_install_cli.cpp',
+                           'unit/test_plan_cli.cpp',
                            include_directories : include_directories('support'),
                            dependencies : [forti_cli_dep, gtest_dep],
                            implicit_include_directories : false),

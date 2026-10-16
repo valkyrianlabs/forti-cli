@@ -175,7 +175,8 @@ namespace forti::cli {
             if (code == "unknown_resource") return "`forti discover <search>` lists resources";
             if (code == "usage") return message.starts_with("usage:") ? "" : "see `forti --help` or `forti <command> --help`";
             if (code == "policy_denied" && message.find("read-only") != std::string_view::npos)
-                return std::format("allow changes: forti profile mode {} guarded (you approve each plan), or autonomous", profile);
+                return std::format("profiles are read-only by default. Allow changes with `{}` (you approve each plan) or "
+                                   "`autonomous`", details.value("mode_command", std::format("forti profile mode {} guarded", profile)));
             return "";
         }
 

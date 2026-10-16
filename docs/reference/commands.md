@@ -27,12 +27,13 @@ command's options, and `man forti` has a summary. A mistyped command gets sugges
 | [`profile`](#profile) | Setup | list, show, change, rename, copy, set the default or mode, remove | never |
 | [`doctor`](#doctor) | Setup | check the home, configuration, credentials, TLS, auth, version, mode | yes |
 | [`home`](#home) | Setup | show where forti keeps its files, or migrate a pre-0.2 setup | never |
-| [`cert`](#cert) | Setup | create, show or remove a profile's client certificate | never |
+| [`cert`](#cert) | Setup | create, list, show, use or remove client certificates | never |
 | [`devices`](#devices) | Read | list the configured profiles | never |
 | [`discover`](#discover) | Read | search the catalog, or show a resource's attributes | only with `--live` |
 | [`get`](#get) | Read | read configuration or monitor data | yes |
 | [`plan`](#plan) | Change | write, show, list and approve stored plans | when writing a plan (reads only) |
 | [`apply`](#apply) | Change | execute a stored plan once | yes |
+| [`rollback`](#rollback) | Change | undo the last applied plan with its rollback plan | yes |
 | [`mcp`](#mcp) | Integrations | register forti-mcp with AI clients (recommended: the `~/.forti` workspace); status, repair or uninstall the registrations | never |
 
 ## Global options
@@ -220,34 +221,48 @@ error; `--all` reads them all. See
 ### plan
 
 ```text
-forti plan --file changes.json|-
-forti plan set <resource> [key] attr=value... [--clear attr]
-forti plan create <resource> --object JSON|@file
-forti plan delete <resource> <key>
-forti plan action <monitor/path> [--body JSON|@file]
-forti plan show <id>
+forti plan --file changes.json|- [--apply]
+forti plan set <resource> [key] attr=value... [--clear attr] [--apply]
+forti plan create <resource> attr=value... | --object JSON|@file [--apply]
+forti plan delete <resource> <key> [--apply]
+forti plan action <monitor/path> [--body JSON|@file] [--apply]
+forti plan show [id]
 forti plan list
-forti plan approve <id> [--yes]
+forti plan approve [id] [--yes]
 ```
 
 `-f` is short for `--file`, `-y` for `--yes`. Planning reads the device and never changes it.
-`approve` exists only in the CLI, for guarded profiles. See
-[Planning and applying changes](/guides/planning-and-applying-changes).
+`approve` exists only in the CLI, for guarded profiles; at a terminal it then asks `Apply now? [Y/n]`.
+`--apply` applies the new plan in the same command, as the mode allows. `--verbose` adds the plan
+digest to the text output. A plan id can be shortened to a unique prefix (of the id or of its last
+part) or `latest`; at a terminal, `show` and `approve` without an id take the newest plan waiting to be
+applied. See [Planning and applying changes](/guides/planning-and-applying-changes).
 
 ### apply
 
 ```text
-forti apply <plan id>
+forti apply [plan id]
 ```
 
-Executes a stored plan once, under the profile's mode. See
+Executes a stored plan once, under the profile's mode. At a terminal, without an id, it takes the
+newest plan waiting to be applied, shows it and asks first. See
 [Applying a plan](/guides/planning-and-applying-changes#applying-a-plan).
 
 | Profile mode | `forti apply` |
 |---|---|
-| `read-only` | refused (`policy_denied`) |
-| `guarded` | needs `forti plan approve <id>` first |
+| `read-only` | refused (`policy_denied`); allow changes with `forti profile mode NAME guarded` |
+| `guarded` | at a terminal, shows the plan and asks for the approval; otherwise needs `forti plan approve <id>` first |
 | `autonomous` | runs without approval |
+
+### rollback
+
+```text
+forti rollback [plan id]
+```
+
+Applies the rollback plan of the profile's last apply, or of the named plan (or the named rollback
+plan), after saying what it undoes. The same mode rules as `apply`, including the inline approval at
+a terminal. See [Rollback plans](/guides/planning-and-applying-changes#rollback-plans).
 
 ## Integrations
 

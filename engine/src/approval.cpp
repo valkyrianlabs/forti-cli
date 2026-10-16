@@ -53,7 +53,9 @@ namespace forti::engine {
             event["mode"] = to_string(profile.mode);
             if (profile.mode == Mode::read_only)
                 throw Failure(Code::policy_denied,
-                              std::format("profile {} is read-only: an approval would not allow apply", profile.name),
+                              std::format("profile {0} is read-only: an approval would not allow apply. To allow changes, "
+                                          "run `forti profile mode {0} guarded` first",
+                                          profile.name),
                               {{"plan_id", plan_id}, {"reason", "read_only"}, {"profile", profile.name}});
             if (profile.mode == Mode::autonomous) {
                 event["outcome"] = "not_required";

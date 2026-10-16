@@ -102,11 +102,20 @@ namespace forti::engine::detail {
             }
         }
 
-        [[noreturn]] void unknown_attributes(const std::vector<std::string>& unknown, std::string_view path) {
+        // `known`: every attribute of the resource, for "did you mean" suggestions.
+        [[noreturn]] void unknown_attributes(const std::vector<std::string>& unknown, std::string_view path,
+                                             const std::set<std::string, std::less<>>& known) {
             std::string list;
-            for (const auto& name: unknown) list += (list.empty() ? "" : ", ") + name;
-            throw Failure(Code::validation, std::format("{}: unknown attribute(s): {}", path, list),
-                          {{"unknown", unknown}, {"resource", path}});
+            std::vector<std::string> suggestions;
+            for (const auto& name: unknown) {
+                list += (list.empty() ? "" : ", ") + name;
+                if (auto close = closest_name(name, known); !close.empty()) suggestions.push_back(close);
+            }
+            std::string message = std::format("{}: unknown attribute(s): {}", path, list);
+            if (!suggestions.empty()) message += std::format(" (did you mean {}?)", suggestions.front());
+            nlohmann::json details = {{"unknown", unknown}, {"resource", path}};
+            if (!suggestions.empty()) details["suggestions"] = suggestions;
+            throw Failure(Code::validation, message, details);
         }
 
         template<typename T>
@@ -131,7 +140,7 @@ namespace forti::engine::detail {
             std::vector<std::string> unknown;
             for (auto it = object.begin(); it != object.end(); ++it)
                 if (!known.contains(it.key())) unknown.push_back(it.key());
-            if (!unknown.empty()) unknown_attributes(unknown, path);
+            if (!unknown.empty()) unknown_attributes(unknown, path, known);
             if (!read_only.empty())
                 throw Failure(Code::validation, std::string(path) + ": read-only attribute(s) cannot be written",
                               {{"read_only", read_only}, {"resource", path}});
@@ -147,10 +156,11 @@ namespace forti::engine::detail {
             } catch (const std::exception& error) {
                 throw Failure(Code::api, std::format("{}: the current object does not decode: {}", path, error.what()));
             }
-            std::set<std::string, std::less<>> seen;
+            std::set<std::string, std::less<>> seen, known;
             std::vector<std::string> read_only;
             T::visit(object, [&](std::string_view key, auto& field, std::string_view, unsigned flags) {
                 using V = typename std::decay_t<decltype(field)>::value_type;
+                known.emplace(key);
                 auto it = changes.set.find(key);
                 bool clear = std::ranges::find(changes.clear, key) != changes.clear.end();
                 if (it == changes.set.end() && !clear) return;
@@ -172,7 +182,7 @@ namespace forti::engine::detail {
                 if (!seen.contains(it.key())) unknown.push_back(it.key());
             for (const auto& name: changes.clear)
                 if (!seen.contains(name)) unknown.push_back(name);
-            if (!unknown.empty()) unknown_attributes(unknown, path);
+            if (!unknown.empty()) unknown_attributes(unknown, path, known);
             if (!read_only.empty())
                 throw Failure(Code::validation, std::string(path) + ": read-only attribute(s) cannot be written",
                               {{"read_only", read_only}, {"resource", path}});
