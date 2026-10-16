@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <format>
+#include <regex>
 #include <fstream>
 #include <sstream>
 
@@ -73,10 +74,11 @@ TEST_F(CompletionCli, OptionsAndValuedOptions) {
 TEST_F(CompletionCli, SubcommandsAreInTheHelp) {
     for (const auto& command: cli::commands()) {
         std::string help(command.help);
-        for (const auto& sub: complete({"subcommands", std::string(command.name)}))
-            EXPECT_TRUE(help.find(std::format("forti {} {}", command.name, sub)) != std::string::npos ||
-                        help.find(std::format("forti {} [{}]", command.name, sub)) != std::string::npos)
-                    << command.name << " " << sub;
+        for (const auto& sub: complete({"subcommands", std::string(command.name)})) {
+            // "forti plan set", "forti cert [create]", or one of "forti plan set|create|delete".
+            std::regex usage(std::format(R"(forti {} \[?([a-z-]+\|)*{}(\|[a-z-]+)*\b)", command.name, sub));
+            EXPECT_TRUE(std::regex_search(help, usage)) << command.name << " " << sub;
+        }
     }
     EXPECT_EQ(complete({"subcommands", "completion"}), (std::vector<std::string>{"bash", "zsh", "fish"}));
     EXPECT_TRUE(has(complete({"subcommands", "plan"}), "approve"));
