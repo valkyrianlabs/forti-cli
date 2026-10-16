@@ -6,7 +6,7 @@ implementation). The ecosystem architecture and contracts are in `../.claude/con
 in the parent workspace. A copy of the engine contract is in `.claude/context/engine.md`.
 
 ```sh
-ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api   # SDK co-development (else the wrap downloads v1.1.0)
+ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api   # SDK co-development (else the wrap downloads v1.1.1)
 meson setup build/dev -Dtests=enabled --buildtype=debugoptimized
 meson compile -C build/dev   # about 12 s; no TU needs more than ~1.2 GB (GCC)
 meson test -C build/dev --suite unit   # network-free; what CI runs
