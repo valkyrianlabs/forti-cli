@@ -93,6 +93,19 @@ namespace forti::cli::certs {
             return pattern;
         }
 
+        // The CN of a subject as openssl prints it: "O=forti, CN=x" (OpenSSL 3 with -nameopt
+        // compat), "O = forti, CN = x" (OpenSSL 3's default) or "/O=forti/CN=x" (LibreSSL).
+        std::optional<std::string> common_name(std::string_view subject) {
+            for (std::size_t at = subject.find("CN"); at != std::string_view::npos; at = subject.find("CN", at + 2)) {
+                if (at > 0 && subject[at - 1] != '/' && subject[at - 1] != ' ' && subject[at - 1] != ',') continue;
+                std::size_t equals = subject.find_first_not_of(' ', at + 2);
+                if (equals == std::string_view::npos || subject[equals] != '=') continue;
+                std::string_view rest = subject.substr(equals + 1);
+                return trim(std::string(rest.substr(0, rest.find_first_of(",/"))));
+            }
+            return std::nullopt;
+        }
+
         // subject, cn, expiry and SHA-256 fingerprint of a PEM certificate. OpenSSL 3 prints
         // "subject=O=forti, CN=x" and "sha256 Fingerprint=…", LibreSSL "subject= /O=forti/CN=x" and
         // "SHA256 Fingerprint=…"; both print "notAfter=Oct 14 19:48:33 2029 GMT".
@@ -110,11 +123,7 @@ namespace forti::cli::certs {
                 std::string key = line.substr(0, equals), value = trim(line.substr(equals + 1));
                 if (key == "subject") {
                     info["subject"] = value;
-                    if (auto at = value.find("CN="); at != std::string::npos) {
-                        std::string cn = value.substr(at + 3);
-                        cn = cn.substr(0, cn.find_first_of(",/"));
-                        info["cn"] = trim(cn);
-                    }
+                    if (auto cn = common_name(value)) info["cn"] = *cn;
                 } else if (key == "notAfter") {
                     info["not_after"] = value;
                     std::tm tm{};

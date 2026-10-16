@@ -232,7 +232,7 @@ namespace {
     // put alone on PATH.
     std::vector<fs::path> openssl_programs() {
         std::vector<fs::path> found;
-        for (const char* candidate: {"/usr/bin/openssl", "/opt/homebrew/bin/openssl", "/usr/local/bin/openssl"}) {
+        for (const char* candidate: {"/usr/bin/openssl", "/opt/homebrew/bin/openssl", "/opt/homebrew/opt/openssl@3/bin/openssl", "/usr/local/bin/openssl"}) {
             std::error_code error;
             if (fs::exists(candidate, error) && ::access(candidate, X_OK) == 0) {
                 auto real = fs::canonical(candidate, error);
