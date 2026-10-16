@@ -101,7 +101,12 @@ jobs:
           dpkg-checkbuilddeps
           jobs="$(ci/build-jobs)"   # memory-aware: every core the memory allows
           export DEB_BUILD_OPTIONS="parallel=$jobs"
-          vlr build-deb
+          # vlr buffers the build's output: show the log when it fails, or the cause stays in the workspace.
+          if ! vlr build-deb; then
+            grep -nE '\[  FAILED|: Failure|Expected|Which is|actual|exception|FAIL |error:' release/build-deb.log | head -80 || true
+            tail -120 release/build-deb.log
+            exit 1
+          fi
           vlr source-archive
           vlr homebrew formula
           vlr checksums
