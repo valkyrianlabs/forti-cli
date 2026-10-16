@@ -21,11 +21,13 @@ forti_api_dep = dependency('forti-api', version : '>=1.0.1')
 subdir('engine')
 
 if not meson.is_subproject()
+    subdir('completions')
     subdir('src')
     subdir('tests')
     install_man('doc/forti.1')
 elif get_option('subproject_cli')
     # forti-mcp's integration tests drive `forti` too (approvals, shared state). Built, never installed.
+    subdir('completions')
     subdir('src')
 endif
 

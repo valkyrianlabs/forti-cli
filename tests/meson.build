@@ -34,6 +34,8 @@ if gtest_dep.found()
                            'unit/test_cli_security.cpp',
                            'unit/test_install_cli.cpp',
                            'unit/test_plan_cli.cpp',
+                           'unit/test_history_cli.cpp',
+                           'unit/test_completion_cli.cpp',
                            include_directories : include_directories('support'),
                            dependencies : [forti_cli_dep, gtest_dep],
                            implicit_include_directories : false),
@@ -64,6 +66,9 @@ if python3.found() and not get_option('tests').disabled()
          env : integration_env,
          depends : forti_exe, suite : 'integration', timeout : 300)
     test('mcp-install-e2e', python3, args : [files('integration/test_mcp_install.py')],
+         env : integration_env,
+         depends : forti_exe, suite : 'integration', timeout : 120)
+    test('completion-e2e', python3, args : [files('integration/test_completion.py')],
          env : integration_env,
          depends : forti_exe, suite : 'integration', timeout : 120)
     test('no-second-http-stack', python3,

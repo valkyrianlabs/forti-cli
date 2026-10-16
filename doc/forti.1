@@ -1,4 +1,4 @@
-.Dd October 15, 2026
+.Dd October 16, 2026
 .Dt FORTI 1
 .Os
 .Sh NAME
@@ -30,6 +30,15 @@
 .Cm get
 .Ar resource
 .Op Ar key
+.Nm
+.Cm history
+.Op Fl p Ar name
+.Op Fl n Ar count
+.Op Fl -all
+.Op Fl -verbose
+.Nm
+.Cm completion
+.Cm bash | zsh | fish
 .Sh DESCRIPTION
 .Nm
 reads and changes FortiGate configuration through the FortiOS REST API.
@@ -318,6 +327,27 @@ In guarded mode, at a terminal, it shows the plan and asks for the approval.
 .It Cm rollback Op Ar id
 Apply the rollback plan of the last applied plan (or of
 .Ar id ) .
+.It Cm history Oo Fl p Ar name Oc Oo Fl n Ar count Oc Oo Fl -all Oc Op Fl -verbose
+What was applied, newest last, from the audit log: the time, the profile, the result, the plan,
+the approval and what changed.
+It reads only
+.Pa audit.jsonl ,
+never the configuration or a device.
+.Fl p
+shows one profile's entries,
+.Fl n
+the last
+.Ar count
+(default 20; 0: all).
+Attempts refused before anything changed (read-only profile, missing approval, stale or already
+applied plan) are hidden unless
+.Fl -all .
+.Fl -verbose
+adds every operation, the approval, the error, the rollback plan and the
+.Cm rollback
+command that undoes the change.
+.Fl -json
+prints the events as recorded.
 .El
 .Pp
 A plan
@@ -348,6 +378,25 @@ check, fix and remove the registrations.
 .Cm install mcp
 is the same as
 .Cm mcp install .
+.Pp
+.Cm completion bash | zsh | fish
+prints the shell completion script.
+The packages install it; otherwise add
+.Dl source <(forti completion bash)
+to
+.Pa ~/.bashrc ,
+.Dl source <(forti completion zsh)
+to
+.Pa ~/.zshrc
+after
+.Ic compinit ,
+or save
+.Ic forti completion fish
+as
+.Pa ~/.config/fish/completions/forti.fish .
+On each Tab the script runs
+.Nm ,
+which reads only profile names and the plans directory.
 .Sh OPERATING MODES
 The FortiOS account's privileges are the primary authorization boundary.
 A profile's mode is the operator's policy on top of it:
@@ -410,7 +459,8 @@ Contains no secrets.
 The file secret store: one 0600 file per secret.
 .It Pa ~/.forti/state/
 Plans, approvals, pre-change backups and
-.Pa audit.jsonl .
+.Pa audit.jsonl
+.Pq Cm history .
 .It Pa ~/.forti/certs/ Ns Ar name Ns /
 Client certificates
 .Pq Cm cert list .

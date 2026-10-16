@@ -40,5 +40,12 @@ class FortiCli < Formula
     output = JSON.parse(shell_output("#{bin}/forti --json discover firewall/address"))
     assert output["ok"]
     assert_includes output["data"]["fields"].map { |field| field["name"] }, "subnet"
+
+    # Shell completion: meson installs it under share/, which Homebrew links into its prefix (bash
+    # through bash-completion@2, zsh through site-functions, fish through vendor_completions.d).
+    assert_path_exists share/"bash-completion/completions/forti"
+    assert_path_exists zsh_completion/"_forti"
+    assert_path_exists fish_completion/"forti.fish"
+    assert_equal "get\n", shell_output("#{bin}/forti __complete commands ge")
   end
 end
