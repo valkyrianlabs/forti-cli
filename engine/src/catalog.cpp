@@ -10,9 +10,6 @@
 #include <format>
 #include <utility>
 
-#ifndef FORTI_SHARDS
-#error "FORTI_SHARDS must be defined"
-#endif
 
 namespace forti::engine {
 
@@ -45,7 +42,7 @@ namespace forti::engine {
         return view;
     }
 
-    std::vector<FieldInfo> Resource::fields() const { return ops ? ops->fields() : std::vector<FieldInfo>{}; }
+    std::vector<FieldInfo> Resource::fields() const { return detail::fields(*this); }
 
     const FieldInfo* Resource::field(std::string_view field_name, const std::vector<FieldInfo>& list) const {
         auto it = std::ranges::find(list, field_name, &FieldInfo::name);
@@ -60,11 +57,6 @@ namespace forti::engine {
     }
 
     namespace {
-
-        template<unsigned... I>
-        void collect_all(std::vector<Resource>& out, std::integer_sequence<unsigned, I...>) {
-            (detail::collect<I>(out), ...);
-        }
 
         std::string lower(std::string_view text) {
             std::string out(text);
@@ -159,7 +151,7 @@ namespace forti::engine {
 
     Catalog::Catalog() {
         resources_.reserve(600);
-        collect_all(resources_, std::make_integer_sequence<unsigned, FORTI_SHARDS>{});
+        resources_ = detail::collect();
         std::ranges::sort(resources_, {}, &Resource::path);
     }
 

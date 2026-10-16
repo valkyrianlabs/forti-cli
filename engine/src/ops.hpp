@@ -1,7 +1,8 @@
 //
-// Engine-internal: the typed operations behind a catalog Resource. One Ops table per generated SDK
-// endpoint, instantiated in catalog_shard.cpp; everything here forwards to forti-api (from_json,
-// Field<T>, Table/Singleton, to_json). Nothing builds requests or knows FortiOS semantics itself.
+// Engine-internal: the operations behind a catalog Resource, driven by forti-api's runtime schema
+// (fortiapi::schema: every generated endpoint as data). Validation, request bodies and paths all come
+// from forti-api; nothing here builds requests or knows FortiOS semantics itself. Compiled once, with
+// no generated model instantiated (forti-api gap G3, resolved by the schema tables).
 //
 
 #ifndef FORTI_ENGINE_OPS_HPP
@@ -25,40 +26,31 @@ namespace forti::engine::detail {
         std::vector<std::string> clear;
     };
 
-    struct Ops {
-        std::vector<FieldInfo> (*fields)();
+    // Every catalog entry: the generated endpoints, sorted by path.
+    std::vector<Resource> collect();
 
-        // Tables and singletons only (null for monitors).
-        nlohmann::json (*schema)(fortiapi::Client&);
+    // The attributes of a typed resource (empty for a monitor whose results stay JSON).
+    std::vector<FieldInfo> fields(const Resource& resource);
 
-        // Validation + the exact body the SDK will send. Throw Failure(validation) for unknown or
-        // read-only attributes and values that do not decode as the SDK type.
-        nlohmann::json (*create_body)(const nlohmann::json& object);                         // POST
-        nlohmann::json (*update_body)(const nlohmann::json& current, const Changes& changes); // PUT
+    // Tables and singletons only.
+    nlohmann::json live_schema(const Resource& resource, fortiapi::Client& client);
 
-        // Execution through the SDK. Writes are never retried by the SDK once sent.
-        fortiapi::Reply (*create)(fortiapi::Client&, const nlohmann::json& object, const fortiapi::Query&);
-        std::optional<fortiapi::Reply> (*update)(fortiapi::Client&, const nlohmann::json& current,
-                                                 const Changes& changes, const fortiapi::Query&);
-        fortiapi::Reply (*remove)(fortiapi::Client&, const std::string& key, const fortiapi::Query&);
-    };
+    // Validation + the exact body the SDK sends. Throw Failure(validation) for unknown or read-only
+    // attributes and values that do not decode as the SDK type.
+    nlohmann::json create_body(const Resource& resource, const nlohmann::json& object);                          // POST
+    nlohmann::json update_body(const Resource& resource, const nlohmann::json& current, const Changes& changes);  // PUT
+
+    // Execution through the SDK client. Writes are never retried by the SDK once sent.
+    fortiapi::Reply create(const Resource& resource, fortiapi::Client& client, const nlohmann::json& object,
+                           const fortiapi::Query& query);
+    std::optional<fortiapi::Reply> update(const Resource& resource, fortiapi::Client& client, const nlohmann::json& current,
+                                          const Changes& changes, const fortiapi::Query& query);
+    fortiapi::Reply remove(const Resource& resource, fortiapi::Client& client, const std::string& key,
+                           const fortiapi::Query& query);
 
     // The candidate closest to a misspelt name (edit distance 1 for names up to 4 characters, else up
-    // to 2), for "did you mean" hints; empty when none is that close. Defined once, in catalog.cpp.
+    // to 2), for "did you mean" hints; empty when none is that close. Defined in catalog.cpp.
     std::string closest_name(std::string_view name, const std::set<std::string, std::less<>>& candidates);
-
-    // Collected by each shard: catalog entries for the endpoints whose path hashes to that shard.
-    template<unsigned Shard>
-    void collect(std::vector<Resource>& out);
-
-    constexpr unsigned fnv1a(std::string_view text) {
-        unsigned hash = 2166136261u;
-        for (char c: text) {
-            hash ^= static_cast<unsigned char>(c);
-            hash *= 16777619u;
-        }
-        return hash;
-    }
 
 }  // namespace forti::engine::detail
 

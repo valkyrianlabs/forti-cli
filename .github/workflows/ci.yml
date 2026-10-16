@@ -1,14 +1,14 @@
 # Pull-request validation, kept to a few minutes: exactly one unoptimized build per platform, which
-# every test suite runs against (Linux with ASan/UBSan, macOS plain), as two parallel jobs. ccache keeps the
-# engine shards between runs (ci/run-ci on the self-hosted runner, actions/cache on macOS).
+# every test suite runs against (Linux with ASan/UBSan, macOS plain), as two parallel jobs, and the
+# tests never trigger a second compile (meson test --no-rebuild). ccache keeps objects between runs
+# (ci/run-ci on the self-hosted runner, actions/cache on macOS).
 #
 # The optimized release build, the Debian package rehearsal and the Homebrew formula live in
 # package.yml: they run when packaging changes, on main and at release, not on every PR.
 # Nothing here talks to a FortiGate (AGENTS.md). Linux steps run in the disposable CI container
 # (ci/run-ci, ci/Containerfile).
 
-# Parallelism: every core the memory allows (ci/build-jobs: 2.5 GB per job, the engine shards'
-# GCC peak). ci/run-ci gives the container three quarters of the host's RAM.
+# Parallelism: every core the memory allows (ci/build-jobs: 1.2 GB per job, the largest TU's GCC peak).
 name: CI
 
 on:
@@ -59,16 +59,15 @@ jobs:
           meson --version
           ccache --version | head -1
 
-      # One build, every suite: unoptimized (mock tests do not need optimization; it only slows the
-      # engine shards), warnings are errors, and ASan/UBSan on every hand-written TU (the generated
-      # shards stay uninstrumented, engine/meson.build). The integration suite runs the real binary
-      # against the mock FortiOS over TLS.
+      # One build, every suite: unoptimized (mock tests do not need optimization), warnings are
+      # errors, ASan/UBSan throughout. The integration suite runs the real binary against the mock
+      # FortiOS over TLS.
       - name: Build (warnings are errors) and run the tests
         run: |
           meson setup build/ci -Dtests=enabled -Dforti-api:tests=disabled --buildtype=plain -Doptimization=0 -Ddebug=false \
             -Dwerror=true -Db_sanitize=address,undefined -Db_lundef=false
           meson compile -C build/ci -j "$(ci/build-jobs)"
-          UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 meson test -C build/ci --suite unit --suite integration --print-errorlogs
+          UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 meson test -C build/ci --no-rebuild --suite unit --suite integration --print-errorlogs
           ci/smoke-test.sh build/ci/src/cli/forti
           ccache --show-stats | head -5
 
@@ -81,15 +80,14 @@ jobs:
       - name: Install Homebrew packages
         run: brew install meson ninja googletest ccache
 
-      # Keyed by the SDK pin and the engine's SDK glue: a PR that touches neither restores every
-      # engine shard from the cache.
+      # Keyed by the SDK pin and the engine's SDK glue.
       - name: Compiler cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/Library/Caches/ccache
-          key: ccache-macos-${{ hashFiles('subprojects/forti-api.wrap', 'engine/src/catalog_shard.cpp', 'engine/src/ops.hpp') }}-${{ github.sha }}
+          key: ccache-macos-${{ hashFiles('subprojects/forti-api.wrap', 'engine/src/schema_ops.cpp', 'engine/src/ops.hpp') }}-${{ github.sha }}
           restore-keys: |
-            ccache-macos-${{ hashFiles('subprojects/forti-api.wrap', 'engine/src/catalog_shard.cpp', 'engine/src/ops.hpp') }}-
+            ccache-macos-${{ hashFiles('subprojects/forti-api.wrap', 'engine/src/schema_ops.cpp', 'engine/src/ops.hpp') }}-
             ccache-macos-
 
       - name: Build and run the tests
@@ -97,7 +95,7 @@ jobs:
           clang++ --version | head -1
           meson setup build -Dtests=enabled -Dforti-api:tests=disabled --buildtype=plain -Doptimization=0 -Ddebug=false -Dwerror=true
           meson compile -C build -j "$(ci/build-jobs)"
-          meson test -C build --suite unit --suite integration --print-errorlogs
+          meson test -C build --no-rebuild --suite unit --suite integration --print-errorlogs
           ci/smoke-test.sh build/src/cli/forti
           ccache --show-stats | head -5
 

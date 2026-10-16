@@ -1,6 +1,6 @@
 ---
 title: Building
-description: Build forti from source, the build options, the engine shards and the release profile.
+description: Build forti from source, the build options, the resource catalog and the release profile.
 order: 110
 status: published
 tags:
@@ -38,11 +38,11 @@ meson setup build/dev -Dtests=enabled --buildtype=plain -Doptimization=0 -Ddebug
 ### Compile
 
 ```bash
-meson compile -C build/dev -j 4
+meson compile -C build/dev
 ```
 
-Each engine shard needs about 2 GB of RAM to compile with GCC, so size `-j` to the machine's memory
-([Engine shards](#engine-shards)).
+A full build with the tests takes about 12 seconds on an Apple silicon Mac. No translation unit needs
+more than about 0.6 GB (clang) or 1.2 GB (GCC), so every core can compile at once.
 
 ### Run
 
@@ -85,24 +85,20 @@ forti-engine is a static library linked into both `forti` and `forti-mcp`. It is
 has no API promise outside these two repositories.
 :::
 
-## Engine shards
+## The resource catalog
 
-Instantiating the typed SDK operations for every endpoint in one translation unit takes minutes and
-several GB of memory. The engine therefore compiles `engine/src/catalog_shard.cpp` once per shard,
-and each copy instantiates only its share of the endpoints. The registry stays the single source;
-shards only filter it.
+The engine handles any of the 534 endpoints, chosen at run time. Instead of instantiating forti-api's
+typed models for all of them (several GB of compiler memory), it uses forti-api's runtime schema
+(`fortiapi::schema`, forti-api 1.1 and later): every endpoint and attribute as generated tables, with
+decoding, validation and request bodies that forti-api checks against the typed models. The engine
+compiles it once, in `engine/src/schema_ops.cpp`.
+
+## Build options
 
 | Option | Default | Meaning |
 |---|---|---|
-| `engine_shards` | `10` | translation units the typed endpoint operations are split across (1 to 64): more shards, less memory each and more parallelism |
 | `tests` | `auto` | build the unit and integration tests |
 | `subproject_cli` | `false` | also build (never install) `forti` when forti-cli is a subproject, for forti-mcp's integration tests |
-
-:::callout[About 2 GB of RAM per shard]{variant="warning"}
-Each shard needs about 2 GB of RAM to compile with GCC (less unoptimized, more with `-g` or
-sanitizers), so limit `-j` to what memory allows. `ci/build-jobs` prints that number for the current
-machine.
-:::
 
 ## Release profile
 
@@ -114,6 +110,5 @@ The default build type is `release`: -O3, `NDEBUG`, and on Linux `-ffunction-sec
 | Debian (`debian/rules`) | against the system `libforti-api-dev` with `--wrap-mode=nodownload`; dpkg's `-O2 -g` replaced with `-O3`; LTO off | the unit suite runs on the build |
 | Homebrew formula | `-Doptimization=3 -Dstrip=true` against the `forti-api` formula | an offline `forti --version` and `forti discover` in its test block |
 
-No LTO, no `-g` and no debug-symbol package: the generated shards make both expensive, and the
-stripped binary is what ships. Releases are cut with vl-release; `release.toml` holds the repository
+No LTO, no `-g` and no debug-symbol package: the stripped binary is what ships. Releases are cut with vl-release; `release.toml` holds the repository
 contract.

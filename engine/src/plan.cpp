@@ -1,7 +1,7 @@
 //
 // Engine::plan and Engine::apply (architecture.md, "Operating modes and mutation safety").
 //
-// plan reads, validates through the typed SDK operations (ops.hpp), and stores a digest-bound plan;
+// plan reads, validates through the SDK's runtime schema (ops.hpp), and stores a digest-bound plan;
 // it never mutates the device. apply executes a stored plan exactly once, in order, with no retries
 // after send, re-reading each object to verify it. Around that it writes a rollback plan, probes
 // management connectivity after critical-risk operations, and appends a redacted audit record.
@@ -47,7 +47,7 @@ namespace forti::engine {
         using detail::text;
         using detail::validate_vdom;
 
-        // One requested operation, validated for shape (attribute validation is the SDK's, in ops).
+        // One requested operation, validated for shape (attribute validation is the SDK's, in ops.hpp).
         struct OpRequest {
             std::string op, resource_name, key;
             json set = json::object(), object = json::object(), body = json::object();
@@ -243,7 +243,7 @@ namespace forti::engine {
                 if (current) throw Failure(Code::validation, std::format("{} {} already exists (use update)", resource.name(),
                                                                          request.key),
                                            {{"resource", resource.name()}, {"key", request.key}});
-                json body = resource.ops->create_body(request.object);
+                json body = detail::create_body(resource, request.object);
                 record["object"] = request.object;
                 record["before"] = nullptr;
                 record["before_digest"] = known ? json(detail::digest_of(nullptr)) : json(nullptr);
@@ -266,7 +266,7 @@ namespace forti::engine {
                     throw Failure(Code::validation, std::format("{}: the key attribute {} cannot be changed by an update",
                                                                 resource.name(), resource.key));
                 detail::Changes changes{request.set, request.clear};
-                json body = resource.ops->update_body(*current, changes);
+                json body = detail::update_body(resource, *current, changes);
                 json after = *current;
                 for (auto it = request.set.begin(); it != request.set.end(); ++it) {
                     json before = current->contains(it.key()) ? (*current)[it.key()] : json(nullptr);
@@ -758,9 +758,9 @@ namespace forti::engine {
                     stale("before_changed", "changed");
                 if (kind == "update") {
                     detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};
-                    if (resource.ops->update_body(*currents[i], changes) != op["wire"]["body"])
+                    if (detail::update_body(resource, *currents[i], changes) != op["wire"]["body"])
                         stale("wire_changed", "would now be written differently");
-                } else if (kind == "create" && resource.ops->create_body(op["object"]) != op["wire"]["body"]) {
+                } else if (kind == "create" && detail::create_body(resource, op["object"]) != op["wire"]["body"]) {
                     stale("wire_changed", "would now be written differently");
                 }
             }
@@ -820,7 +820,7 @@ namespace forti::engine {
                 try {
                     if (kind == "create") {
                         done.sent = true;
-                        fortiapi::Reply reply = resource.ops->create(client, op["object"], query);
+                        fortiapi::Reply reply = detail::create(resource, client, op["object"], query);
                         if (done.key.empty() && !reply.mkey.is_null())
                             done.key = reply.mkey.is_string() ? reply.mkey.get<std::string>() : reply.mkey.dump();
                         // A device-reported key is used for verification and the rollback delete.
@@ -829,10 +829,10 @@ namespace forti::engine {
                     } else if (kind == "update") {
                         detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};
                         done.sent = true;
-                        resource.ops->update(client, *currents[i], changes, query);
+                        detail::update(resource, client, *currents[i], changes, query);
                     } else if (kind == "delete") {
                         done.sent = true;
-                        resource.ops->remove(client, done.key, query);
+                        detail::remove(resource, client, done.key, query);
                     } else {
                         done.sent = true;
                         fortiapi::Monitor::post(std::string_view(resource.path).substr(8), op["body"], query, client);

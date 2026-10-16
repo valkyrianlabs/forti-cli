@@ -1,28 +1,10 @@
 # forti-engine: the command semantics shared by `forti` and `forti-mcp` (catalog, profiles,
 # discover/read/plan/apply, approvals, audit). Internal: static, never installed.
 #
-# catalog_shard.cpp instantiates the SDK's typed operations for 1/N of the registry per translation
-# unit (forti-api gap G3): one TU over all 534 endpoints needs 4-5 GB of RAM, eight need ~1.2 GB each.
+# The resource catalog and its validation come from forti-api's runtime schema (fortiapi::schema),
+# tables compiled once in schema_ops.cpp: no generated model is instantiated here.
 
 engine_inc = include_directories('include')
-shards = get_option('engine_shards')
-
-# Under sanitizers the shards stay uninstrumented and without debug info: they are the SDK's generated
-# from_json/to_json glue (forti-api's own CI runs it under ASan/UBSan), and instrumenting them made a
-# sanitizer build several times slower than a release build. Every hand-written TU stays instrumented.
-shard_args = []
-if get_option('b_sanitize') != 'none'
-    shard_args += ['-fno-sanitize=all', '-g0']
-endif
-
-shard_libs = []
-foreach k : range(shards)
-    shard_libs += static_library('forti-engine-shard@0@'.format(k), 'src/catalog_shard.cpp',
-                                 cpp_args : shard_args + ['-DFORTI_SHARD=@0@'.format(k), '-DFORTI_SHARDS=@0@'.format(shards)],
-                                 include_directories : engine_inc,
-                                 dependencies : forti_api_dep,
-                                 implicit_include_directories : false)
-endforeach
 
 engine_sources = files(
     'src/approval.cpp',
@@ -33,6 +15,7 @@ engine_sources = files(
     'src/plan_store.cpp',
     'src/policy.cpp',
     'src/profile.cpp',
+    'src/schema_ops.cpp',
     'src/secrets.cpp',
     'src/sha256.cpp',
 )
@@ -44,10 +27,8 @@ if host_machine.system() == 'darwin'
 endif
 
 engine_lib = static_library('forti-engine', engine_sources,
-                            cpp_args : ['-DFORTI_SHARDS=@0@'.format(shards)],
                             include_directories : engine_inc,
                             dependencies : engine_deps,
-                            link_with : shard_libs,
                             implicit_include_directories : false)
 
 forti_engine_dep = declare_dependency(include_directories : engine_inc,

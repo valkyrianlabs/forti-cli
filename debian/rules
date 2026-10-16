@@ -9,10 +9,9 @@
 # (b_ndebug=if-release does not fire for buildtype=plain). meson.build adds -ffunction-sections
 # -fdata-sections -Wl,--gc-sections for non-debug ELF builds. debhelper strips it; no -dbgsym package ships.
 
-# Ubuntu's dpkg defaults add -flto=auto -ffat-lto-objects and -g. The engine's generated shards make
-# both expensive (fat LTO compiles every shard twice and re-optimizes the whole program at link; -g
-# roughly doubles shard memory), and the binary is stripped with no debug package shipped, so both
-# are off: -O3 as built is what is tested.
+# Ubuntu's dpkg defaults add -flto=auto -ffat-lto-objects and -g. Neither is needed: fat LTO compiles
+# everything twice and re-optimizes the whole program at link, and the binary is stripped with no
+# debug package shipped, so both are off: -O3 as built is what is tested.
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=-lto
 export DEB_CXXFLAGS_MAINT_STRIP = -O2 -g
 export DEB_CXXFLAGS_MAINT_APPEND = -O3

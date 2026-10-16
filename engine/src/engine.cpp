@@ -201,10 +201,10 @@ namespace forti::engine {
 
             json live = nullptr;
             if (flag(request, "live")) {
-                if (!resource.ops || !resource.ops->schema)
+                if (!resource.typed() || !resource.writable())
                     throw Failure(Code::usage, std::format("{}: no live schema (monitor endpoints have none)", resource.name()));
                 const Profile& profile = this->profile(text(request, "profile"));
-                live = resource.ops->schema(client(profile));
+                live = detail::live_schema(resource, client(profile));
                 detail::check_reply_depth(live, resource.name());
             }
             auto live_child = [&](std::string_view name) -> json {

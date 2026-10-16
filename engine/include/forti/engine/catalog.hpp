@@ -19,6 +19,10 @@
 #include <string_view>
 #include <vector>
 
+namespace fortiapi::schema {
+    struct Endpoint;   // forti_api/schema_types.hpp
+}
+
 namespace forti::engine {
 
     // The FortiOS version forti-api's models were generated from (forti-api gap G8: not exported).
@@ -39,9 +43,6 @@ namespace forti::engine {
         [[nodiscard]] nlohmann::json to_json(bool recursive = true) const;
     };
 
-    namespace detail {
-        struct Ops;   // typed operations (engine-internal, engine/src/ops.hpp)
-    }
 
     struct Resource {
         std::string path;    // SDK API path: "cmdb/firewall/address", "monitor/system/status"
@@ -49,11 +50,11 @@ namespace forti::engine {
         std::string key;     // tables: the key attribute ("name", "policyid")
         bool numeric_key = false;
         bool list = false;   // monitor: `results` is an array
-        const detail::Ops* ops = nullptr;   // null: untyped monitor path
+        const fortiapi::schema::Endpoint* schema = nullptr;   // forti-api's description; null: untyped monitor path
 
         // User-facing name: path without "cmdb/".
         [[nodiscard]] std::string_view name() const;
-        [[nodiscard]] bool typed() const { return ops != nullptr; }
+        [[nodiscard]] bool typed() const { return schema != nullptr; }
         [[nodiscard]] bool writable() const { return kind != Kind::monitor; }
 
         // Top-level attributes (empty for untyped monitors).

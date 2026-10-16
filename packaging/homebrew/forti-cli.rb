@@ -28,9 +28,7 @@ class FortiCli < Formula
     # strip=true installs the binary without its symbol table (24 MB -> 12 MB).
     # The tests need GoogleTest and run in CI; the `test do` block exercises the installed binary.
     system "meson", "setup", "build", "-Dtests=disabled", "-Doptimization=3", "-Dstrip=true", *std_meson_args
-    # Each engine shard translation unit needs about 2 GB of RAM: cap the jobs so an 8 GB Mac
-    # does not swap.
-    system "meson", "compile", "-C", "build", "--jobs", [ENV.make_jobs, 4].min.to_s
+    system "meson", "compile", "-C", "build"
     system "meson", "install", "-C", "build"
   end
 

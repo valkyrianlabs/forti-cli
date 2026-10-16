@@ -1,6 +1,4 @@
 option('tests', type : 'feature', value : 'auto',
        description : 'Build the network-free unit and integration tests (GoogleTest)')
-option('engine_shards', type : 'integer', min : 1, max : 64, value : 10,
-       description : 'Translation units the typed endpoint operations are split across (compile memory vs parallelism)')
 option('subproject_cli', type : 'boolean', value : false,
        description : 'Also build (never install) the forti executable when this is a subproject (forti-mcp integration tests)')

@@ -68,7 +68,7 @@ header-only forti-api SDK comes from pkg-config or the Meson wrap.
 
 ```sh
 meson setup build --buildtype=release
-ninja -C build                      # each engine shard needs ~1.2 GB of RAM; use -j to limit
+ninja -C build                      # about 12 s on an Apple silicon Mac
 meson install -C build              # installs forti and its man page under the prefix
 ```
 

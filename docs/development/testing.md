@@ -82,11 +82,10 @@ which every suite then runs against.
 
 | Job | Build | Runs |
 |---|---|---|
-| Linux (Ubuntu 24.04, GCC 13) | `-O0`, `-Dwerror=true`, AddressSanitizer and UndefinedBehaviorSanitizer on the hand-written code (the generated shards stay uninstrumented) | `pmdocs validate` of this docs package, the unit and integration suites, `ci/smoke-test.sh` |
+| Linux (Ubuntu 24.04, GCC 13) | `-O0`, `-Dwerror=true`, AddressSanitizer and UndefinedBehaviorSanitizer | `pmdocs validate` of this docs package, the unit and integration suites, `ci/smoke-test.sh` |
 | macOS (Apple clang) | `-O0`, `-Dwerror=true` | the unit and integration suites, `ci/smoke-test.sh` |
 
-The mock tests do not need optimization, and an optimized build only slows the engine shards; ccache
-keeps the shards between runs. Linux jobs run in a disposable, rootless Podman container
+The mock tests do not need optimization, so CI does not spend time on it. Linux jobs run in a disposable, rootless Podman container
 (`ci/run-ci`, `ci/Containerfile`), with as many compile jobs as memory allows (`ci/build-jobs`).
 
 The optimized build is tested where it is made: the release workflow and the manual packaging

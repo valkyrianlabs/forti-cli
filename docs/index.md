@@ -189,7 +189,7 @@ What is stored where, redaction, TLS, and what modes do and do not stop.
 }
 
 :::card[Building]{href="/development/building"}
-Build options, the forti-api SDK, engine shards and the release profile.
+Build options, the forti-api SDK, the resource catalog and the release profile.
 :::
 
 :::card[Testing]{href="/development/testing"}

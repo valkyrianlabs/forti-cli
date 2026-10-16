@@ -76,10 +76,6 @@ The default build type is `release` (-O3). `--skip-subprojects` keeps `meson ins
 installing the SDK headers when they came from the wrap. See [Building](/development/building) for
 the details.
 
-:::callout[About 2 GB of RAM per compile job]{variant="warning"}
-The typed endpoint operations are split across ten translation units ("engine shards"), each
-needing about 2 GB of RAM to compile, so limit the jobs (`-j`) on a small machine.
-:::
 :::
 
 :::
@@ -121,7 +117,7 @@ Every `forti configure` option, credential sources and TLS.
 :::
 
 :::card[Building]{href="/development/building"}
-Build options, engine shards and the release profile.
+Build options, the resource catalog and the release profile.
 :::
 
 :::
