@@ -1,6 +1,6 @@
 ---
 title: Planning and applying changes
-description: Stored, digest-bound plans; read-only, guarded and autonomous modes; verification, rollback plans, critical backups and their limits.
+description: Stored, digest-bound plans; read-only, guarded and autonomous modes; approving and applying in one step, verification, forti rollback, critical backups and their limits.
 order: 50
 status: published
 tags:
@@ -11,7 +11,8 @@ tags:
 
 Every change goes through two steps. `forti plan` reads the device, validates the change and stores
 it as a plan; it never changes the device. `forti apply <id>` executes a stored plan once. Between
-the two, you (or a person you trust) read exactly what will be sent.
+the two, you (or a person you trust) read exactly what will be sent. At a terminal the two steps can
+be one command (`--apply`), and `forti rollback` undoes the last apply.
 
 :::toc[On this page]{depth="3" theme="compact"}
 :::
@@ -22,7 +23,7 @@ The convenience forms plan one operation:
 
 ```text
 forti plan set <resource> [key] attr=value... [--clear attr]
-forti plan create <resource> --object JSON|@file
+forti plan create <resource> attr=value... | --object JSON|@file
 forti plan delete <resource> <key>
 forti plan action <monitor/path> [--body JSON|@file]
 ```
@@ -30,6 +31,7 @@ forti plan action <monitor/path> [--body JSON|@file]
 ```sh
 forti plan set firewall/address LAN comment="office LAN" --clear color
 forti plan set system/global hostname=fw-lab                   # a singleton takes no key
+forti plan create firewall/address name=web subnet="192.0.2.10 255.255.255.255"
 forti plan create firewall/address --object '{"name":"web","subnet":"192.0.2.10 255.255.255.255"}'
 forti plan delete firewall/address web
 forti plan action monitor/system/external-resource/dynamic       # --body defaults to {}
@@ -38,7 +40,13 @@ forti plan action monitor/system/external-resource/dynamic       # --body defaul
 `attr=value` is JSON when the value parses as JSON (a number, boolean, array, object, `null` or a
 `"quoted"` string), else literal text: `status=disable` and `subnet=192.0.2.0/24` are text,
 `color=3` is a number and `name='"123"'` is the string `123`. `--clear attr` (repeatable) resets an
-attribute to its default. `@file` reads JSON from a file, `@-` from standard input.
+attribute to its default. `@file` reads JSON from a file, `@-` from standard input. `plan create`
+takes the new object as `attr=value` pairs, as `--object`, or both (the pairs win). A misspelt
+attribute is refused with a suggestion: `unknown attribute(s): colour (did you mean color?)`.
+
+Add `--apply` to any of these (or to `--file`) to apply the plan in the same command, as the profile's
+mode allows: autonomous applies it, guarded asks for your approval at a terminal (and without one
+stops at the approval, as `forti apply` does), read-only refuses.
 
 ### Plan files
 
@@ -113,12 +121,13 @@ Device fw01  fw01.example.net:443  serial FGT60F...  v7.4.8
      color    3 → 0  (cleared to default)
      PUT cmdb/firewall/address/LAN {"color":0,"comment":"office LAN"}
 
-digest 4c1f...
 mode   guarded
-note   guarded mode: a human must run `forti plan approve 20261015-142233-a1b2c3` before apply
-approve  forti plan approve 20261015-142233-a1b2c3
-apply    forti apply 20261015-142233-a1b2c3
+next   forti apply 20261015-142233-a1b2c3  (shows the plan and asks for your approval)
+       without a terminal: forti plan approve 20261015-142233-a1b2c3, then the same apply
 ```
+
+`--verbose` adds the plan's digest; `--json` always carries it. For a read-only profile, the last line
+says how to allow changes instead (`forti profile mode fw01 guarded`).
 
 The plan is stored as `~/.forti/state/plans/<id>.json` (mode 0600). It records the device identity (profile,
 host, port, VDOM, serial number, FortiOS version), and for each operation the before-state and its
@@ -136,6 +145,19 @@ them; that is why it is owner-only.
 forti plan list                      # stored plans, newest first, with their state
 forti plan show <id>                 # the plan, its before/after, approval and applied state
 ```
+
+### Naming a plan
+
+Wherever a command takes a plan id, it also takes:
+
+| You type | Plan |
+|---|---|
+| `20261015-142233-a1b2c3` | that plan |
+| `a1b2c3`, `a1b`, `20261015-1422` | the one plan whose id, or whose last part, starts with it. Several matches are listed, and nothing runs |
+| `latest` | the newest plan of the profile (rollback plans aside) |
+| nothing, at a terminal | the newest plan of the profile waiting to be applied. forti names it and shows it before acting |
+
+Without a terminal (scripts, agents' shell tools), a plan must be named: the id, a prefix or `latest`.
 
 | `plan list` state | Meaning |
 |---|---|
@@ -157,21 +179,28 @@ cannot be changed through forti-mcp.
 
 | Mode | Plan | Apply |
 |---|---|---|
-| `read-only` (default) | yes: preview and validation are reads | refused: `policy_denied` |
-| `guarded` | yes | only after a person approves that exact plan: `forti plan approve <id>` |
+| `read-only` (default) | yes: preview and validation are reads | refused: `policy_denied`. Allow changes with `forti profile mode NAME guarded` |
+| `guarded` | yes | only after a person approves that exact plan: inline at a terminal, or `forti plan approve <id>` |
 | `autonomous` | yes | without interactive approval; every safeguard below still applies |
 
 ### Approving a plan (guarded)
 
+At a terminal, `forti apply` does it in one step: it shows the plan and asks
+`Approve and apply plan <id>? [y/N]`. A yes records the approval (exactly as `forti plan approve`
+does) and applies.
+
 ```sh
-forti plan approve <id>
+forti apply                  # the newest plan waiting to be applied: shown, approved, applied
+forti plan approve <id>      # approve only; at a terminal it then asks "Apply now? [Y/n]"
 ```
 
-At a terminal, `approve` prints the plan and asks `[y/N]`; `--yes`, `--json`, or standard output
-that is not a terminal skip the question. The approval is written to `~/.forti/state/approvals/<id>.json`:
-it names the plan's digest, is recorded as `cli:$USER`, expires after **24 hours**, and is used up by
-the apply it allows. Approving a plan of a read-only profile, or one already applied, is refused
-(`policy_denied`); for an autonomous profile nothing is written and forti says no approval is needed.
+`approve` prints the plan and asks `[y/N]`; `--yes`, `--json`, or standard output that is not a
+terminal skip the question (and the offer to apply). The approval is written to
+`~/.forti/state/approvals/<id>.json`: it names the plan's digest, is recorded as `cli:$USER`, expires
+after **24 hours**, and is used up by the apply it allows. Approving a plan of a read-only profile, or
+one already applied, is refused (`policy_denied`); for an autonomous profile nothing is written and
+forti says no approval is needed. Without a terminal, `forti apply` never approves: it stops with
+`approval_required` and the `forti plan approve <id>` command.
 
 Approval exists only in the CLI. forti-mcp never writes approvals: in guarded mode its apply tool
 answers `approval_required` with the `forti plan approve <id>` command for the person to run.
@@ -186,6 +215,12 @@ commands as you can approve a plan too. See
 
 ```sh
 forti apply <id>
+```
+
+```text
+Applied plan 20261015-142233-a1b2c3: 1 change applied and verified.
+1. update firewall/address "LAN"  verified
+undo      forti rollback 20261015-142233-a1b2c3  (rollback plan 20261015-142240-d4e5f6)
 ```
 
 Apply takes only the plan id; the operations come from the stored plan. In order, it:
@@ -237,9 +272,19 @@ reverse order, built from the recorded before-states.
 | delete | re-creating the object from its writable attributes |
 | action | nothing: monitor actions cannot be rolled back; the record lists them under `rollback.skipped` |
 
-The rollback plan is an ordinary stored plan (`kind: rollback`, `rollback_of: <id>`). Review it with
-`forti plan show` and run it with `forti apply <rollback id>`, under the same mode rules: a guarded
-profile needs an approval for it too. It is checked for drift like any plan.
+The rollback plan is an ordinary stored plan (`kind: rollback`, `rollback_of: <id>`). `forti rollback`
+applies it:
+
+```sh
+forti rollback               # undo the profile's last apply
+forti rollback <plan id>     # undo that plan (or apply that rollback plan)
+```
+
+It first says what it undoes (`Rolling back plan <id>: ...`), then applies under the same mode rules
+as `forti apply`: a guarded profile needs the approval (asked inline at a terminal), a read-only one
+refuses. The rollback is checked for drift like any plan, and it writes a rollback plan of its own,
+so a second `forti rollback` re-does the change. `forti plan show <rollback id>` reviews it first;
+`forti apply <rollback id>` works too.
 
 ### Configuration backups before critical plans
 

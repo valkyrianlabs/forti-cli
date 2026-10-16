@@ -13,6 +13,7 @@
 #include <forti_api/endpoint.hpp>
 
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,10 @@ namespace forti::engine::detail {
                                                  const Changes& changes, const fortiapi::Query&);
         fortiapi::Reply (*remove)(fortiapi::Client&, const std::string& key, const fortiapi::Query&);
     };
+
+    // The candidate closest to a misspelt name (edit distance 1 for names up to 4 characters, else up
+    // to 2), for "did you mean" hints; empty when none is that close. Defined once, in catalog.cpp.
+    std::string closest_name(std::string_view name, const std::set<std::string, std::less<>>& candidates);
 
     // Collected by each shard: catalog entries for the endpoints whose path hashes to that shard.
     template<unsigned Shard>

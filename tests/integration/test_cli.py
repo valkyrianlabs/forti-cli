@@ -370,6 +370,61 @@ class Guarded(CliTest):
         self.assertEqual(self.writes(), [])
 
 
+class GuardedAtTerminal(CliTest):
+    """A person at a terminal: plans named implicitly, the approval asked inline, rollback."""
+
+    mode = "guarded"
+
+    def terminal(self, *args: str) -> Terminal:
+        return Terminal([FORTI, *args], self.sb.env)
+
+    def approvals(self) -> list:  # type: ignore[type-arg]
+        return [e for e in self.sb.audit() if e.get("event") == "approve" and e.get("outcome") == "approved"]
+
+    def test_apply_without_an_id_shows_the_plan_and_asks_for_the_approval(self) -> None:
+        plan = self.plan(create_address())["data"]
+        term = self.terminal("apply")
+        shown = term.answer(f"Approve and apply plan {plan['id']}? [y/N] ", "y")
+        self.assertIn("create firewall/address", shown)
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn("1 change applied and verified.", term.text)
+        self.assertIn("web", self.mock.table("firewall/address"))
+        self.assertEqual([e["plan_id"] for e in self.approvals()], [plan["id"]])
+        self.assertTrue(self.approvals()[0]["approved_by"].startswith("cli:"))
+
+    def test_declining_applies_nothing(self) -> None:
+        plan = self.plan(create_address())["data"]
+        term = self.terminal("apply", plan["id"][-6:])
+        term.answer("? [y/N] ", "")
+        self.assertEqual(term.finish(), 7, term.text)
+        self.assertIn("not approved", term.text)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.approvals(), [])
+
+    def test_approve_then_apply_now(self) -> None:
+        plan = self.plan(create_address())["data"]
+        term = self.terminal("plan", "approve")
+        term.answer(f"Approve plan {plan['id']}? [y/N] ", "y")
+        term.answer("Apply now? [Y/n] ", "")
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn("1 change applied and verified.", term.text)
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_plan_apply_flag_and_rollback(self) -> None:
+        term = self.terminal("plan", "create", "firewall/address", "name=web", "subnet=192.0.2.10 255.255.255.255", "--apply")
+        term.answer("? [y/N] ", "y")
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn("web", self.mock.table("firewall/address"))
+
+        # forti rollback says what it undoes, asks for the approval, and deletes the object again.
+        term = self.terminal("rollback")
+        before = term.expect("Approve and apply rollback plan ")
+        self.assertIn("Rolling back plan ", before)
+        term.answer("? [y/N] ", "y")
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertNotIn("web", self.mock.table("firewall/address"))
+
+
 class Autonomous(CliTest):
     mode = "autonomous"
 

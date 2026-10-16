@@ -159,6 +159,23 @@ namespace forti::engine {
         return out;
     }
 
+    namespace detail {
+
+        std::string closest_name(std::string_view name, const std::set<std::string, std::less<>>& candidates) {
+            std::size_t limit = name.size() <= 4 ? 1 : 2, best = limit + 1;
+            std::string found;
+            for (const auto& candidate: candidates) {
+                std::size_t distance = edit_distance(name, candidate);
+                if (distance < best) {
+                    best = distance;
+                    found = candidate;
+                }
+            }
+            return best <= limit ? found : std::string();
+        }
+
+    }  // namespace detail
+
     std::vector<std::string> Catalog::suggest(std::string_view name, std::size_t limit) const {
         std::string wanted = lower(normalize(name));
         std::string_view leaf = leaf_of(wanted);

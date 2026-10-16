@@ -371,7 +371,9 @@ namespace forti::engine {
             json notes = json::array();
             switch (profile.mode) {
                 case Mode::read_only:
-                    notes.push_back(std::format("profile {} is read-only: apply will be refused (policy_denied)", profile.name));
+                    notes.push_back(std::format("profile {0} is read-only: apply will be refused. To allow changes, a human runs "
+                                                "`forti profile mode {0} guarded` (each plan approved) or `autonomous`",
+                                                profile.name));
                     break;
                 case Mode::guarded:
                     notes.push_back(std::format("guarded mode: a human must run `forti plan approve {}` before apply", id));
@@ -713,9 +715,11 @@ namespace forti::engine {
             event["mode"] = to_string(profile.mode);
             if (profile.mode == Mode::read_only)
                 throw Failure(Code::policy_denied,
-                              std::format("profile {} is read-only: apply is refused (its mode is set with forti configure)",
+                              std::format("profile {0} is read-only: apply is refused. To allow changes, a human runs "
+                                          "`forti profile mode {0} guarded` (each plan approved) or `autonomous`",
                                           profile.name),
-                              {{"plan_id", id}, {"reason", "read_only"}, {"profile", profile.name}, {"mode", "read-only"}});
+                              {{"plan_id", id}, {"reason", "read_only"}, {"profile", profile.name}, {"mode", "read-only"},
+                               {"mode_command", std::format("forti profile mode {} guarded", profile.name)}});
             auto now = detail::Clock::now();
             if (profile.mode == Mode::guarded) detail::verify_approval(paths, plan, now);
             if (profile.host != device.value("host", "") || profile.port != device.value("port", 0u))
