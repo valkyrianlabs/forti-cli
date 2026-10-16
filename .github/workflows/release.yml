@@ -168,6 +168,10 @@ jobs:
           brew tap valkyrianlabs/tap
           if brew commands --quiet | grep -qx trust; then brew trust valkyrianlabs/tap; fi
           HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-from-source valkyrianlabs/tap/forti-api valkyrianlabs/tap/forti-mcp
+          # The formula under test lives in a throwaway tap; with the published one also present, `brew bottle`
+          # resolves forti-cli by bare name on some runners and stops ("found in multiple taps"). Only this
+          # runner's disposable clone of the tap is changed.
+          rm -f "$(brew --repository valkyrianlabs/tap)/Formula/forti-cli.rb"
           bash .github/scripts/homebrew-local-install.sh
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
