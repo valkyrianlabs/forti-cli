@@ -279,10 +279,15 @@ namespace forti::cli {
                 details["hint"] = nothing + advice.hint + " (or save without checking: --skip-check)";
                 details["transport_error"] = failure.what();
             } else if (failure.code() == Code::auth) {
-                message = std::format("{} rejected the API key (HTTP {})", profile.host, details.value("http_status", 401));
-                details["hint"] = nothing + "forti did not retry: FortiOS locks an API user out after repeated failures. "
-                                            "Check the key, that this machine is within the API user's trusted hosts, "
-                                            "and the user's admin profile";
+                int status = details.value("http_status", 401);
+                message = status == 403 ? std::format("{} refused the request (HTTP 403)", profile.host)
+                                        : std::format("{} did not accept the API key (HTTP {})", profile.host, status);
+                details["hint"] = nothing + (status == 403
+                        ? std::string("Usually the API user's admin profile: give its accprofile read access (sysgrp "
+                                      "read at least). Also check that its trusted hosts include this machine")
+                        : std::string("The key may be right: FortiOS also answers 401 when this machine is not in the API "
+                                      "user's trusted hosts (before 7.4.1, the admins' trusted hosts too). Check them, then "
+                                      "the key. forti did not retry: FortiOS locks the user out after repeated failures"));
             }
             return {failure.code(), message, details};
         }

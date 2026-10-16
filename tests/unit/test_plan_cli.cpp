@@ -103,17 +103,22 @@ TEST_F(PlanCli, PlansAreNamedByPrefixTailOrLatest) {
         EXPECT_NE(std::ranges::find(candidates, json(id)), candidates.end()) << id;
     EXPECT_EQ(forti({"--json", "plan", "show", "zzzz"}), 5);
 
-    // Without a terminal, a plan must be named.
+    // Without a terminal, a plan must be named, and nothing is approved without --yes.
     EXPECT_EQ(forti({"apply"}), 2);
     EXPECT_NE(err.str().find("latest"), std::string::npos) << err.str();
-    EXPECT_EQ(forti({"plan", "approve"}), 2);
+    EXPECT_EQ(forti({"plan", "approve", second}), engine::exit_code(engine::Code::approval_required));
+    EXPECT_NE(err.str().find("needs a person"), std::string::npos) << err.str();
+    EXPECT_EQ(forti({"approve", "--yes"}), 2);
     EXPECT_EQ(forti({"plan", "show"}), 2);
+    // Two plans are waiting: latest is not a guess when acting on one.
+    EXPECT_EQ(forti({"--json", "apply", "latest"}), 2);
+    EXPECT_GE(json_out()["error"]["details"]["candidates"].size(), 2u);
     EXPECT_EQ(writes(), 0u);
 
-    // apply by prefix tells which plan it took.
+    // apply by prefix shows which plan it took.
     script_apply("old", "two");
     ASSERT_EQ(forti({"apply", second.substr(16)}), 0) << err.str();
-    EXPECT_NE(err.str().find(second), std::string::npos) << err.str();
+    EXPECT_NE(out.str().find("plan " + second), std::string::npos) << out.str();
     EXPECT_NE(out.str().find("1 change applied and verified."), std::string::npos) << out.str();
     EXPECT_EQ(out.str().find("applied but unverified"), std::string::npos);
     EXPECT_NE(out.str().find("forti rollback " + second), std::string::npos) << out.str();
@@ -143,7 +148,9 @@ TEST_F(PlanCli, ApplyFlagPlansAndAppliesInOneCommand) {
     transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
     script_apply("old", "new");
     ASSERT_EQ(forti({"plan", "set", "firewall/address", "LAN", "comment=new", "--apply"}), 0) << err.str() << out.str();
-    EXPECT_NE(out.str().find("Plan "), std::string::npos);
+    EXPECT_NE(out.str().find("1 operation on lab"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("\"old\" → \"new\""), std::string::npos) << out.str();
+    EXPECT_EQ(out.str().find("PUT "), std::string::npos) << out.str();   // request lines only with --verbose
     EXPECT_NE(out.str().find("1 change applied and verified."), std::string::npos) << out.str();
     EXPECT_EQ(writes(), 1u);
 
@@ -176,7 +183,7 @@ TEST_F(PlanCli, RollbackUndoesTheLastApply) {
     // The rollback re-reads LAN (before-state "new"), writes "old" back and verifies.
     script_apply("new", "old");
     ASSERT_EQ(forti({"rollback"}), 0) << err.str() << out.str();
-    EXPECT_NE(out.str().find("Rolling back plan " + id), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("Undoes plan " + id), std::string::npos) << out.str();
     EXPECT_NE(out.str().find("1 change applied and verified."), std::string::npos) << out.str();
     ASSERT_EQ(forti({"--json", "plan", "list"}), 0);
     std::size_t applied_rollbacks = 0;
@@ -231,4 +238,99 @@ TEST_F(PlanCli, UnknownAttributesGetASuggestion) {
     transport->reply(200, fake::envelope(json::array({address("LAN")})));
     EXPECT_EQ(forti({"--json", "plan", "set", "firewall/address", "LAN", "zzzzzzzz=1"}), engine::exit_code(engine::Code::validation));
     EXPECT_FALSE(json_out()["error"]["details"].contains("suggestions"));
+}
+
+// ---- forti set / create / delete: one command, at most one question ----
+
+TEST_F(PlanCli, SetAppliesInOneCommandWhateverTheSpelling) {
+    for (std::vector<std::string> spelling: {std::vector<std::string>{"firewall/address/LAN"}, {"firewall/address", "LAN"},
+                                             {"firewall", "address", "LAN"}, {"address", "LAN"}}) {
+        transport->requests.clear();
+        transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+        script_apply("old", "new");
+        std::vector<std::string> command = {"set"};
+        command.insert(command.end(), spelling.begin(), spelling.end());
+        command.push_back("comment=new");
+        ASSERT_EQ(forti(command), 0) << spelling.front() << ": " << err.str() << out.str();
+        EXPECT_NE(out.str().find("update firewall/address \"LAN\""), std::string::npos) << out.str();
+        EXPECT_NE(out.str().find("1 change applied and verified."), std::string::npos) << out.str();
+        EXPECT_EQ(out.str().find("Apply these changes?"), std::string::npos);   // autonomous: no question
+        EXPECT_EQ(writes(), 1u);
+    }
+}
+
+TEST_F(PlanCli, SetNeedsSomethingToChange) {
+    EXPECT_EQ(forti({"set", "firewall/address/LAN"}), 2);
+    EXPECT_NE(err.str().find("nothing to change"), std::string::npos) << err.str();
+    EXPECT_EQ(forti({"set"}), 2);
+    EXPECT_EQ(forti({"delete", "firewall/address"}), 2);   // no key
+    EXPECT_EQ(forti({"create", "firewall/address/web", "subnet=192.0.2.1/32"}), 2);   // a key, not attributes
+    EXPECT_EQ(writes(), 0u);
+}
+
+TEST_F(PlanCli, ReadOnlySetShowsTheChangeAndHowToAllowIt) {
+    mode = engine::Mode::read_only;
+    transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+    EXPECT_EQ(forti({"set", "firewall/address/LAN", "comment=new"}), engine::exit_code(engine::Code::policy_denied));
+    EXPECT_NE(out.str().find("\"old\" → \"new\""), std::string::npos) << out.str();
+    EXPECT_NE(err.str().find("read-only: nothing was changed"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("forti profile mode lab guarded"), std::string::npos) << err.str();
+    EXPECT_EQ(err.str().find("--writes"), std::string::npos);
+    EXPECT_EQ(writes(), 0u);
+}
+
+TEST_F(PlanCli, GuardedSetWithoutATerminalIsNeverApproved) {
+    mode = engine::Mode::guarded;
+    transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+    EXPECT_EQ(forti({"set", "firewall/address/LAN", "comment=new"}), engine::exit_code(engine::Code::approval_required));
+    EXPECT_NE(err.str().find("needs your approval"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("forti approve "), std::string::npos) << err.str();
+    EXPECT_EQ(writes(), 0u);
+    // --json: the envelope says the same, with the plan.
+    transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
+    EXPECT_EQ(forti({"--json", "set", "firewall/address/LAN", "comment=new"}), engine::exit_code(engine::Code::approval_required));
+    json error = json_out()["error"];
+    std::string id = error["details"]["plan"]["id"];
+    EXPECT_EQ(error["details"]["approve_command"], "forti approve " + id);
+    // The person approves (here as a script would, explicitly), and the plan's maker applies it.
+    ASSERT_EQ(forti({"approve", id, "--yes"}), 0) << err.str();
+    EXPECT_NE(out.str().find("The agent can apply it now"), std::string::npos) << out.str();
+    script_apply("old", "new");
+    ASSERT_EQ(forti({"apply", id}), 0) << err.str();
+    EXPECT_EQ(writes(), 1u);
+}
+
+TEST_F(PlanCli, DeleteAndCreateInOneCommand) {
+    transport->reply(200, fake::envelope(json::array({address("web")})));   // plan: the object exists
+    transport->reply(200, fake::envelope(json::array({address("web")})));   // apply: re-read
+    transport->reply(200, written("web"));                                  // DELETE
+    transport->reply(404, {{"status", "error"}, {"http_status", 404}, {"serial", serial}, {"version", "v7.4.8"}});   // verify: gone
+    ASSERT_EQ(forti({"delete", "firewall/address/web"}), 0) << err.str() << out.str();
+    EXPECT_NE(out.str().find("delete firewall/address \"web\""), std::string::npos) << out.str();
+    EXPECT_EQ(transport->requests[2].method, fortiapi::Method::Delete);
+
+    transport->requests.clear();
+    transport->reply(404, {{"status", "error"}, {"http_status", 404}, {"serial", serial}, {"version", "v7.4.8"}});
+    ASSERT_EQ(forti({"create", "address", "name=web", "subnet=192.0.2.10 255.255.255.255", "--dry-run"}), 0) << err.str();
+    EXPECT_NE(out.str().find("create firewall/address"), std::string::npos) << out.str();
+    EXPECT_EQ(writes(), 0u);   // --dry-run: planned only
+}
+
+TEST_F(PlanCli, AuditRecordsTheChangeAndItsApproval) {
+    mode = engine::Mode::guarded;
+    std::string id = plan_comment("new");
+    ASSERT_EQ(forti({"approve", id, "--yes"}), 0) << err.str();
+    script_apply("old", "new");
+    ASSERT_EQ(forti({"apply", id}), 0) << err.str();
+    std::ifstream in(paths.state / "audit.jsonl");
+    std::string line;
+    json apply;
+    while (std::getline(in, line)) {
+        json event = json::parse(line);
+        if (event["event"] == "apply") apply = event;
+    }
+    ASSERT_TRUE(apply.is_object());
+    EXPECT_EQ(apply["outcome"], "ok");
+    EXPECT_TRUE(apply["approved_by"].get<std::string>().starts_with("cli:")) << apply.dump();
+    EXPECT_NE(apply["summary"].get<std::string>().find("1 update"), std::string::npos) << apply.dump();
 }

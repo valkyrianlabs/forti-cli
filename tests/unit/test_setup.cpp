@@ -138,7 +138,7 @@ TEST_F(SetupCli, ConfigureStopsAtTheFirstAuthFailureAndSavesNothing) {
     transport->reply(401, json{{"status", "error"}, {"http_status", 401}});
     EXPECT_EQ(run({"configure", "--profile", "home", "--host", "fw.example.net", "--api-key-stdin"}, "wrong\n"), 4);
     EXPECT_EQ(transport->requests.size(), 1u);   // never retried: FortiOS locks the API user out
-    EXPECT_NE(err.str().find("rejected the API key"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("did not accept the API key"), std::string::npos) << err.str();
     EXPECT_NE(err.str().find("did not retry"), std::string::npos);
     EXPECT_EQ(err.str().find("wrong"), std::string::npos);
     EXPECT_FALSE(fs::exists(paths.config_file()));

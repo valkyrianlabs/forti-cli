@@ -1,15 +1,18 @@
 //
-// forti plan / forti apply / forti rollback: build, inspect and approve stored plans, execute them,
-// and undo the last one.
+// Changing the device: forti set / create / delete (one command, at most one question), forti plan
+// (preview and save), forti apply, forti approve and forti rollback.
 //
-// Plans come from a JSON file (`forti plan --file changes.json`, `-` for stdin) or from the
-// convenience forms (set / create / delete / action). `forti plan approve` is the guarded-mode human
-// approval; it exists only here, never in forti-mcp.
+// Every change is a stored plan underneath: the before-state, a field diff, the exact request body,
+// a risk tier and a digest. Apply re-checks all of it, verifies by re-reading, writes a rollback plan
+// and an audit record. The commands only decide how much of that a person has to see:
 //
-// A person at a terminal (text output, stdin and stdout both terminals) gets shortcuts: a plan can be
-// named by `latest`, a unique prefix, or not at all (the newest pending plan, shown first), and a
-// guarded apply asks for the approval inline. Scripts and agents' shell tools have no terminal: for
-// them every plan is named explicitly and nothing is approved without `forti plan approve`.
+//   read-only    the change is shown; nothing is written
+//   guarded      shown, then one question at a terminal: "Apply these changes?" Without a terminal
+//                (scripts, an agent's shell) it stops there: a missing terminal is never a yes. The
+//                person approves with `forti approve ID`, or the agent's MCP client asks in the chat.
+//   autonomous   shown and applied
+//
+// Plans can be named by a unique prefix, or (where only one is waiting for the profile) not at all.
 //
 
 #include "commands.hpp"
@@ -19,15 +22,21 @@
 #include <forti/engine/approval.hpp>
 
 #include <algorithm>
+#include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <regex>
+#include <set>
 #include <sstream>
 
+#include <ctime>
+#include <poll.h>
 #include <unistd.h>
 
 namespace forti::cli {
@@ -76,7 +85,7 @@ namespace forti::cli {
             return risk;
         }
 
-        void render_operation(std::ostream& out, const Style& style, const json& op) {
+        void render_operation(std::ostream& out, const Style& style, const json& op, bool wire = true) {
             std::string key = op.contains("key") ? " " + show(op["key"]) : "";
             out << std::format("{}. {} {}{}  [{}]\n", op.value("index", 0) + 1, style.bold(op.value("op", "")),
                                op.value("resource", ""), key, risk_label(style, op.value("risk", "")));
@@ -108,10 +117,10 @@ namespace forti::cli {
                 if (entry.value("unchanged", false)) line += style.dim("  (unchanged)");
                 out << std::format("     {:<{}}  {}\n", name, width, line);
             }
-            if (op.contains("wire") && op["wire"].is_object()) {
-                const json& wire = op["wire"];
-                out << "     " << style.dim(std::format("{} {}", wire.value("method", ""), wire.value("path", "")));
-                if (wire.contains("body") && !wire["body"].is_null()) out << style.dim(" " + wire["body"].dump());
+            if (wire && op.contains("wire") && op["wire"].is_object()) {
+                const json& request = op["wire"];
+                out << "     " << style.dim(std::format("{} {}", request.value("method", ""), request.value("path", "")));
+                if (request.contains("body") && !request["body"].is_null()) out << style.dim(" " + request["body"].dump());
                 out << "\n";
             }
         }
@@ -155,8 +164,8 @@ namespace forti::cli {
                 return;
             }
             if (data.contains("approve") && data.contains("apply")) {
-                out << "next   " << data["apply"].get<std::string>() << "  (shows the plan and asks for your approval)\n"
-                    << "       without a terminal: " << data["approve"].get<std::string>() << ", then the same apply\n";
+                out << "next   " << data["apply"].get<std::string>() << "  (asks once, then applies)\n"
+                    << "       or let the agent that made it apply it: " << data["approve"].get<std::string>() << "\n";
             } else if (data.contains("apply")) out << "next   " << data["apply"].get<std::string>() << "\n";
         }
 
@@ -210,9 +219,31 @@ namespace forti::cli {
             return text.empty() ? std::string("Nothing was changed.") : text + ".";
         }
 
+
+        // A change as a person reviews it before saying yes: what it does and where, then each operation
+        // with its attribute diff. The request lines and the digest only with --verbose (the stored plan
+        // keeps them; `forti plan show` prints them).
+        void render_change(std::ostream& out, const Style& style, const json& data, bool verbose) {
+            out << style.bold(data.value("summary", "")) << "\n";
+            if (data.value("kind", "plan") == "rollback") out << "Undoes plan " << data.value("rollback_of", "") << "\n";
+            const json& device = data.value("device", json::object());
+            if (!device.value("vdom", "").empty()) out << "vdom " << device.value("vdom", "") << "\n";
+            for (const auto& op: data.value("operations", json::array())) render_operation(out, style, op, verbose);
+            for (const auto& note: data.value("notes", json::array())) {
+                std::string text = note.get<std::string>();
+                // The mode notes are what the command does next, which it says itself.
+                if (text.starts_with("guarded mode:") || text.starts_with("autonomous mode:") ||
+                    (text.starts_with("profile ") && text.find("is read-only") != std::string::npos))
+                    continue;
+                out << style.yellow("note") << " " << text << "\n";
+            }
+            out << style.dim("plan " + data.value("id", "") + (verbose ? "  digest " + data.value("digest", "") : "")) << "\n";
+        }
+
         // ---- a person at a terminal ----
 
-        // Text output with stdin and stdout on a terminal. Scripts and agents' shell tools have neither.
+        // Text output with stdin and stdout both terminals. Scripts and agents' shell tools have
+        // neither, and nothing there is ever taken as a person's approval.
         bool at_terminal(const Context& context) {
             return context.output.format == Format::text && ::isatty(STDIN_FILENO) == 1 && ::isatty(STDOUT_FILENO) == 1;
         }
@@ -274,28 +305,74 @@ namespace forti::cli {
             return state == "pending" || state == "approved" || state == "approval_expired";
         }
 
+        // Plans made within this window can be picked without naming them. Older ones are forgotten
+        // drafts more often than intended changes: they need their id.
+        constexpr auto recent = std::chrono::hours(24);
+
+        bool made_recently(const json& plan) {
+            std::string created = plan.value("created_at", "");   // "2026-10-16T15:05:40Z"
+            std::tm tm{};
+            std::istringstream in(created);
+            in >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+            if (in.fail()) return false;
+            auto made = std::chrono::system_clock::from_time_t(::timegm(&tm));
+            return std::chrono::system_clock::now() - made < recent;
+        }
+
         struct Named {
             std::string id;
             bool exact = true;   // typed in full: nothing to show before acting
         };
 
-        // `given`: a complete id, `latest` (the newest plan of the profile, rollback plans aside), a
-        // unique prefix of an id or of its random part, or empty (the newest pending plan of the profile).
-        Named name_plan(Context& context, const Args& args, const std::string& given) {
+        std::string short_line(const json& plan) {
+            return std::format("{}  {}", plan.value("id", ""), plan.value("summary", ""));
+        }
+
+        // `given`: a complete id or a unique prefix of one (or of its random tail, "b75ef1"), acted on
+        // as named. `latest` or nothing: the plan waiting to be applied for the selected profile, made
+        // in the last day, but only when exactly one is waiting: with two agents (or two drafts) on one
+        // device "the newest" is a guess, and forti never applies a plan it guessed. At a terminal the
+        // person picks from the list instead. `for_show`: `latest` is simply the newest plan.
+        Named name_plan(Context& context, const Args& args, const std::string& given, bool for_show = false) {
             if (complete_id(given)) return {given, true};
             json plans = stored_plans(context);
             if (given.empty() || given == "latest") {
                 auto profile = selected_profile(context, args);
+                std::vector<json> waiting;
                 for (const auto& plan: plans) {
                     if (plan.value("kind", "plan") == "rollback") continue;
                     if (profile && plan.value("profile", "") != *profile) continue;
-                    if (given.empty() && !pending(plan)) continue;
-                    return {plan.value("id", ""), false};
+                    if (for_show) return {plan.value("id", ""), false};
+                    if (pending(plan) && made_recently(plan)) waiting.push_back(plan);
                 }
                 std::string whose = profile ? std::format(" for profile {}", *profile) : "";
-                throw Failure(Code::not_found, given.empty() ? std::format("no plan waiting to be applied{}", whose)
-                                                             : std::format("no plan{}", whose),
-                              {{"hint", "forti plan list shows the stored plans"}});
+                if (waiting.empty())
+                    throw Failure(Code::not_found, std::format("no plan{} is waiting to be applied", whose),
+                                  {{"hint", "forti plan list shows the stored plans; name an older one by its id"}});
+                if (waiting.size() == 1) return {waiting.front().value("id", ""), false};
+                if (at_terminal(context)) {
+                    *context.output.out << std::format("{} plans are waiting{}:\n", waiting.size(), whose);
+                    for (std::size_t i = 0; i < waiting.size(); ++i)
+                        *context.output.out << std::format("  {}) {}\n", i + 1, printable(short_line(waiting[i])));
+                    *context.output.out << "Which one? (Enter: none) " << std::flush;
+                    std::string answer;
+                    std::getline(std::cin, answer);
+                    answer = trim(answer);
+                    std::size_t choice = 0;
+                    auto [end, ec] = std::from_chars(answer.data(), answer.data() + answer.size(), choice);
+                    if (answer.empty() || ec != std::errc() || end != answer.data() + answer.size() || choice < 1 ||
+                        choice > waiting.size())
+                        throw Failure(Code::usage, "no plan chosen; nothing was done");
+                    return {waiting[choice - 1].value("id", ""), false};
+                }
+                std::vector<std::string> ids;
+                std::string list;
+                for (const auto& plan: waiting) {
+                    ids.push_back(plan.value("id", ""));
+                    list += "\n  " + short_line(plan);
+                }
+                throw Failure(Code::usage, std::format("{} plans are waiting{}; name one:{}", waiting.size(), whose, list),
+                              {{"candidates", ids}, {"hint", "pass its id (or a unique prefix, or its last part)"}});
             }
             std::vector<std::string> matches;
             for (const auto& plan: plans) {
@@ -312,7 +389,7 @@ namespace forti::cli {
                           {{"candidates", matches}, {"hint", "type more of the id"}});
         }
 
-        // Without a terminal a plan must be named: nothing acts on a plan nobody looked at.
+        // Without a terminal a plan is named: scripts and agents act only on the plan they made.
         std::string named_or_terminal(Context& context, const Args& args, std::size_t index, std::string_view usage) {
             if (args.positional.size() > index) return args.positional[index];
             if (!at_terminal(context))
@@ -349,114 +426,195 @@ namespace forti::cli {
             return {text.substr(0, eq), parsed.is_discarded() ? json(value) : parsed};
         }
 
+        // An attribute assignment, as opposed to a resource word or a key: FortiOS attribute names are
+        // letters, digits, '-' and '_'.
+        bool is_assignment(const std::string& word) {
+            auto eq = word.find('=');
+            return eq != std::string::npos && eq > 0 &&
+                   std::all_of(word.begin(), word.begin() + static_cast<std::ptrdiff_t>(eq), [](char c) {
+                       return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+                   });
+        }
+
         void add_globals(json& request, const Args& args) {
             if (auto profile = args.value("profile")) request["profile"] = *profile;
             if (auto vdom = args.value("vdom")) request["vdom"] = *vdom;
         }
 
-        json operation_from_args(const std::string& verb, const Args& args) {
-            const auto& positional = args.positional;
-            if (positional.size() < 2) throw Failure(Code::usage, std::format("usage: forti plan {} <resource> ...", verb));
-            const std::string& resource = positional[1];
+        struct Target {
+            std::string resource;
+            std::optional<std::string> key;
+        };
+
+        // The object a change names, spelled as for `forti get`: firewall/address web,
+        // firewall/address/web, firewall address web, or address web (a last word only one resource
+        // has). The plan records the resolved name, which the person sees before anything changes. A
+        // spelling nothing matches is passed on as typed, so the engine names the problem.
+        Target target(const std::vector<std::string>& words) {
+            const auto& catalog = engine::Catalog::instance();
+            if (words.size() == 1 && !catalog.find(words[0]))
+                if (auto keyed = catalog.keyed(words[0])) return {std::string(keyed->resource->name()), keyed->key};
+            for (std::size_t take = words.size(); take >= 1 && words.size() - take <= 1; --take) {
+                auto found = catalog.match(std::vector<std::string>(words.begin(), words.begin() + static_cast<std::ptrdiff_t>(take)));
+                if (found.resource) {
+                    Target out{std::string(found.resource->name()), std::nullopt};
+                    if (take < words.size()) out.key = words[take];
+                    return out;
+                }
+                if (!found.candidates.empty()) {
+                    // Ambiguous: lookup() throws with the candidates.
+                    std::string spelled;
+                    for (std::size_t i = 0; i < take; ++i) spelled += (i ? " " : "") + words[i];
+                    (void) catalog.lookup(spelled);
+                    break;
+                }
+            }
+            if (words.size() > 2)
+                throw Failure(Code::usage, std::format("no resource is named \"{}\"", [&] {
+                                  std::string joined;
+                                  for (const auto& word: words) joined += (joined.empty() ? "" : " ") + word;
+                                  return joined;
+                              }()),
+                              {{"hint", "name it as for forti get: firewall/address web, or firewall/address/web"}});
+            Target out{words[0], std::nullopt};
+            if (words.size() == 2) out.key = words[1];
+            return out;
+        }
+
+        // The operation from `forti <verb> ...` or `forti plan <verb> ...`; `words` starts at the
+        // resource.
+        json operation_from_words(const std::string& verb, const std::vector<std::string>& words, const Args& args) {
+            std::string usage = verb == "delete" ? "usage: forti delete <resource> <key>"
+                              : verb == "create" ? "usage: forti create <resource> attr=value... | --object JSON|@file"
+                              : verb == "action" ? "usage: forti plan action <monitor/path> [--body JSON|@file]"
+                                                 : "usage: forti set <resource> [key] attr=value... [--clear attr]";
+            if (words.empty()) throw Failure(Code::usage, usage);
+            if (verb == "action") {
+                if (words.size() != 1) throw Failure(Code::usage, usage);
+                json body = json::object();
+                if (auto given = args.value("body"))
+                    body = parse_json(given->starts_with('@') ? read_input(given->substr(1)) : *given, "--body");
+                return {{"op", "action"}, {"resource", words[0]}, {"body", body}};
+            }
+            std::vector<std::string> names, assignments;
+            for (const auto& word: words) (assignments.empty() && !is_assignment(word) ? names : assignments).push_back(word);
+            for (const auto& word: assignments)
+                if (!is_assignment(word)) throw Failure(Code::usage, std::format("expected attribute=value, got \"{}\"", word), {{"hint", usage}});
+            if (names.empty()) throw Failure(Code::usage, usage);
+            Target where = target(names);
+
             if (verb == "delete") {
-                if (positional.size() != 3) throw Failure(Code::usage, "usage: forti plan delete <resource> <key>");
-                return {{"op", "delete"}, {"resource", resource}, {"key", positional[2]}};
+                if (!assignments.empty() || !where.key) throw Failure(Code::usage, usage);
+                return {{"op", "delete"}, {"resource", where.resource}, {"key", *where.key}};
             }
             if (verb == "create") {
-                // The object as JSON (--object), or as attr=value pairs, or both (the pairs win).
+                if (where.key)
+                    throw Failure(Code::usage, std::format("create takes the new object's attributes, not a key: {} name={} ...",
+                                                           where.resource, *where.key), {{"hint", usage}});
                 auto given = args.value("object");
-                if (!given && positional.size() == 2)
-                    throw Failure(Code::usage, "usage: forti plan create <resource> attr=value... | --object JSON|@file");
+                if (!given && assignments.empty()) throw Failure(Code::usage, usage);
                 json object = json::object();
                 if (given) {
                     object = parse_json(given->starts_with('@') ? read_input(given->substr(1)) : *given, "--object");
                     if (!object.is_object()) throw Failure(Code::usage, "--object must be a JSON object");
                 }
-                for (std::size_t at = 2; at < positional.size(); ++at) {
-                    auto [name, value] = assignment(positional[at]);
+                for (const auto& word: assignments) {   // the pairs win over --object
+                    auto [name, value] = assignment(word);
                     object[name] = std::move(value);
                 }
-                return {{"op", "create"}, {"resource", resource}, {"object", object}};
-            }
-            if (verb == "action") {
-                json body = json::object();
-                if (auto given = args.value("body"))
-                    body = parse_json(given->starts_with('@') ? read_input(given->substr(1)) : *given, "--body");
-                return {{"op", "action"}, {"resource", resource}, {"body", body}};
+                return {{"op", "create"}, {"resource", where.resource}, {"object", object}};
             }
             // set: a table needs a key; a singleton takes attributes straight away.
-            std::size_t at = 2;
-            json op = {{"op", "update"}, {"resource", resource}};
-            const engine::Resource* known = engine::Catalog::instance().find(resource);
+            json op = {{"op", "update"}, {"resource", where.resource}};
+            const engine::Resource* known = engine::Catalog::instance().find(where.resource);
             bool singleton = known && known->kind == engine::Kind::singleton;
+            if (singleton && where.key)
+                throw Failure(Code::usage, std::format("{} is a singleton: it has no key (forti set {} attr=value...)",
+                                                       where.resource, where.resource));
             if (!singleton) {
-                if (positional.size() < 3) throw Failure(Code::usage, "usage: forti plan set <resource> <key> attr=value... [--clear attr]");
-                op["key"] = positional[2];
-                at = 3;
+                if (!where.key) throw Failure(Code::usage, "usage: forti set <resource> <key> attr=value... [--clear attr]");
+                op["key"] = *where.key;
             }
             json set = json::object();
-            for (; at < positional.size(); ++at) {
-                auto [name, value] = assignment(positional[at]);
+            for (const auto& word: assignments) {
+                auto [name, value] = assignment(word);
                 set[name] = std::move(value);
             }
             if (!set.empty()) op["set"] = std::move(set);
             if (auto clear = args.all("clear"); !clear.empty()) op["clear"] = clear;
+            if (!op.contains("set") && !op.contains("clear"))
+                throw Failure(Code::usage, "nothing to change: give attr=value pairs or --clear attr", {{"hint", usage}});
             return op;
         }
 
-        // ---- apply, shared by apply, rollback, plan approve and plan --apply ----
+        // ---- apply, shared by every command that executes a plan ----
 
         // Executes plan `id` and prints the record (on failure, before the error).
         int execute(Context& context, const std::string& id) {
             json envelope = engine::Engine::envelope([&] { return context.engine.apply({{"plan_id", id}}); });
             Style style = style_for(STDOUT_FILENO);
-            // A stopped apply still carries its execution record: show it before the error. The error
-            // itself names the approval command, so it is not printed twice.
+            // A stopped apply still carries its execution record: show it before the error.
             if (context.output.format == Format::text && !envelope.value("ok", false)) {
                 const json& details = envelope["error"].contains("details") ? envelope["error"]["details"] : json();
                 if (details.is_object() && details.contains("operations"))
                     render_record(*context.output.err, style_for(STDERR_FILENO), printable_json(details));
             }
             return emit(context.output, envelope, [&](std::ostream& out, const json& data, const json&) {
-                out << style.bold(std::format("Applied plan {}", data.value("plan_id", ""))) << ": " << outcome(data) << "\n";
+                out << style.green(outcome(data)) << "\n";
                 render_record(out, style, data);
             });
         }
 
-        // At a terminal, before executing `id`: a guarded plan without a valid approval is shown and
-        // approved here (the same approval record as `forti plan approve`); a plan the person did not
-        // name exactly is shown and confirmed. Returns false when the person declined (already reported).
-        bool confirm_at_terminal(Context& context, const Args& args, const std::string& id, bool exact, std::string_view what) {
-            if (!at_terminal(context)) return true;
-            json shown = engine::Engine::envelope([&] { return engine::show_plan(context.engine, id); });
-            if (!shown.value("ok", false)) return true;   // apply reports it
-            const json& data = shown["data"];
-            std::string mode = data.value("mode", json()).is_string() ? data["mode"].get<std::string>() : "";
-            std::string state = data["state"].value("state", "");
-            bool needs_approval = mode == "guarded" && state != "approved" && state != "applied";
-            if (!needs_approval && exact) return true;
-            if (mode == "read-only" || state == "applied") return true;   // apply refuses, with the reason
-            Style style = style_for(STDOUT_FILENO);
-            // The person deciding reads this: escape anything that could redraw the terminal.
-            render_plan(*context.output.out, style, printable_json(data), args.flag("verbose"));
-            *context.output.out << "\n";
-            if (needs_approval) {
-                if (!ask(context, std::format("Approve and apply {} {}?", what, id), false)) {
-                    *context.output.err << "forti: not approved; nothing was applied\n";
-                    return false;
-                }
-                json approved = engine::Engine::envelope([&] { return engine::approve_plan(context.engine, id, approver()); });
-                if (!approved.value("ok", false)) {
-                    emit(context.output, approved);
-                    return false;
-                }
-                return true;
+        // The one question of guarded mode, asked of a person at a terminal about the change just
+        // shown. Yes records the approval (the same record as `forti approve`, bound to the plan's
+        // digest) and returns true.
+        bool approve_here(Context& context, const std::string& id) {
+            if (!ask(context, "Apply these changes?", false)) {
+                *context.output.err << "Nothing was changed.\n";
+                return false;
             }
-            if (!ask(context, std::format("Apply {} {}?", what, id), true)) {
-                *context.output.err << "forti: nothing was applied\n";
+            json approved = engine::Engine::envelope([&] { return engine::approve_plan(context.engine, id, approver()); });
+            if (!approved.value("ok", false)) {
+                emit(context.output, approved);
                 return false;
             }
             return true;
+        }
+
+        // A guarded plan without an approval, and no terminal to ask on: say how a person approves it.
+        int needs_approval(Context& context, const std::string& id) {
+            json envelope = {{"ok", false},
+                             {"error", {{"code", "approval_required"},
+                                        {"message", std::format("this change needs your approval (guarded mode); nothing was changed")},
+                                        {"details", {{"plan_id", id},
+                                                     {"approve_command", std::format("forti approve {}", id)},
+                                                     {"hint", std::format("in a terminal: forti apply {0} (shows it, asks once, applies), or "
+                                                                          "forti approve {0} to let the agent that made it apply it", id)}}}}}};
+            return emit(context.output, envelope);
+        }
+
+        // Shows plan `id` (already loaded as `data`) and executes it as the profile's mode allows:
+        // read-only refuses with the command that allows changes; guarded asks once at a terminal
+        // (and otherwise stops at the approval); autonomous applies. The way every change is made.
+        int review_and_apply(Context& context, const Args& args, const std::string& id, const json& data) {
+            Style style = style_for(STDOUT_FILENO);
+            std::string mode = data.value("mode", json()).is_string() ? data["mode"].get<std::string>() : "";
+            bool approved = data.contains("state") && data["state"].is_object() && data["state"].value("state", "") == "approved";
+            // The person deciding reads this: escape anything that could redraw the terminal.
+            render_change(*context.output.out, style, printable_json(data), args.flag("verbose"));
+            *context.output.out << "\n";
+            if (mode == "read-only") {
+                std::string profile = data.value("device", json::object()).value("profile", "");
+                *context.output.err << std::format("Profile {0} is read-only: nothing was changed.\n"
+                                                   "  To allow changes: forti profile mode {0} guarded (you approve each change) or "
+                                                   "autonomous. Then: forti apply {1}\n", profile, id);
+                return engine::exit_code(Code::policy_denied);
+            }
+            if (mode == "guarded" && !approved) {
+                if (!at_terminal(context)) return needs_approval(context, id);
+                if (!approve_here(context, id)) return engine::exit_code(Code::approval_required);
+            }
+            return execute(context, id);
         }
 
         // ---- commands ----
@@ -467,7 +625,7 @@ namespace forti::cli {
             bool verbose = args.flag("verbose");
             json envelope = engine::Engine::envelope([&] {
                 std::string given = named_or_terminal(context, args, 1, "forti plan show <id>");
-                return engine::show_plan(context.engine, name_plan(context, args, given).id);
+                return engine::show_plan(context.engine, name_plan(context, args, given, true).id);
             });
             return emit(context.output, envelope,
                         [&](std::ostream& out, const json& data, const json&) { render_plan(out, style, data, verbose); });
@@ -487,51 +645,122 @@ namespace forti::cli {
                         });
         }
 
-        int plan_approve(Context& context, const Args& args) {
-            if (args.positional.size() > 2) throw Failure(Code::usage, "usage: forti plan approve <id> [--yes]");
+        // Approves one plan for whoever made it (an agent, a script) to apply. A person at a terminal
+        // sees it and answers; without a terminal only an explicit --yes approves.
+        int approve_one(Context& context, const Args& args, std::size_t index) {
+            if (args.positional.size() > index + 1) throw Failure(Code::usage, "usage: forti approve [id] [--yes] | --watch");
+            bool interactive = at_terminal(context) && !args.flag("yes");
+            if (!interactive && !args.flag("yes"))
+                throw Failure(Code::approval_required, "approving needs a person: run it in a terminal, or pass --yes",
+                              {{"hint", "an approval is your decision about a change: forti never takes a missing terminal as a yes"}});
             Named named;
             json resolved = engine::Engine::envelope([&] {
-                std::string given = named_or_terminal(context, args, 1, "forti plan approve <id> [--yes]");
+                std::string given = named_or_terminal(context, args, index, "forti approve <id> --yes");
                 named = name_plan(context, args, given);
                 return engine::ok(json::object());
             });
             if (!resolved.value("ok", false)) return emit(context.output, resolved);
             const std::string& id = named.id;
-            Style style = style_for(STDOUT_FILENO);
-            // A person at a terminal sees the plan and answers y/N; scripts (stdout not a TTY) and
-            // --yes skip the question. The approval is operator intent, not a security ceremony.
-            if (context.output.format == Format::text && !args.flag("yes") && ::isatty(STDOUT_FILENO) == 1) {
+            if (interactive) {
                 json shown = engine::Engine::envelope([&] { return engine::show_plan(context.engine, id); });
                 if (!shown.value("ok", false)) return emit(context.output, shown);
-                // The person approving reads this: escape anything that could redraw the terminal.
-                render_plan(*context.output.out, style, printable_json(shown["data"]), args.flag("verbose"));
-                *context.output.out << "\nApprove plan " << id << "? [y/N] " << std::flush;
-                std::string answer;
-                if (!std::getline(std::cin, answer) || !(answer == "y" || answer == "Y" || answer == "yes")) {
-                    *context.output.err << "forti: not approved\n";
+                render_change(*context.output.out, style_for(STDOUT_FILENO), printable_json(shown["data"]), args.flag("verbose"));
+                *context.output.out << "\n";
+                if (!ask(context, "Approve these changes?", false)) {
+                    *context.output.err << "Not approved.\n";
                     return engine::exit_code(Code::approval_required);
                 }
             }
             json approved = engine::Engine::envelope([&] { return engine::approve_plan(context.engine, id, approver()); });
-            bool apply_now = approved.value("ok", false) && !args.flag("yes") && at_terminal(context);
-            int status = emit(context.output, approved, [&](std::ostream& out, const json& data, const json&) {
+            return emit(context.output, approved, [&](std::ostream& out, const json& data, const json&) {
                 if (data.contains("note")) out << data["note"].get<std::string>() << "\n";
-                else out << std::format("Approved plan {} until {}.\n", data.value("plan_id", ""), data.value("expires_at", ""));
-                if (data.contains("apply") && !apply_now) out << "next   " << data["apply"].get<std::string>() << "\n";
+                else out << std::format("Approved plan {} until {}. The agent can apply it now (or: forti apply {}).\n",
+                                        data.value("plan_id", ""), data.value("expires_at", ""), data.value("plan_id", ""));
             });
-            if (!apply_now) return status;
-            if (!ask(context, "Apply now?", true)) {
-                *context.output.out << std::format("Not applied. Later: forti apply {}\n", id);
-                return status;
+        }
+
+        // `forti approve --watch`: approve plans as agents make them, one question each, in a terminal
+        // left open next to the agent. Plans already waiting (made in the last hour) come first.
+        int approve_watch(Context& context, const Args& args) {
+            if (!at_terminal(context))
+                throw Failure(Code::usage, "--watch asks you about each plan: it needs a terminal");
+            auto profile = args.value("profile");
+            Style style = style_for(STDOUT_FILENO);
+            *context.output.out << std::format("Watching for changes that need your approval{}. Ctrl-C (or q) stops.\n\n",
+                                               profile ? " on profile " + *profile : "");
+            std::set<std::string> seen;
+            auto started = std::chrono::system_clock::now();
+            std::filesystem::path dir = context.engine.options().paths.state / "plans";
+            std::filesystem::file_time_type last{};
+            for (;;) {
+                std::error_code error;
+                auto changed = std::filesystem::last_write_time(dir, error);
+                if (!error && changed != last) {
+                    last = changed;
+                    json plans = stored_plans(context);
+                    std::reverse(plans.begin(), plans.end());   // oldest first: in the order they were made
+                    for (const auto& plan: plans) {
+                        std::string id = plan.value("id", "");
+                        if (seen.contains(id)) continue;
+                        if (plan.value("state", "") != "pending" && plan.value("state", "") != "approval_expired") continue;
+                        if (profile && plan.value("profile", "") != *profile) continue;
+                        std::string created = plan.value("created_at", "");
+                        std::tm tm{};
+                        std::istringstream in(created);
+                        in >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+                        if (in.fail() || std::chrono::system_clock::from_time_t(::timegm(&tm)) < started - std::chrono::hours(1)) continue;
+                        seen.insert(id);
+                        json shown = engine::Engine::envelope([&] { return engine::show_plan(context.engine, id); });
+                        if (!shown.value("ok", false) || shown["data"].value("mode", json()) != "guarded") continue;
+                        render_change(*context.output.out, style, printable_json(shown["data"]), args.flag("verbose"));
+                        *context.output.out << "\n";
+                        if (!ask(context, "Approve these changes?", false)) {
+                            *context.output.out << "Not approved.\n\n";
+                            continue;
+                        }
+                        json approved = engine::Engine::envelope([&] { return engine::approve_plan(context.engine, id, approver()); });
+                        if (!approved.value("ok", false)) emit(context.output, approved);
+                        else *context.output.out << style.green("Approved") << ": the agent can apply it now.\n\n";
+                    }
+                }
+                // Wait for the next plan, watching the terminal: end of input (Ctrl-D) or q stops.
+                struct pollfd input{STDIN_FILENO, POLLIN, 0};
+                if (::poll(&input, 1, 500) > 0) {
+                    std::string line;
+                    if (!std::getline(std::cin, line) || trim(line) == "q") return 0;
+                }
             }
-            return execute(context, id);
+        }
+
+        int run_approve(Context& context, const Args& args) {
+            if (args.flag("watch")) {
+                if (!args.positional.empty()) throw Failure(Code::usage, "usage: forti approve --watch");
+                return approve_watch(context, args);
+            }
+            return approve_one(context, args, 0);
+        }
+
+        // Plans `request` and makes the change as the profile's mode allows (plan --apply, set, create,
+        // delete). --json: no questions; a guarded plan stops at the approval.
+        int plan_and_apply(Context& context, const Args& args, const json& request) {
+            json planned = engine::Engine::envelope([&] { return context.engine.plan(request); });
+            if (!planned.value("ok", false)) return emit(context.output, planned);
+            std::string id = planned["data"].value("id", "");
+            if (context.output.format == Format::json) {
+                json applied = engine::Engine::envelope([&] { return context.engine.apply({{"plan_id", id}}); });
+                if (applied.value("ok", false)) applied["data"]["plan"] = planned["data"];
+                else if (applied["error"].contains("details") && applied["error"]["details"].is_object())
+                    applied["error"]["details"]["plan"] = planned["data"];
+                return emit(context.output, applied);
+            }
+            return review_and_apply(context, args, id, planned["data"]);
         }
 
         int run_plan(Context& context, const Args& args) {
             std::string verb = args.positional.empty() ? "" : args.positional[0];
             if (verb == "show") return plan_show(context, args);
             if (verb == "list") return plan_list(context, args);
-            if (verb == "approve") return plan_approve(context, args);
+            if (verb == "approve") return approve_one(context, args, 1);
 
             json request = json::object();
             if (verb.empty()) {
@@ -543,35 +772,46 @@ namespace forti::cli {
                 else throw Failure(Code::usage, "the plan file must hold a request object or an array of operations");
             } else if (verb == "set" || verb == "create" || verb == "delete" || verb == "action") {
                 if (args.value("file")) throw Failure(Code::usage, "--file cannot be combined with a plan subcommand");
-                request["operations"] = json::array({operation_from_args(verb, args)});
+                std::vector<std::string> words(args.positional.begin() + 1, args.positional.end());
+                request["operations"] = json::array({operation_from_words(verb, words, args)});
             } else throw Failure(Code::usage, std::format("unknown plan subcommand \"{}\" (see forti plan --help)", verb));
             add_globals(request, args);
 
+            if (args.flag("apply")) return plan_and_apply(context, args, request);
             Style style = style_for(STDOUT_FILENO);
             bool verbose = args.flag("verbose");
-            json planned = engine::Engine::envelope([&] { return context.engine.plan(request); });
-            if (!args.flag("apply") || !planned.value("ok", false))
-                return emit(context.output, planned,
-                            [&](std::ostream& out, const json& data, const json&) { render_plan(out, style, data, verbose); });
+            return emit(context.output, engine::Engine::envelope([&] { return context.engine.plan(request); }),
+                        [&](std::ostream& out, const json& data, const json&) { render_plan(out, style, data, verbose); });
+        }
 
-            // --apply: plan and apply in one command, as the profile's mode allows.
-            std::string id = planned["data"].value("id", "");
-            if (context.output.format == Format::json) {
-                json applied = engine::Engine::envelope([&] { return context.engine.apply({{"plan_id", id}}); });
-                if (applied.value("ok", false)) applied["data"]["plan"] = planned["data"];
-                else if (applied["error"].contains("details") && applied["error"]["details"].is_object())
-                    applied["error"]["details"]["plan"] = planned["data"];
-                return emit(context.output, applied);
+        // forti set | create | delete: one command, at most one question.
+        int run_change(Context& context, const Args& args, const std::string& verb) {
+            json request = {{"operations", json::array({operation_from_words(verb, args.positional, args)})}};
+            add_globals(request, args);
+            if (args.flag("dry-run")) {
+                Style style = style_for(STDOUT_FILENO);
+                bool verbose = args.flag("verbose");
+                return emit(context.output, engine::Engine::envelope([&] { return context.engine.plan(request); }),
+                            [&](std::ostream& out, const json& data, const json&) { render_plan(out, style, data, verbose); });
             }
-            bool guarded = planned["data"].value("mode", "") == "guarded";
-            if (guarded && at_terminal(context)) {
-                // The plan was just printed in full by the question's preview: approve it here.
-                if (!confirm_at_terminal(context, args, id, true, "plan")) return engine::exit_code(Code::approval_required);
-            } else emit(context.output, planned, [&](std::ostream& out, const json& data, const json&) {
-                render_plan(out, style, data, verbose);
-                out << "\n";
-            });
-            return execute(context, id);
+            return plan_and_apply(context, args, request);
+        }
+
+        int run_set(Context& context, const Args& args) { return run_change(context, args, "set"); }
+        int run_create(Context& context, const Args& args) { return run_change(context, args, "create"); }
+        int run_delete(Context& context, const Args& args) { return run_change(context, args, "delete"); }
+
+        // Shows the named plan and applies it as its profile's mode allows. A plan named exactly (or
+        // already approved) in autonomous mode runs without being shown again.
+        int apply_named(Context& context, const Args& args, const Named& named) {
+            const std::string& id = named.id;
+            if (context.output.format == Format::json) return execute(context, id);
+            json shown = engine::Engine::envelope([&] { return engine::show_plan(context.engine, id); });
+            if (!shown.value("ok", false)) return emit(context.output, shown);
+            const json& data = shown["data"];
+            std::string state = data["state"].value("state", "");
+            if (state == "applied") return execute(context, id);   // apply refuses, with the reason
+            return review_and_apply(context, args, id, data);
         }
 
         int run_apply(Context& context, const Args& args) {
@@ -583,27 +823,20 @@ namespace forti::cli {
                 return engine::ok(json::object());
             });
             if (!resolved.value("ok", false)) return emit(context.output, resolved);
-            if (!named.exact && context.output.format == Format::text)
-                *context.output.err << std::format("forti: using plan {}\n", named.id);
-            if (!confirm_at_terminal(context, args, named.id, named.exact, "plan"))
-                return engine::exit_code(Code::approval_required);
-            return execute(context, named.id);
+            return apply_named(context, args, named);
         }
 
         // The rollback plan to apply: of PLAN (or PLAN itself when it is a rollback plan), else the
         // newest one of the profile not yet applied, which undoes the profile's last apply.
         int run_rollback(Context& context, const Args& args) {
             if (args.positional.size() > 1) throw Failure(Code::usage, "usage: forti rollback [plan id]");
-            json target, undone;
+            json target;
             json resolved = engine::Engine::envelope([&] {
                 json plans = stored_plans(context);
-                auto find = [&](const std::string& id) -> json {
-                    for (const auto& plan: plans) if (plan.value("id", "") == id) return plan;
-                    return json();
-                };
                 if (!args.positional.empty()) {
-                    std::string id = name_plan(context, args, args.positional[0]).id;
-                    json plan = find(id);
+                    std::string id = name_plan(context, args, args.positional[0], true).id;
+                    json plan;
+                    for (const auto& candidate: plans) if (candidate.value("id", "") == id) plan = candidate;
                     if (plan.is_null()) throw Failure(Code::not_found, std::format("no plan {}", id));
                     if (plan.value("kind", "plan") == "rollback") target = plan;
                     else
@@ -626,91 +859,142 @@ namespace forti::cli {
                     if (target.is_null())
                         throw Failure(Code::not_found, std::format("nothing to roll back{}: no applied plan has a rollback plan "
                                                                    "waiting", profile ? " for profile " + *profile : ""),
-                                      {{"hint", "forti plan list shows the stored plans"}});
+                                      {{"hint", "forti history shows what was applied"}});
                 }
                 if (target.value("state", "") == "applied")
                     throw Failure(Code::policy_denied, std::format("rollback plan {} was already applied", target.value("id", "")));
-                undone = find(target.value("rollback_of", ""));
                 return engine::ok(json::object());
             });
             if (!resolved.value("ok", false)) return emit(context.output, resolved);
-            std::string id = target.value("id", "");
-            if (context.output.format == Format::text) {
-                std::string what = "Rolling back plan " + target.value("rollback_of", "");
-                if (undone.is_object()) what += ": " + undone.value("summary", "");
-                *context.output.out << printable(what) << "\n"
-                                    << printable(std::format("with rollback plan {}: {}", id, target.value("summary", ""))) << "\n\n";
-            }
-            if (!confirm_at_terminal(context, args, id, false, "rollback plan")) return engine::exit_code(Code::approval_required);
-            return execute(context, id);
+            return apply_named(context, args, {target.value("id", ""), false});
         }
 
     }  // namespace
 
     std::vector<Command> plan_commands() {
+        constexpr std::string_view change_notes =
+                "Resources are named as for forti get: firewall/address web, firewall/address/web, firewall\n"
+                "address web, or address web. Values: attr=value is JSON when it parses as a number, boolean,\n"
+                "array or object, else text. Table attributes (srcaddr, member, ...) are replaced wholesale by\n"
+                "FortiOS: list every entry.\n"
+                "\n"
+                "What happens follows the profile's mode. read-only: shows the change, changes nothing.\n"
+                "guarded: shows the change and asks once, \"Apply these changes?\" (without a terminal it stops\n"
+                "there: approve with forti approve ID). autonomous: applies without asking. Every change is\n"
+                "planned first (the before-state is read and checked again just before writing), verified by\n"
+                "re-reading, recorded in the audit log (forti history), and can be undone with forti rollback.\n";
+        static const std::string set_help = std::string(
+                "usage: forti set <resource> [key] attr=value... [--clear attr]\n"
+                "\n"
+                "Change attributes of a table object, or of a singleton (no key).\n"
+                "\n") + std::string(change_notes) +
+                "\n"
+                "options:\n"
+                "  --clear ATTR   reset an attribute to its default (repeatable)\n"
+                "  --dry-run      show the plan; change nothing (same as forti plan set)\n"
+                "  --verbose      also show the request lines and the plan digest\n"
+                "\n"
+                "examples:\n"
+                "  forti set firewall/address/web comment=\"Web server\"\n"
+                "  forti set system global hostname=fw-lab\n"
+                "  forti set firewall/policy 7 status=disable\n";
+        static const std::string create_help = std::string(
+                "usage: forti create <resource> attr=value... [--object JSON|@file]\n"
+                "\n"
+                "Create a table object. attr=value pairs win over --object.\n"
+                "\n") + std::string(change_notes) +
+                "\n"
+                "options:\n"
+                "  --object JSON  the object as JSON (@file reads a file, @- standard input)\n"
+                "  --dry-run      show the plan; change nothing\n"
+                "  --verbose      also show the request lines and the plan digest\n"
+                "\n"
+                "example:\n"
+                "  forti create firewall/address name=web subnet=\"192.0.2.10 255.255.255.255\"\n";
+        static const std::string delete_help = std::string(
+                "usage: forti delete <resource> <key>\n"
+                "\n"
+                "Delete a table object.\n"
+                "\n") + std::string(change_notes) +
+                "\n"
+                "options:\n"
+                "  --dry-run      show the plan; change nothing\n"
+                "  --verbose      also show the request lines and the plan digest\n"
+                "\n"
+                "example:\n"
+                "  forti delete firewall/address/web\n";
         return {
-            {"plan", "Preview changes as a stored, digest-bound plan",
-             "usage: forti plan --file changes.json|-           plan a request ({operations: [...]}) or an array\n"
-             "       forti plan set <resource> [key] attr=value... [--clear attr]\n"
-             "       forti plan create <resource> attr=value... | --object JSON|@file\n"
-             "       forti plan delete <resource> <key>\n"
-             "       forti plan action <monitor/path> [--body JSON|@file]\n"
-             "       forti plan show [id]\n"
-             "       forti plan list\n"
-             "       forti plan approve [id] [--yes]            guarded mode: approve a plan (CLI only)\n"
+            {"set", "Change an object's attributes (one command, at most one question)", set_help,
+             {{"clear"}, {"dry-run", "verbose"}, {}}, run_set},
+            {"create", "Create an object", create_help, {{"object"}, {"dry-run", "verbose"}, {}}, run_create},
+            {"delete", "Delete an object", delete_help, {{}, {"dry-run", "verbose"}, {}}, run_delete},
+            {"rollback", "Undo the last change (or a named one)",
+             "usage: forti rollback [plan id]\n"
              "\n"
-             "Planning reads the device and never changes it. The plan records the before-state, a field\n"
-             "diff, the exact request body and a risk tier; `forti apply <id>` executes it once.\n"
-             "--apply plans and applies in one command, as the profile's mode allows (guarded: at a\n"
-             "terminal it asks for your approval; otherwise it stops at the approval).\n"
-             "Values: attr=value is JSON when it parses as a number, boolean, array or object, else text.\n"
-             "Table attributes (srcaddr, member, ...) are replaced wholesale by FortiOS: list every entry.\n"
-             "Sensitive values (passwords, PSKs, keys, tokens) are redacted in all output; the stored plan\n"
-             "file (0600) keeps them because apply needs them.\n"
+             "Applies the rollback plan written when a change was applied: without an id, the one of the\n"
+             "profile's last change not yet rolled back; with an id, the rollback of that plan (or that\n"
+             "rollback plan). It shows what it undoes, then applies as the profile's mode allows (guarded:\n"
+             "one question). A rollback is itself a change: it re-checks the before-state, and it writes a\n"
+             "rollback of its own, so forti rollback again re-does the change.\n"
              "\n"
-             "Naming a plan: the full id, a unique prefix of it or of its last part (b75ef1), or latest.\n"
-             "At a terminal, show, approve and apply without an id take the newest plan waiting to be\n"
-             "applied (shown first). approve at a terminal then offers to apply it.\n"
+             "A rollback needs a working management path to the device; it is not independent recovery.\n",
+             {{}, {"verbose"}, {}}, run_rollback},
+            {"approve", "Approve a change an agent planned (guarded mode)",
+             "usage: forti approve [id] [--yes]\n"
+             "       forti approve --watch [-p PROFILE]\n"
+             "\n"
+             "Approves a plan so the agent (or script) that made it can apply it; the approval is bound to\n"
+             "the plan's exact content and is used once. At a terminal it shows the change and asks; without\n"
+             "an id it takes the plan waiting for the profile (when only one is). Without a terminal only\n"
+             "--yes approves. To approve and apply a plan yourself, use forti apply.\n"
+             "\n"
+             "--watch keeps asking: each plan an agent makes (and those made in the last hour) is shown\n"
+             "and approved with one answer, until Ctrl-C. Keep it open next to an agent whose MCP client\n"
+             "cannot ask you in the chat.\n"
              "\n"
              "options:\n"
-             "  --apply      apply the new plan straight away (plan set/create/delete/action/--file)\n"
-             "  --verbose    also print the plan digest\n"
-             "  --yes, -y    approve: no question, and no offer to apply\n"
+             "  --watch      approve plans as they arrive\n"
+             "  --yes, -y    approve without asking (scripts; your decision, made in advance)\n"
+             "  --verbose    also show the request lines and the plan digest\n",
+             {{}, {"yes", "watch", "verbose"}, {{'y', "yes"}}}, run_approve},
+            {"plan", "Preview, save and inspect changes as plans",
+             "usage: forti plan set|create|delete <resource> ... [--apply]   as forti set|create|delete\n"
+             "       forti plan action <monitor/path> [--body JSON|@file] [--apply]\n"
+             "       forti plan --file changes.json|- [--apply]  a request ({operations: [...]}) or an array\n"
+             "       forti plan show [id]\n"
+             "       forti plan list\n"
+             "       forti plan approve [id] [--yes]            same as forti approve\n"
              "\n"
-             "examples:\n"
-             "  forti plan set firewall/address LAN comment=\"office LAN\" --clear color\n"
-             "  forti plan create firewall/address name=web subnet=\"192.0.2.10 255.255.255.255\"\n"
-             "  forti plan set system/global hostname=fw-lab --apply\n",
+             "A plan records the before-state, a field diff, the exact request body and a risk tier, and\n"
+             "never changes the device. Without --apply it is saved for later: forti apply ID (or forti\n"
+             "approve ID for an agent to apply). --apply makes the change straight away, exactly like\n"
+             "forti set/create/delete. Sensitive values (passwords, PSKs, keys, tokens) are redacted in all\n"
+             "output; the stored plan file (0600) keeps them because apply needs them.\n"
+             "\n"
+             "Naming a plan: the full id, a unique prefix of it or of its last part (b75ef1), or latest.\n"
+             "\n"
+             "options:\n"
+             "  --apply      make the change now, as the profile's mode allows\n"
+             "  --verbose    also print the plan digest\n"
+             "  --yes, -y    approve: no question (scripts)\n",
              {{"file", "clear", "object", "body"}, {"yes", "apply", "verbose"}, {{'f', "file"}, {'y', "yes"}}}, run_plan},
-            {"apply", "Execute a stored plan (per the profile's mode)",
+            {"apply", "Apply a saved plan (as the profile's mode allows)",
              "usage: forti apply [plan id]\n"
              "\n"
-             "read-only profiles refuse. guarded profiles need a human approval: at a terminal, forti apply\n"
-             "shows the plan and asks for it (the same approval as `forti plan approve <id>`); elsewhere run\n"
-             "`forti plan approve <id>` first. autonomous profiles run without an approval. Every apply\n"
-             "re-checks the plan digest, the device serial and every before-state, runs the operations in\n"
-             "order without retries, verifies each one by re-reading, writes a rollback plan (`forti\n"
-             "rollback`) and appends to the audit log. Critical-risk operations are followed by a\n"
-             "management connectivity probe.\n"
+             "Shows the plan and applies it. read-only profiles refuse. guarded: at a terminal it asks once,\n"
+             "\"Apply these changes?\"; a plan already approved (forti approve) applies without asking.\n"
+             "autonomous: no question. Every apply re-checks the plan digest, the device serial and every\n"
+             "before-state, runs the operations in order without retries, verifies each one by re-reading,\n"
+             "writes a rollback plan (forti rollback) and appends to the audit log (forti history).\n"
+             "Critical-risk operations are followed by a management connectivity probe.\n"
              "\n"
-             "The id may be a unique prefix (or its last part) or latest; at a terminal, without an id,\n"
-             "the newest plan waiting to be applied (shown first, then confirmed).\n"
+             "The id may be a unique prefix (or its last part). At a terminal, without an id (or with\n"
+             "latest): the plan waiting for the profile, made in the last day; when several are waiting\n"
+             "you pick one. Without a terminal a plan is always named.\n"
              "\n"
              "The rollback plan needs a working management path: it is not independent recovery. Have a\n"
              "console, out-of-band interface or device-side auto-revert before critical changes.\n",
              {{}, {"verbose"}, {}}, run_apply},
-            {"rollback", "Undo the last applied plan with its rollback plan",
-             "usage: forti rollback [plan id]\n"
-             "\n"
-             "Applies the rollback plan written when a plan was applied: without an id, the one of the\n"
-             "profile's last apply (not yet rolled back); with an id, the rollback of that plan (or that\n"
-             "rollback plan). It says what it undoes first, then applies like `forti apply`: guarded\n"
-             "profiles need the human approval (asked inline at a terminal), read-only profiles refuse.\n"
-             "A rollback is itself a plan: it re-checks the before-state, and it writes a rollback of its\n"
-             "own, so `forti rollback` again re-does the change.\n"
-             "\n"
-             "A rollback needs a working management path to the device; it is not independent recovery.\n",
-             {{}, {"verbose"}, {}}, run_rollback},
         };
     }
 

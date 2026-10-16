@@ -146,6 +146,18 @@ namespace forti::cli {
         }
 
         // A hint for errors that carry none: the next command to run, from the error's details.
+        // FortiOS answers 401 both for a wrong key and for a request from outside the API user's trusted
+        // hosts, so a 401 does not prove the key wrong; 403 is the admin profile.
+        std::string auth_hint(int status) {
+            if (status == 403)
+                return "usually the API user's admin profile does not allow this: give its accprofile read access to this "
+                       "area (read-write for changes). Also check that its trusted hosts include this machine";
+            return "The key may be right: FortiOS also answers 401 when this machine's address is not in the API user's "
+                   "trusted hosts (before FortiOS 7.4.1, the admins' trusted hosts too). Check them first, then the key "
+                   "(execute api-user generate-key NAME issues a new one). forti did not retry: FortiOS locks the user "
+                   "out after repeated failures";
+        }
+
         std::string generic_hint(std::string_view code, std::string_view message, const json& details) {
             std::string profile = details.value("profile", std::string("NAME"));
             if (code == "config") {
@@ -169,9 +181,7 @@ namespace forti::cli {
             if (code == "connection")
                 return "run `forti doctor` for details; `forti configure -p NAME` changes the address or how the certificate is "
                        "trusted (verification is never turned off)";
-            if (code == "auth")
-                return "the FortiGate rejected the API key. forti did not retry (FortiOS locks the API user out after a few "
-                       "failures). Check the key, that the API user's trusted hosts include this machine, and its admin profile";
+            if (code == "auth") return auth_hint(details.value("http_status", 401));
             if (code == "unknown_resource") return "`forti discover <search>` lists resources";
             if (code == "usage") return message.starts_with("usage:") ? "" : "see `forti --help` or `forti <command> --help`";
             if (code == "policy_denied" && message.find("read-only") != std::string_view::npos)
