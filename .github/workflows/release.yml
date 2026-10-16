@@ -3,7 +3,8 @@
 #   vlr cut patch|minor|major|X.Y.Z --push      (locally) -> pushes vX.Y.Z -> this workflow
 #
 # build ─▶ homebrew-check ─▶ publish-apt ─▶ github-release ─▶ homebrew-tap ─▶ finalize
-# (homebrew-check also makes the macOS bottle: github-release attaches it, homebrew-tap names it)
+# (homebrew-check also makes the macOS bottles, arm64 and Intel: github-release attaches them,
+# homebrew-tap names them)
 #                              └─▶ docs (pmdocs push of docs/ over GitHub OIDC)
 #
 # build: prepare, build the .deb against libforti-api-dev, source archive, formula, validate, then a
@@ -136,10 +137,16 @@ jobs:
           path: release
           if-no-files-found: error
 
+  # One bottle per architecture, built on macOS 15 (older Xcodes lack C++23 pieces forti uses): Homebrew pours a
+  # bottle on that macOS and every later one (arm64_sequoia serves 15, 26 and 27).
   homebrew-check:
-    name: Homebrew formula install (macOS)
-    runs-on: macos-latest
+    name: Homebrew formula install and bottle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -165,7 +172,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: forti-cli-bottle-${{ needs.build.outputs.version }}
+          name: forti-cli-bottle-${{ needs.build.outputs.version }}-${{ matrix.os }}
           path: bottle
           if-no-files-found: error
 
@@ -287,7 +294,8 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: forti-cli-bottle-${{ needs.build.outputs.version }}
+          pattern: forti-cli-bottle-${{ needs.build.outputs.version }}-*
+          merge-multiple: true
           path: bottle
 
       # The build's artifacts are verified first; the macOS bottle then joins them (SHA256SUMS is
@@ -330,7 +338,8 @@ jobs:
       # committing; refuses to change a formula version that is already published.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: forti-cli-bottle-${{ needs.build.outputs.version }}
+          pattern: forti-cli-bottle-${{ needs.build.outputs.version }}-*
+          merge-multiple: true
           path: bottle
 
       # The formula names the bottle the GitHub release now carries, so installs pour it.

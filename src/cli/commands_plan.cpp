@@ -924,7 +924,7 @@ namespace forti::cli {
                 "example:\n"
                 "  forti delete firewall/address/web\n";
         return {
-            {"set", "Change an object's attributes (one command, at most one question)", set_help,
+            {"set", "Change an object's attributes", set_help,
              {{"clear"}, {"dry-run", "verbose"}, {}}, run_set},
             {"create", "Create an object", create_help, {{"object"}, {"dry-run", "verbose"}, {}}, run_create},
             {"delete", "Delete an object", delete_help, {{}, {"dry-run", "verbose"}, {}}, run_delete},
