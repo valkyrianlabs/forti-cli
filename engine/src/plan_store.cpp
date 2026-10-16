@@ -52,7 +52,7 @@ namespace forti::engine::detail {
 
         [[noreturn]] void refuse_approval(std::string_view id, std::string_view reason, const std::string& message) {
             throw Failure(Code::approval_required, message,
-                          {{"plan_id", id}, {"reason", reason}, {"approve_command", std::format("forti plan approve {}", id)}});
+                          {{"plan_id", id}, {"reason", reason}, {"approve_command", std::format("forti approve {}", id)}});
         }
 
         fs::path plans_dir(const Paths& paths) { return paths.state / "plans"; }
@@ -254,7 +254,7 @@ namespace forti::engine::detail {
             refuse_approval(id, "used", std::format("the approval of plan {} was already used; plan again", id));
         auto record = load_approval(paths, id);
         if (!record)
-            refuse_approval(id, "missing", std::format("plan {} needs a human approval (guarded mode): forti plan approve {}", id, id));
+            refuse_approval(id, "missing", std::format("plan {} needs your approval (guarded mode): forti approve {}", id, id));
         if (!record->is_object() || record->value("format", 0) != approval_format || !(*record)["digest"].is_string() ||
             !(*record)["expires_at"].is_string())
             refuse_approval(id, "malformed", std::format("the approval record of plan {} is malformed; approve again", id));

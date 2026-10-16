@@ -36,6 +36,8 @@ namespace forti::engine {
         std::function<std::shared_ptr<fortiapi::Transport>(const fortiapi::Config&)> transport;
         // Set: use these profiles instead of config.json (tests, embedding).
         std::optional<ProfileSet> profiles;
+        // Who drives this engine, recorded in audit events ("cli:alice", "mcp:claude-code"). Empty: not recorded.
+        std::string actor;
     };
 
     // Plan ids: 12-32 characters of [a-z0-9-], starting with a letter or digit, so an id is safe to

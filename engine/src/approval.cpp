@@ -39,6 +39,7 @@ namespace forti::engine {
                       std::chrono::seconds lifetime) {
         const Paths& paths = engine.options().paths;
         json event = {{"event", "approve"}, {"plan_id", plan_id}, {"approved_by", approved_by}};
+        if (!engine.options().actor.empty()) event["actor"] = engine.options().actor;
         try {
             detail::validate_plan_id(plan_id);
             if (approved_by.empty() || approved_by.size() > 128)

@@ -160,10 +160,10 @@ TEST_F(PlanCli, ApplyFlagStopsAtTheApprovalWithoutATerminal) {
     mode = engine::Mode::guarded;
     transport->reply(200, fake::envelope(json::array({address("LAN", {{"comment", "old"}})})));
     EXPECT_EQ(forti({"plan", "set", "firewall/address", "LAN", "comment=new", "--apply"}), engine::exit_code(engine::Code::approval_required));
-    EXPECT_NE(err.str().find("forti plan approve"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("forti approve "), std::string::npos) << err.str();
     // The approval command is printed once, not twice.
     std::string text = err.str();
-    EXPECT_EQ(text.find("forti plan approve"), text.rfind("forti plan approve")) << text;
+    EXPECT_EQ(text.find("forti approve "), text.rfind("forti approve ")) << text;
     EXPECT_EQ(writes(), 0u);
 }
 
@@ -200,7 +200,7 @@ TEST_F(PlanCli, RollbackInGuardedModeNeedsTheApproval) {
     mode = engine::Mode::guarded;
     transport->requests.clear();
     EXPECT_EQ(forti({"rollback"}), engine::exit_code(engine::Code::approval_required));
-    EXPECT_NE(err.str().find("forti plan approve"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("forti approve "), std::string::npos) << err.str();
     EXPECT_EQ(writes(), 0u);
 }
 

@@ -1688,7 +1688,7 @@ namespace forti::cli {
         std::string_view mode_meaning(Mode mode) {
             switch (mode) {
                 case Mode::read_only: return "read-only: reads only, every change is refused";
-                case Mode::guarded: return "guarded: changes apply after a human approves the plan (`forti plan approve`)";
+                case Mode::guarded: return "guarded: changes apply after a human approves the plan (`forti approve`)";
                 case Mode::autonomous: return "autonomous: changes apply without interactive approval; safeguards still apply";
             }
             return "";
@@ -1918,7 +1918,7 @@ namespace forti::cli {
              "\n"
              "modes:\n"
              "  read-only    reads only; plans can be previewed, every apply is refused (default)\n"
-             "  guarded      apply needs a human approval of the plan: `forti plan approve <id>`\n"
+             "  guarded      apply needs a human approval of the plan: `forti approve <id>`\n"
              "  autonomous   apply runs without interactive approval; validation, drift checks,\n"
              "               verification, audit and rollback plans still apply. The FortiOS account's\n"
              "               admin profile is the real limit on what an agent can change.\n",

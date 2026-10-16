@@ -61,7 +61,7 @@ namespace forti::engine {
     // own privileges remain the primary authorization boundary; the mode is the operator's policy on top.
     enum class Mode {
         read_only,    // no mutations (default)
-        guarded,      // mutations need a human approval of the exact plan (`forti plan approve`)
+        guarded,      // mutations need a human approval of the exact plan (`forti approve`)
         autonomous,   // mutations run without interactive approval; safeguards still apply
     };
 
