@@ -156,6 +156,11 @@ jobs:
       - name: Install the release formula from a local tap, run its test block, make the bottle
         run: |
           brew install meson ninja pkgconf
+          # A bottle build needs its dependencies installed already; those without bottles of their
+          # own are built from source here (brew install --build-bottle refuses to do it).
+          brew tap valkyrianlabs/tap
+          if brew commands --quiet | grep -qx trust; then brew trust valkyrianlabs/tap; fi
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-from-source valkyrianlabs/tap/forti-api valkyrianlabs/tap/forti-mcp
           bash .github/scripts/homebrew-local-install.sh
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
