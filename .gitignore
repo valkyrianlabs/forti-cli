@@ -10,3 +10,4 @@ compile_commands.json
 *.iml
 .env
 __pycache__/
+.claude/worktrees/

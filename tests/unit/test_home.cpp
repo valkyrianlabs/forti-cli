@@ -624,7 +624,7 @@ TEST_F(ProfileCli, SetValidatesLikeConfigJsonAndRebindsSecrets) {
     EXPECT_EQ(run({"profile", "set", "lab"}), 2);
     EXPECT_EQ(slurp(paths.config_file()), before);   // a refused set changes nothing
     EXPECT_EQ(run({"profile", "set", "lab", "host=https://fw/"}), 2);
-    EXPECT_NE(err.str().find("host takes a host name"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("not a host name or address"), std::string::npos) << err.str();
     EXPECT_EQ(err.str().find("--host"), std::string::npos) << err.str();
 
     // Clearing the client certificate clears its password reference too.

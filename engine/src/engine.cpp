@@ -122,6 +122,14 @@ namespace forti::engine {
             config.ca_bundle = profile.ca_bundle;
             config.client_cert = profile.client_cert;
             config.resolve_ip = profile.resolve_ip;
+            // A missing certificate file would surface as a TLS failure of the first request.
+            for (const auto& [what, path]: {std::pair{"client certificate", &profile.client_cert}, std::pair{"CA bundle", &profile.ca_bundle}}) {
+                std::error_code error;
+                if (!path->empty() && !std::filesystem::is_regular_file(*path, error))
+                    throw Failure(Code::config, std::format("profile {}'s {} is missing: {}", profile.name, what, *path),
+                                  {{"profile", profile.name}, {"missing", std::string(what) == "client certificate" ? "client_cert" : "ca_bundle"},
+                                   {"path", *path}});
+            }
             config.connect_timeout = std::chrono::milliseconds(profile.connect_timeout_ms);
             config.timeout = std::chrono::milliseconds(profile.timeout_ms);
             if (retries) config.retries = *retries;

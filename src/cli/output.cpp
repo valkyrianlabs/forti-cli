@@ -7,6 +7,7 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <iostream>
 #include <map>
@@ -138,19 +139,43 @@ namespace forti::cli {
             print_table(out, columns, cells);
         }
 
-        std::string generic_hint(std::string_view code, std::string_view message) {
-            if (code == "config")
+        std::string join(const json& list) {
+            std::string out;
+            for (const auto& item: list) out += (out.empty() ? "" : ", ") + scalar(item);
+            return out;
+        }
+
+        // A hint for errors that carry none: the next command to run, from the error's details.
+        std::string generic_hint(std::string_view code, std::string_view message, const json& details) {
+            std::string profile = details.value("profile", std::string("NAME"));
+            if (code == "config") {
+                if (details.contains("profiles") && details["profiles"].is_array()) {
+                    if (details["profiles"].empty()) return "create one: forti configure";
+                    return std::format("profiles: {}. Choose one with -p NAME, or make one the default: forti profile default NAME",
+                                       join(details["profiles"]));
+                }
+                if (details.value("missing", "") == "client_cert") {
+                    std::filesystem::path path = details.value("path", "");
+                    if (path.filename() == "client.p12" && path.parent_path().parent_path().filename() == "certs")
+                        return std::format("recreate it: forti cert create {} --force (same CA and CN, so the FortiGate needs no change)",
+                                           path.parent_path().filename().string());
+                    return std::format("choose a certificate: forti cert use NAME -p {}, or set the file: forti profile set {} client_cert=PATH",
+                                       profile, profile);
+                }
+                if (details.value("missing", "") == "ca_bundle")
+                    return std::format("set the file: forti profile set {} ca_bundle=PATH", profile);
                 return message.find("forti configure") != std::string_view::npos ? "" : "run `forti doctor` to check the configuration";
+            }
             if (code == "connection")
-                return "run `forti doctor`; a TLS failure needs --ca-bundle or --resolve-ip (`forti configure`). "
-                       "Certificate verification cannot be disabled";
+                return "run `forti doctor` for details; `forti configure -p NAME` changes the address or how the certificate is "
+                       "trusted (verification is never turned off)";
             if (code == "auth")
-                return "the device rejected the API key. forti does not retry (FortiOS locks the API user out after "
-                       "repeated failures): check the key, the API user's trusted hosts and its admin profile";
+                return "the FortiGate rejected the API key. forti did not retry (FortiOS locks the API user out after a few "
+                       "failures). Check the key, that the API user's trusted hosts include this machine, and its admin profile";
             if (code == "unknown_resource") return "`forti discover <search>` lists resources";
-            if (code == "usage") return "see `forti --help` or `forti <command> --help`";
+            if (code == "usage") return message.starts_with("usage:") ? "" : "see `forti --help` or `forti <command> --help`";
             if (code == "policy_denied" && message.find("read-only") != std::string_view::npos)
-                return "profiles are read-only by default; enable writes with `forti configure --profile NAME --writes`";
+                return std::format("allow changes: forti profile mode {} guarded (you approve each plan), or autonomous", profile);
             return "";
         }
 
@@ -346,7 +371,7 @@ namespace forti::cli {
                             profile.contains("api_key") ? scalar(profile["api_key"]) : ""});
         }
         print_table(out, {"profile", "host", "vdom", "mode", "api key"}, rows);
-        out << styled("* default profile", Style::dim) << "\n";
+        if (!fallback.empty()) out << styled("* default profile", Style::dim) << "\n";
     }
 
     int exit_status(std::string_view code) {
@@ -384,7 +409,7 @@ namespace forti::cli {
             std::string hint = details.contains("hint")
                                ? (raw_details.is_object() && raw_details.contains("hint") && raw_details["hint"].is_string()
                                   ? printable(raw_details["hint"].get<std::string>(), true) : scalar(details["hint"]))
-                               : generic_hint(code, message);
+                               : generic_hint(code, message, details);
             if (!hint.empty()) *output.err << styled("  hint:", Style::cyan) << " " << hint << "\n";
         }
         return ok ? 0 : exit_status(envelope.contains("error") ? envelope["error"].value("code", "internal") : "internal");

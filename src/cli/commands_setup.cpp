@@ -58,16 +58,65 @@ namespace forti::cli {
 
         void validate_host(std::string_view host) {
             bool bracketed = host.starts_with('[') && host.ends_with(']');
-            if (host.empty()) throw Failure(Code::usage, "--host is required");
-            if (host.find("://") != std::string_view::npos || host.find('/') != std::string_view::npos)
-                throw Failure(Code::usage, std::format("--host takes a host name or address, not a URL: {}", host),
-                              {{"hint", "e.g. --host fw.example.net --port 8443"}});
+            if (host.empty()) throw Failure(Code::usage, "the FortiGate address is empty");
+            if (host.find("://") != std::string_view::npos || host.find_first_of("/?#") != std::string_view::npos)
+                throw Failure(Code::usage, std::format("not a host name or address: {}", host),
+                              {{"hint", "e.g. fw.example.net, fw.example.net:8443 or [2001:db8::1]:8443"}});
             if (!bracketed && host.find(':') != std::string_view::npos)
-                throw Failure(Code::usage, std::format("--host must not contain a port: {}", host),
-                              {{"hint", "pass the port with --port; write an IPv6 address as [2001:db8::1]"}});
+                throw Failure(Code::usage, std::format("not a host name or address: {}", host),
+                              {{"hint", "write an IPv6 address in brackets: [2001:db8::1]:8443"}});
             for (char c: host)
                 if (std::isspace(static_cast<unsigned char>(c)) || std::iscntrl(static_cast<unsigned char>(c)))
-                    throw Failure(Code::usage, "--host contains whitespace");
+                    throw Failure(Code::usage, "the FortiGate address contains whitespace");
+        }
+
+        unsigned parse_port(const std::string& text);
+
+        // "fw", "fw:8443", "[2001:db8::1]:8443", a bare IPv6 address, or "https://fw:8443/any/path": the
+        // host (IPv6 in brackets) and, when one is given, the port.
+        struct Address {
+            std::string host;
+            std::optional<unsigned> port;
+        };
+
+        Address parse_address(std::string text) {
+            text = trim(std::move(text));
+            if (auto scheme = text.find("://"); scheme != std::string::npos) {
+                std::string name = text.substr(0, scheme);
+                std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (name != "https")
+                    throw Failure(Code::usage, std::format("the FortiOS REST API is HTTPS only: {}", text),
+                                  {{"hint", "e.g. fw.example.net:8443"}});
+                text = text.substr(scheme + 3);
+                text = text.substr(0, text.find_first_of("/?#"));
+            }
+            Address out;
+            std::string port;
+            bool has_port = false;
+            if (text.starts_with('[')) {
+                auto close = text.find(']');
+                if (close == std::string::npos) throw Failure(Code::usage, std::format("unbalanced [ in {}", text));
+                out.host = text.substr(0, close + 1);
+                std::string after = text.substr(close + 1);
+                if (!after.empty()) {
+                    if (after.front() != ':') throw Failure(Code::usage, std::format("not a host name or address: {}", text));
+                    port = after.substr(1);
+                    has_port = true;
+                }
+            } else if (auto colons = std::ranges::count(text, ':'); colons == 1) {
+                auto colon = text.find(':');
+                out.host = text.substr(0, colon);
+                port = text.substr(colon + 1);
+                has_port = true;
+            } else if (colons > 1) out.host = "[" + text + "]";   // a bare IPv6 address
+            else out.host = text;
+            validate_host(out.host);
+            if (has_port) out.port = parse_port(port);
+            return out;
+        }
+
+        std::string format_address(const std::string& host, unsigned port) {
+            return port == 443 ? host : std::format("{}:{}", host, port);
         }
 
         unsigned parse_port(const std::string& text) {
@@ -100,7 +149,10 @@ namespace forti::cli {
         std::string readable_file(std::string_view option, const std::string& text) {
             if (text.empty()) return "";
             std::error_code error;
-            fs::path path = fs::absolute(text, error).lexically_normal();
+            std::string expanded = text;
+            if (const char* home = std::getenv("HOME"); home && *home && (text == "~" || text.starts_with("~/")))
+                expanded = std::string(home) + text.substr(1);   // typed at a prompt, where no shell expands it
+            fs::path path = fs::absolute(expanded, error).lexically_normal();
             if (error || !fs::is_regular_file(path, error))
                 throw Failure(Code::config, std::format("--{}: no such file: {}", option, text));
             if (::access(path.c_str(), R_OK) != 0)
@@ -114,6 +166,52 @@ namespace forti::cli {
             } catch (const Failure& failure) {
                 throw Failure(Code::usage, failure.what(), {{"hint", "--mode read-only | guarded | autonomous"}});
             }
+        }
+
+        // ---- the FortiGate side: a REST API admin for forti ----
+
+        // FortiOS CLI that creates a REST API admin for forti (keywords of the FortiOS 7.4.8 schema).
+        // `source` is this machine's address as the FortiGate will see it, when known.
+        std::string api_user_steps(const std::string& source) {
+            std::string trusthost;
+            if (source.empty()) trusthost = "                        set ipv4-trusthost <this machine's IP address> 255.255.255.255\n";
+            else if (source.find(':') != std::string::npos)
+                trusthost = std::format("                        set type ipv6-trusthost\n"
+                                        "                        set ipv6-trusthost {}/128\n", source);
+            else trusthost = std::format("                        set ipv4-trusthost {} 255.255.255.255\n", source);
+            std::string groups;
+            for (const char* group: {"secfabgrp", "ftviewgrp", "authgrp", "sysgrp", "netgrp", "loggrp", "fwgrp", "vpngrp", "utmgrp", "wifi"})
+                groups += std::format("               set {} read\n", group);
+            return std::format(
+                    "On the FortiGate (FortiOS CLI), create a REST API admin for forti:\n"
+                    "\n"
+                    "  1. An admin profile: what forti may touch. read lets it read; use read-write where it should\n"
+                    "     make changes (guarded or autonomous mode):\n"
+                    "       config system accprofile\n"
+                    "           edit \"forti\"\n"
+                    "{}"
+                    "           next\n"
+                    "       end\n"
+                    "\n"
+                    "  2. The REST API admin, accepted only from this machine (the address the FortiGate sees: behind\n"
+                    "     NAT, the NAT address):\n"
+                    "       config system api-user\n"
+                    "           edit \"forti\"\n"
+                    "               set accprofile \"forti\"\n"
+                    "               set vdom \"root\"\n"
+                    "               config trusthost\n"
+                    "                   edit 1\n"
+                    "{}"
+                    "                   next\n"
+                    "               end\n"
+                    "           next\n"
+                    "       end\n"
+                    "\n"
+                    "  3. Its API key. FortiOS shows it once: copy it.\n"
+                    "       execute api-user generate-key forti\n"
+                    "\n"
+                    "  (In the GUI: System > Administrators > Create New > REST API Admin.)\n",
+                    groups, trusthost);
         }
 
         // ---- connection advice (configure and doctor) ----
@@ -214,6 +312,14 @@ namespace forti::cli {
             }
             bool erase(std::string_view account) override { return pending_.erase(std::string(account)) > 0; }
 
+            // The profile got its name after secrets were staged under a placeholder: move them.
+            void rename(const std::string& from, const std::string& to) {
+                std::map<std::string, std::string, std::less<>> moved;
+                for (auto& [account, secret]: pending_)
+                    moved.emplace(account.starts_with(from + "/") ? to + account.substr(from.size()) : account, std::move(secret));
+                pending_ = std::move(moved);
+            }
+
             // Writes staged secrets, and re-binds kept ones, for the store-source accounts of `profile`.
             void commit(const Profile& profile) {
                 auto binding = profile.secret_binding();
@@ -250,7 +356,45 @@ namespace forti::cli {
             PendingStore* secrets = nullptr;
             std::optional<std::string> certificate;   // a forti certificate newly chosen: the FortiGate may not know it
             bool created_certificate = false;
+            bool named = false;                       // the name is known (--profile); else it is asked after the check
+            std::string like;                         // the profile whose settings this one started from
         };
+
+        std::string profile_names(const ProfileSet& set) {
+            std::string names;
+            for (const auto& [name, profile]: set.profiles) names += (names.empty() ? "" : ", ") + name;
+            return names.empty() ? "none yet (forti configure)" : names;
+        }
+
+        Failure no_such_profile(const ProfileSet& set, const std::string& name) {
+            return Failure(Code::config, std::format("no profile named \"{}\"", name), {{"hint", std::format("profiles: {}", profile_names(set))}});
+        }
+
+        // A placeholder name until a new profile is named, after the check (it can never be saved).
+        constexpr std::string_view unnamed = "_unnamed";
+
+        // Starts a new profile from `source`'s settings: everything but the device (host, port, address,
+        // pinned certificate) and its API key. The client certificate is reused when it is one of forti's.
+        void apply_like(const Context& context, const ProfileSet& set, Draft& draft, const Profile& source) {
+            Profile& p = draft.profile;
+            const auto& paths = context.engine.options().paths;
+            p.vdom = source.vdom;
+            p.mode = source.mode;
+            p.backup_before_critical = source.backup_before_critical;
+            p.connect_timeout_ms = source.connect_timeout_ms;
+            p.timeout_ms = source.timeout_ms;
+            if (auto name = certs::used_by(paths, source)) {
+                try {
+                    if (auto password = certs::attach(p, paths, set, context.engine.secrets(), *name))
+                        draft.secrets->stage(p.cert_password_account(), *password);
+                    draft.certificate = *name;
+                } catch (const Failure&) {
+                    p.client_cert.clear();
+                    p.cert_password = {};
+                }
+            }
+            draft.like = source.name;
+        }
 
         // An owner-only secret file (SecretRef source "file"), as an absolute path. The engine checks it
         // again on every read; checking now reports a loose mode while the operator is at the keyboard.
@@ -305,9 +449,16 @@ namespace forti::cli {
 
         void non_interactive(const Context& context, const Args& args, const ProfileSet& set, Draft& draft) {
             Profile& p = draft.profile;
-            if (auto host = args.value("host")) p.host = *host;
+            if (auto host = args.value("host")) {
+                Address address = parse_address(*host);
+                if (address.port && args.value("port") && parse_port(*args.value("port")) != *address.port)
+                    throw Failure(Code::usage, std::format("--host {} and --port {} disagree", *host, *args.value("port")));
+                p.host = address.host;
+                if (address.port) p.port = *address.port;
+            }
             if (p.host.empty())
-                throw Failure(Code::usage, std::format("--host is required for the new profile \"{}\"", p.name));
+                throw Failure(Code::usage, std::format("--host is required for the new profile \"{}\"", p.name),
+                              {{"hint", "e.g. --host fw.example.net, or --host 192.0.2.1:8443"}});
             validate_host(p.host);
             if (auto port = args.value("port")) p.port = parse_port(*port);
             if (auto vdom = args.value("vdom")) validate_vdom(p.vdom = *vdom);
@@ -475,31 +626,65 @@ namespace forti::cli {
             draft.created_certificate = true;
         }
 
-        void interactive(const Context& context, const Args& args, const ProfileSet& set, Draft& draft, const Tty& tty) {
+        // The API key: typed (secret store), or env:VAR / cmd:COMMAND. Enter keeps a key the profile has.
+        void api_key_step(const Context& context, Draft& draft, const Tty& tty, bool offer_steps = true) {
             Profile& p = draft.profile;
-            tty.say("Configure a FortiGate profile. Press Enter to keep the value in [brackets].\n\n");
-            if (!args.value("profile")) {
-                std::string fallback = set.default_profile.empty() ? "default" : set.default_profile;
-                for (;;) {
-                    std::string name = tty.ask("Profile name", fallback);
-                    try {
-                        engine::validate_profile_name(name);
-                    } catch (const Failure& failure) {
-                        tty.say(std::format("  {}\n", failure.what()));
-                        continue;
-                    }
-                    if (auto it = set.profiles.find(name); it != set.profiles.end()) {
-                        p = draft.previous = it->second;
-                        draft.existed = true;
+            auto& store = context.engine.secrets();
+            bool have = p.api_key.source == SecretRef::Source::env || p.api_key.source == SecretRef::Source::command ||
+                        (draft.existed && p.api_key.source == SecretRef::Source::store && store.get(p.api_key_account()));
+            if (!have && offer_steps && !tty.confirm("\nDo you have a REST API key for this FortiGate?", true))
+                tty.say(std::format("\n{}\n", api_user_steps("")));
+            tty.say(std::format("\nThe API key is typed hidden and kept in the {}. To read it from elsewhere instead,\n"
+                                "type env:VARIABLE or cmd:COMMAND (a password manager, for example).\n",
+                                describe_source({SecretRef::Source::store, {}, {}, {}}, store.kind())));
+            std::string label = have ? std::format("API key (Enter keeps the {})", describe_source(p.api_key, store.kind())) : "API key";
+            for (;;) {
+                std::string key = tty.ask(label, "", true);
+                if (key.empty()) {
+                    if (have) return;
+                    continue;
+                }
+                try {
+                    if (key.starts_with("env:")) {
+                        validate_env_name(key.substr(4));
+                        p.api_key = {SecretRef::Source::env, key.substr(4), {}, {}};
+                        tty.say(std::format("  forti reads ${} on every use\n", key.substr(4)));
+                    } else if (key.starts_with("cmd:")) {
+                        auto argv = split_command(key.substr(4));
+                        if (argv.empty()) throw Failure(Code::usage, "cmd: needs a command");
+                        p.api_key = {SecretRef::Source::command, {}, std::move(argv), {}};
+                        tty.say(std::format("  forti runs `{}` on every use\n", shell_join(p.api_key.command)));
                     } else {
-                        p = Profile{};
-                        p.name = name;
-                        p.api_key.source = SecretRef::Source::none;
-                        draft.existed = false;
+                        p.api_key = {SecretRef::Source::store, {}, {}, {}};
+                        draft.secrets->stage(p.api_key_account(), key);
                     }
-                    break;
+                    return;
+                } catch (const Failure& failure) {
+                    tty.say(std::format("  {}\n", failure.what()));
                 }
             }
+        }
+
+        void address_step(Draft& draft, const Tty& tty) {
+            Profile& p = draft.profile;
+            for (;;) {
+                std::string current = p.host.empty() ? "" : format_address(p.host, p.port);
+                try {
+                    Address address = parse_address(tty.ask("FortiGate address (name or IP, optionally :port)", current));
+                    if (address.host != p.host && !p.resolve_ip.empty()) p.resolve_ip.clear();   // it belonged to the old name
+                    p.host = address.host;
+                    p.port = address.port.value_or(443);
+                    return;
+                } catch (const Failure& failure) {
+                    tty.say(std::format("  {}{}\n", failure.what(),
+                                        failure.details().contains("hint") ? " (" + failure.details()["hint"].get<std::string>() + ")" : ""));
+                }
+            }
+        }
+
+        // The settings most devices never need: asked with --advanced (and then also kept for review).
+        void advanced_step(Draft& draft, const Tty& tty) {
+            Profile& p = draft.profile;
             auto retry = [&](auto&& step) {
                 for (;;) {
                     try {
@@ -510,15 +695,13 @@ namespace forti::cli {
                     }
                 }
             };
-            retry([&] { validate_host(p.host = tty.ask("FortiGate host name or address", p.host)); });
-            retry([&] { p.port = parse_port(tty.ask("Admin HTTPS port", std::to_string(p.port))); });
             retry([&] {
                 std::string vdom = tty.ask("VDOM (Enter: the device default; - to clear)", p.vdom);
                 validate_vdom(p.vdom = vdom == "-" ? "" : vdom);
             });
             retry([&] {
-                std::string path = tty.ask("CA bundle, PEM (Enter: system trust store; - to clear)", p.ca_bundle);
-                p.ca_bundle = path == "-" ? "" : readable_file("ca-bundle", path);
+                std::string path = tty.ask("CA bundle, PEM (Enter: system trust store; - to clear)", display_path(p.ca_bundle));
+                p.ca_bundle = path == "-" || path.empty() ? "" : readable_file("ca-bundle", path);
             });
             retry([&] {
                 std::string ip = tty.ask("Connect to this IP instead of resolving the host (optional; - to clear)", p.resolve_ip);
@@ -526,50 +709,17 @@ namespace forti::cli {
                 if (!ip.empty()) validate_ip(ip);
                 p.resolve_ip = ip;
             });
+        }
 
-            std::string store = describe_source({SecretRef::Source::store, {}, {}, {}}, context.engine.secrets().kind());
-            tty.say(std::format("\nWhere should forti get the API key?\n"
-                                "  1) store it in the {} (you type it now, hidden)\n"
-                                "  2) read an environment variable each time\n"
-                                "  3) run a command that prints it (a password manager, for example)\n", store));
-            std::string current = p.api_key.source == SecretRef::Source::env ? "2"
-                                  : p.api_key.source == SecretRef::Source::command ? "3" : "1";
-            for (;;) {
-                std::string choice = tty.ask("Choice", current);
-                if (choice == "1") {
-                    bool have = draft.existed && p.api_key.source == SecretRef::Source::store &&
-                                context.engine.secrets().get(p.api_key_account());
-                    std::string key = tty.ask(have ? "API key (Enter keeps the stored key)" : "API key", "", true);
-                    if (key.empty() && !have) continue;
-                    p.api_key = {SecretRef::Source::store, {}, {}, {}};
-                    if (!key.empty()) draft.secrets->stage(p.api_key_account(), key);
-                    break;
-                }
-                if (choice == "2") {
-                    std::string name = tty.ask("Variable name", p.api_key.source == SecretRef::Source::env ? p.api_key.env : "FORTI_API_KEY");
-                    try {
-                        validate_env_name(name);
-                    } catch (const Failure& failure) {
-                        tty.say(std::format("  {}\n", failure.what()));
-                        continue;
-                    }
-                    p.api_key = {SecretRef::Source::env, name, {}, {}};
-                    break;
-                }
-                if (choice == "3") {
-                    std::string line = tty.ask("Command (run without a shell; quotes group words)",
-                                               p.api_key.source == SecretRef::Source::command ? shell_join(p.api_key.command) : "");
-                    auto argv = split_command(line);
-                    if (argv.empty()) continue;
-                    p.api_key = {SecretRef::Source::command, {}, std::move(argv), {}};
-                    break;
-                }
+        void mode_step(Draft& draft, const Tty& tty) {
+            Profile& p = draft.profile;
+            if (!draft.like.empty()) {
+                tty.say(std::format("\nMode: {} (as {}; change it with forti profile mode)\n", engine::to_string(p.mode), draft.like));
+                return;
             }
-            certificate_step(context, set, draft, tty);
-
             tty.say("\nOperating mode:\n"
                     "  1) read-only   reads only; every change is refused (recommended to start)\n"
-                    "  2) guarded     changes apply after you approve each plan with `forti plan approve`\n"
+                    "  2) guarded     changes apply after you approve each plan\n"
                     "  3) autonomous  changes apply without approval; automatic safeguards still apply\n");
             std::string mode = p.mode == Mode::guarded ? "2" : p.mode == Mode::autonomous ? "3" : "1";
             for (;;) {
@@ -581,14 +731,43 @@ namespace forti::cli {
                 break;
             }
             if (p.mode == Mode::autonomous && draft.previous.mode != Mode::autonomous) tty.say(std::format("\n{}", autonomous_notice));
+        }
 
-            bool is_default = set.default_profile == p.name || set.profiles.empty() ||
-                              (set.default_profile.empty() && set.profiles.size() == 1 && draft.existed);
-            draft.make_default = is_default || tty.confirm("\nMake this the default profile?", set.default_profile.empty());
+        // Prompts: address, API key, client certificate, mode. The profile is named after the check
+        // (its default is the device's host name), and the rarely needed settings wait for --advanced.
+        void interactive(const Context& context, const Args& args, const ProfileSet& set, Draft& draft, const Tty& tty) {
+            Profile& p = draft.profile;
+            if (draft.existed) tty.say(std::format("Updating profile \"{}\". Press Enter to keep the value in [brackets].\n\n", p.name));
+            else {
+                tty.say("Configure a FortiGate. Press Enter to accept the value in [brackets].\n");
+                if (!set.profiles.empty() && draft.like.empty()) tty.say("(To change an existing profile instead: forti configure --profile NAME)\n");
+                tty.say("\n");
+                // Starting from the default profile's settings saves the mode and certificate questions.
+                if (draft.like.empty() && !args.flag("advanced")) {
+                    try {
+                        const Profile& base = set.select("");
+                        if (tty.confirm(std::format("Start from {}'s settings (mode {}{})?", base.name, engine::to_string(base.mode),
+                                                    certs::used_by(context.engine.options().paths, base) ? ", its client certificate" : ""),
+                                        true))
+                            apply_like(context, set, draft, base);
+                        tty.say("\n");
+                    } catch (const Failure&) {
+                        // No profile, or no default: nothing to start from.
+                    }
+                }
+            }
+            address_step(draft, tty);
+            if (args.flag("advanced")) advanced_step(draft, tty);
+            api_key_step(context, draft, tty);
+            if (!draft.like.empty() && draft.certificate)
+                tty.say(std::format("\nClient certificate: \"{}\" (as {})\n", *draft.certificate, draft.like));
+            else certificate_step(context, set, draft, tty);
+            mode_step(draft, tty);
             tty.say("\n");
         }
 
-        json verify(Context& context, const Profile& profile, PendingStore& secrets) {
+        // An engine that sees only the profile being configured, with its not yet saved secrets.
+        std::unique_ptr<engine::Engine> probe_engine(Context& context, const Profile& profile, PendingStore& secrets) {
             engine::Options options;
             options.paths = context.engine.options().paths;
             options.transport = context.engine.options().transport;
@@ -597,18 +776,115 @@ namespace forti::cli {
             only.profiles.emplace(profile.name, profile);
             only.default_profile = profile.name;
             options.profiles = std::move(only);
-            engine::Engine probe(std::move(options));
-            json result = probe.discover({{"what", "capabilities"}, {"profile", profile.name}});
+            return std::make_unique<engine::Engine>(std::move(options));
+        }
+
+        json verify(Context& context, const Profile& profile, PendingStore& secrets) {
+            json result = probe_engine(context, profile, secrets)->discover({{"what", "capabilities"}, {"profile", profile.name}});
             return result.value("data", json::object());
+        }
+
+        // The device's VDOMs (empty when it has one, or when the API user cannot list them).
+        std::vector<std::string> device_vdoms(Context& context, const Profile& profile, PendingStore& secrets) {
+            std::vector<std::string> names;
+            try {
+                json result = probe_engine(context, profile, secrets)->read({{"resource", "system/vdom"}, {"fields", {"name"}},
+                                                                             {"profile", profile.name}, {"count", 100}});
+                for (const auto& vdom: result.value("data", json::array()))
+                    if (vdom.is_object() && vdom.contains("name") && vdom["name"].is_string()) names.push_back(vdom["name"]);
+            } catch (...) {
+                // Not allowed to list them, or not a multi-VDOM device: the device default applies.
+            }
+            if (names.size() < 2) names.clear();
+            return names;
+        }
+
+        // A profile name from the device's host name: letters, digits, - and _ only.
+        std::string name_from(std::string_view hostname) {
+            std::string name;
+            for (char c: hostname) {
+                if (name.size() >= 64) break;
+                name += std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ? c : '-';
+            }
+            while (!name.empty() && name.front() == '-') name.erase(name.begin());
+            return name;
+        }
+
+        enum class Recovery { retry, save, quit };
+
+        // After a failed check at the terminal: the problem once, then what can be done about it. Every
+        // answer given so far is kept.
+        Recovery recover(const Context& context, const ProfileSet& set, Draft& draft, const Tty& tty, const Failure& failure) {
+            Profile& p = draft.profile;
+            tty.say(std::format("\n{}\n", failure.what()));
+            if (auto hint = failure.details().value("hint", ""); !hint.empty()) tty.say(std::format("{}\n", hint));
+            std::string stage = failure.details().value("stage", "");
+            std::vector<std::pair<std::string, std::function<Recovery()>>> options;
+            auto retype_key = [&] {
+                p.api_key = {};
+                api_key_step(context, draft, tty, false);
+                return Recovery::retry;
+            };
+            if (failure.code() == Code::auth) {
+                options.emplace_back("type the API key again (FortiOS locks the API user out after a few failures)", retype_key);
+                options.emplace_back("show the FortiOS commands that create a REST API admin, then type its key", [&] {
+                    tty.say(std::format("\n{}\n", api_user_steps("")));
+                    return retype_key();
+                });
+            } else if (failure.code() == Code::connection) {
+                options.emplace_back("change the address", [&] {
+                    address_step(draft, tty);
+                    return Recovery::retry;
+                });
+                if (stage == "tls")
+                    options.emplace_back("use a CA bundle (a PEM file with the FortiGate's certificate or its CA)", [&] {
+                        for (;;) {
+                            try {
+                                std::string path = tty.ask("CA bundle, PEM", display_path(p.ca_bundle));
+                                p.ca_bundle = readable_file("ca-bundle", path);
+                                return Recovery::retry;
+                            } catch (const Failure& error) {
+                                tty.say(std::format("  {}\n", error.what()));
+                            }
+                        }
+                    });
+                if (stage == "dns" || stage == "tls")
+                    options.emplace_back("connect to an IP address while checking the certificate for the name", [&] {
+                        for (;;) {
+                            try {
+                                std::string ip = tty.ask("IP address", p.resolve_ip);
+                                validate_ip(ip);
+                                p.resolve_ip = ip;
+                                return Recovery::retry;
+                            } catch (const Failure& error) {
+                                tty.say(std::format("  {}\n", error.what()));
+                            }
+                        }
+                    });
+            } else if (!p.client_cert.empty() && failure.code() == Code::config) {
+                options.emplace_back("choose the client certificate again", [&] {
+                    p.client_cert.clear();
+                    p.cert_password = {};
+                    certificate_step(context, set, draft, tty);
+                    return Recovery::retry;
+                });
+            }
+            if (failure.code() == Code::connection) options.emplace_back("save without checking (check later with forti doctor)", [] { return Recovery::save; });
+            options.emplace_back("quit without saving", [] { return Recovery::quit; });
+            std::vector<std::string> labels;
+            for (const auto& [label, action]: options) labels.push_back(label);
+            return options[tty.choose("\nWhat now?", labels, 0)].second();
         }
 
         void render_configured(std::ostream& out, const json& data, const json&) {
             const json& profile = data["profile"];
             out << styled(std::format("Saved profile \"{}\"{}", profile.value("name", ""),
                                       data.value("default", false) ? " (default)" : ""), Style::bold)
-                << " in " << data.value("config_file", "") << "\n";
+                << " in " << display_path(data.value("config_file", "")) << "\n";
             auto line = [&](std::string_view label, const std::string& value) { out << std::format("  {:<12} {}\n", label, value); };
-            line("host", std::format("{}:{}", profile.value("host", ""), profile.value("port", 443)));
+            std::string address = format_address(profile.value("host", ""), profile.value("port", 443u));
+            if (profile.contains("resolve_ip")) address += " via " + profile["resolve_ip"].get<std::string>();
+            line("address", address);
             if (data.contains("device")) {
                 const json& device = data["device"];
                 std::string text = device.value("hostname", "");
@@ -619,11 +895,15 @@ namespace forti::cli {
             } else line("device", styled("not checked", Style::yellow));
             line("api key", data.value("api_key_source", ""));
             if (data.contains("client_cert")) line("client cert", data["client_cert"].get<std::string>());
+            if (profile.contains("vdom")) line("vdom", profile["vdom"].get<std::string>());
             line("mode", profile.value("mode", "read-only"));
             if (data.contains("schema_note")) out << styled("  note: ", Style::yellow) << data["schema_note"].get<std::string>() << "\n";
             if (data.contains("notice")) out << "\n" << data["notice"].get<std::string>();
             if (data.contains("home_note")) out << styled("  note: ", Style::yellow) << data["home_note"].get<std::string>() << "\n";
-            out << "\nNext: `forti doctor`, then `forti get monitor/system/status`.\n";
+            std::string flag = data.value("default", false) ? "" : std::format(" -p {}", profile.value("name", ""));
+            if (data.value("verified", false))
+                out << std::format("\nNext: `forti{} get firewall/policy`, or connect AI agents: `forti mcp install`.\n", flag);
+            else out << std::format("\nNext: `forti{} doctor` checks the connection.\n", flag);
         }
 
         int run_configure(Context& context, const Args& args) {
@@ -638,6 +918,7 @@ namespace forti::cli {
             draft.secrets = &secrets;
             if (auto name = args.value("profile")) {
                 engine::validate_profile_name(*name);
+                draft.named = true;
                 if (auto it = set.profiles.find(*name); it != set.profiles.end()) {
                     draft.profile = draft.previous = it->second;
                     draft.existed = true;
@@ -645,6 +926,17 @@ namespace forti::cli {
                     draft.profile.name = *name;
                     draft.profile.api_key.source = SecretRef::Source::none;
                 }
+            } else {
+                draft.profile.name = std::string(unnamed);
+                draft.profile.api_key.source = SecretRef::Source::none;
+            }
+            if (auto like = args.value("like")) {
+                if (draft.existed)
+                    throw Failure(Code::usage, std::format("--like starts a new profile, and \"{}\" exists", draft.profile.name),
+                                  {{"hint", "change an existing profile with forti configure --profile NAME"}});
+                auto it = set.profiles.find(*like);
+                if (it == set.profiles.end()) throw no_such_profile(set, *like);
+                apply_like(context, set, draft, it->second);
             }
 
             std::unique_ptr<Tty> tty;
@@ -652,12 +944,18 @@ namespace forti::cli {
                 tty = std::make_unique<Tty>();
                 if (!tty->available())
                     throw Failure(Code::usage, "no terminal to prompt on",
-                                  {{"hint", "pass --profile NAME --host HOST and --api-key-stdin, --api-key-env VAR or "
-                                            "--api-key-command \"argv\" (see forti configure --help)"}});
+                                  {{"hint", "pass --host HOST and --api-key-stdin, --api-key-env VAR or --api-key-command \"argv\" "
+                                            "(see forti configure --help)"}});
                 interactive(context, args, set, draft, *tty);
             } else {
-                if (!args.value("profile"))
-                    throw Failure(Code::usage, "--profile NAME is required with configuration options");
+                if (!draft.named) {
+                    // Scripts: the first profile is "default"; after that the name must be given.
+                    if (!set.profiles.empty())
+                        throw Failure(Code::usage, "--profile NAME is required: profiles exist already",
+                                      {{"hint", std::format("existing profiles: {}", profile_names(set))}});
+                    draft.profile.name = "default";
+                    draft.named = true;
+                }
                 non_interactive(context, args, set, draft);
             }
             Profile& profile = draft.profile;
@@ -676,16 +974,12 @@ namespace forti::cli {
                 }
             }
             if (draft.certificate) result["certificate"] = *draft.certificate;
-            if (check) {
-                if (tty) tty->say(std::format("Checking the connection to {}:{}...\n", profile.host, profile.port));
+            json capabilities;
+            while (check) {
+                if (tty) tty->say(std::format("Checking the connection to {}...\n", format_address(profile.host, profile.port)));
                 try {
-                    json capabilities = verify(context, profile, secrets);
-                    result["device"] = capabilities.value("device", json::object());
-                    if (!capabilities.value("schema_matches_device", true))
-                        result["schema_note"] = std::format(
-                                "the device runs {}; forti's models are generated from FortiOS {}. Reads work; some "
-                                "attributes may differ", result["device"].value("version", "another version"),
-                                engine::sdk_schema_version);
+                    capabilities = verify(context, profile, secrets);
+                    break;
                 } catch (...) {
                     Failure failure = with_advice(engine::translate(std::current_exception()), profile, false);
                     if (draft.created_certificate) {
@@ -694,11 +988,73 @@ namespace forti::cli {
                                 " The certificate \"{}\" is kept: choose it again (reuse) when you rerun forti configure.", *draft.certificate);
                         failure = Failure(failure.code(), failure.what(), details);
                     }
-                    // A typed secret would be lost; offer to keep the profile when only the network failed.
-                    if (!(tty && failure.code() == Code::connection)) throw failure;
-                    tty->say(std::format("\nforti: {}\n  hint: {}\n", failure.what(), failure.details().value("hint", "")));
-                    if (!tty->confirm("Save the profile anyway (check it later with `forti doctor`)?", false)) throw failure;
+                    if (!tty) throw failure;
+                    Recovery next = recover(context, set, draft, *tty, failure);
+                    if (next == Recovery::save) check = false;
+                    if (next == Recovery::quit) {
+                        // Already shown at the terminal; --json still gets the envelope.
+                        if (context.output.format == Format::json) return emit(context.output, {{"ok", false}, {"error", failure.to_json()}});
+                        return engine::exit_code(failure.code());
+                    }
+                    secrets.bind(profile.secret_binding());
                 }
+            }
+            if (capabilities.is_object()) {
+                result["device"] = capabilities.value("device", json::object());
+                if (!capabilities.value("schema_matches_device", true))
+                    result["schema_note"] = std::format(
+                            "the device runs {}; forti's models are generated from FortiOS {}. Reads work; some "
+                            "attributes may differ", result["device"].value("version", "another version"),
+                            engine::sdk_schema_version);
+                // Several VDOMs and none chosen: ask (one device default otherwise).
+                if (tty && profile.vdom.empty() && !args.flag("advanced") && !args.value("vdom")) {
+                    auto vdoms = device_vdoms(context, profile, secrets);
+                    if (!vdoms.empty()) {
+                        std::string list;
+                        for (const auto& vdom: vdoms) list += (list.empty() ? "" : ", ") + vdom;
+                        for (;;) {
+                            std::string vdom = tty->ask(std::format("\nThe FortiGate has VDOMs {}. VDOM for this profile (Enter: the device default)", list));
+                            if (vdom.empty() || std::ranges::contains(vdoms, vdom)) {
+                                profile.vdom = vdom;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A new profile without --profile is named now, after the device.
+            if (!draft.named) {
+                std::string hostname = capabilities.is_object() ? capabilities["device"].value("hostname", "") : "";
+                std::string fallback = name_from(hostname);
+                if (fallback.empty()) fallback = set.profiles.empty() ? "default" : name_from(profile.host);
+                if (fallback.empty()) fallback = "default";
+                std::string name;
+                for (;;) {
+                    name = tty->ask("Profile name", fallback);
+                    try {
+                        engine::validate_profile_name(name);
+                    } catch (const Failure& failure) {
+                        tty->say(std::format("  {}\n", failure.what()));
+                        continue;
+                    }
+                    if (auto it = set.profiles.find(name); it != set.profiles.end()) {
+                        if (!tty->confirm(std::format("A profile named \"{}\" exists ({}). Replace it?", name,
+                                                      format_address(it->second.host, it->second.port)), false))
+                            continue;
+                        draft.previous = it->second;
+                        draft.existed = true;
+                    }
+                    break;
+                }
+                secrets.rename(std::string(unnamed), name);
+                profile.name = name;
+            }
+            if (tty && !draft.make_default) {
+                bool automatic = set.default_profile == profile.name || set.profiles.empty() ||
+                                 (set.profiles.size() == 1 && set.profiles.contains(profile.name)) ||
+                                 (set.default_profile.empty() && set.profiles.size() == 1 && draft.existed);
+                draft.make_default = automatic || tty->confirm("Make it the default profile?", set.default_profile.empty());
             }
 
             // Verified (or not checked): write secrets first, so a saved profile never points at nothing.
@@ -724,7 +1080,8 @@ namespace forti::cli {
             result["default"] = set.default_profile == profile.name;
             result["config_file"] = paths.config_file().string();
             result["api_key_source"] = describe_source(profile.api_key, store.kind());
-            result["verified"] = check && result.contains("device");
+            result["verified"] = capabilities.is_object();
+            if (!draft.like.empty()) result["like"] = draft.like;
             if (!profile.client_cert.empty()) {
                 auto name = certs::used_by(paths, profile);
                 result["client_cert"] = name ? std::format("certificate \"{}\"", *name) : display_path(profile.client_cert);
@@ -757,9 +1114,7 @@ namespace forti::cli {
 
         Profile& existing(ProfileSet& set, const std::string& name) {
             auto it = set.profiles.find(name);
-            if (it == set.profiles.end())
-                throw Failure(Code::config, std::format("no profile named \"{}\"", name),
-                              {{"hint", "`forti profile list` shows the configured profiles"}});
+            if (it == set.profiles.end()) throw no_such_profile(set, name);
             return it->second;
         }
 
@@ -1130,49 +1485,68 @@ namespace forti::cli {
             std::error_code error;
             const std::string configure = "run `forti configure`";
             if (!fs::exists(paths.config, error))
-                return {"config", "fail", std::format("{} does not exist", paths.config.string()), configure, "config"};
+                return {"config", "fail", std::format("{} does not exist", display_path(paths.config)), configure, "config"};
             if (!fs::is_directory(paths.config, error))
-                return {"config", "fail", std::format("{} is not a directory", paths.config.string()), "", "config"};
+                return {"config", "fail", std::format("{} is not a directory", display_path(paths.config)), "", "config"};
             auto file = paths.config_file();
             if (!fs::exists(file, error))
-                return {"config", "fail", std::format("no config.json in {}", paths.config.string()), configure, "config"};
+                return {"config", "fail", std::format("no config.json in {}", display_path(paths.config)), configure, "config"};
             // Group/other access to credential files makes the file store refuse them.
             auto credentials = paths.config / "credentials";
             if (fs::is_directory(credentials, error))
                 for (const auto& entry: fs::directory_iterator(credentials, error))
                     if (entry.is_regular_file() && (file_mode(entry.path()) & 077))
-                        return {"config", "fail", std::format("{} is accessible by other users", entry.path().string()),
-                                std::format("chmod 600 {}", entry.path().string()), "config"};
+                        return {"config", "fail", std::format("{} is accessible by other users", display_path(entry.path())),
+                                std::format("chmod 600 {}", shell_path(entry.path())), "config"};
             std::vector<std::string> loose;
             for (const auto& [path, wanted]: {std::pair{paths.config, 0700u}, std::pair{file, 0600u}, std::pair{credentials, 0700u}})
                 if (fs::exists(path, error) && (file_mode(path) & 077))
-                    loose.push_back(std::format("chmod {:o} {}", wanted, path.string()));
+                    loose.push_back(std::format("chmod {:o} {}", wanted, shell_path(path)));
             if (!loose.empty()) {
                 std::string fix;
                 for (const auto& line: loose) fix += (fix.empty() ? "" : "; ") + line;
                 return {"config", "warn", "configuration files are accessible by other users", fix, ""};
             }
-            return {"config", "pass", std::format("{} (0700), config.json (0600)", paths.config.string()), "", ""};
+            return {"config", "pass", std::format("{} (0700), config.json (0600)", display_path(paths.config)), "", ""};
         }
 
-        Check check_files(const Profile& profile) {
+        Check check_files(const engine::Paths& paths, const ProfileSet& set, const Profile& profile) {
             std::vector<std::string> notes;
             for (const auto& [option, path]: {std::pair{"ca_bundle", profile.ca_bundle}, std::pair{"client_cert", profile.client_cert}}) {
                 if (path.empty()) continue;
                 std::error_code error;
-                if (!fs::is_regular_file(path, error))
-                    return {"tls_files", "fail", std::format("{} {} does not exist", option, path),
-                            std::format("fix the path with `forti configure --profile {}`", profile.name), "config"};
+                if (!fs::is_regular_file(path, error)) {
+                    std::string hint = std::format("set the file: forti profile set {} {}=PATH", profile.name, option);
+                    if (std::string_view(option) == "client_cert") {
+                        if (auto name = certs::used_by(paths, profile))
+                            hint = std::format("recreate it: forti cert create {} --force (same CA and CN, so the FortiGate needs no change)", *name);
+                        else hint = std::format("choose a certificate: forti cert use NAME -p {}", profile.name);
+                    }
+                    return {"tls_files", "fail", std::format("{} {} does not exist", option, display_path(path)), hint, "config"};
+                }
                 if (::access(path.c_str(), R_OK) != 0)
-                    return {"tls_files", "fail", std::format("{} {} is not readable", option, path), "", "config"};
+                    return {"tls_files", "fail", std::format("{} {} is not readable", option, display_path(path)), "", "config"};
                 if (std::string_view(option) == "ca_bundle") {
                     std::ifstream in(path);
                     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                     if (text.find("-----BEGIN CERTIFICATE-----") == std::string::npos)
-                        return {"tls_files", "warn", std::format("ca_bundle {} contains no PEM certificate", path),
+                        return {"tls_files", "warn", std::format("ca_bundle {} contains no PEM certificate", display_path(path)),
                                 "export the CA certificate in PEM format (-----BEGIN CERTIFICATE-----)", ""};
                 }
-                notes.push_back(std::format("{} {}", option, path));
+                notes.push_back(std::format("{} {}", option, display_path(path)));
+            }
+            // forti's own certificates: warn a month before they expire.
+            if (auto name = certs::used_by(paths, profile)) {
+                json cert = certs::describe(paths, set, *name);
+                std::string renew = std::format("renew it: forti cert create {} --force{}", *name,
+                                                cert.value("issuer", "") == "forti CA" ? " (the FortiGate needs no change)" : "");
+                if (cert.value("expired", false))
+                    return {"tls_files", "fail", std::format("certificate \"{}\" expired on {}", *name, cert.value("expires", "?").substr(0, 10)),
+                            renew, "config"};
+                if (cert.contains("days_left") && cert["days_left"].get<long long>() <= 30)
+                    return {"tls_files", "warn", std::format("certificate \"{}\" expires in {} days ({})", *name, cert["days_left"].get<long long>(),
+                                                            cert.value("expires", "?").substr(0, 10)),
+                            renew, ""};
             }
             if (notes.empty()) return {"tls_files", "pass", "system trust store; no client certificate", "", ""};
             std::string message;
@@ -1271,17 +1645,22 @@ namespace forti::cli {
                     checks.push_back({"secrets", "pass", message, "", ""});
                 } catch (...) {
                     auto failure = engine::translate(std::current_exception());
-                    std::string hint = failure.details().value("hint", "");
-                    if (hint.empty()) {
-                        switch (profile->api_key.source) {
-                            case SecretRef::Source::env: hint = std::format("export {} before running forti", profile->api_key.env); break;
-                            case SecretRef::Source::command: hint = "run the command yourself and check it prints the key"; break;
-                            default: hint = std::format("store the key with `forti configure --profile {}`", profile->name);
+                    // A missing certificate file stops secret resolution: tls_files says what to do.
+                    if (failure.details().contains("missing"))
+                        checks.push_back({"secrets", "skip", "needs the certificate files (see tls_files)", "", ""});
+                    else {
+                        std::string hint = failure.details().value("hint", "");
+                        if (hint.empty()) {
+                            switch (profile->api_key.source) {
+                                case SecretRef::Source::env: hint = std::format("export {} before running forti", profile->api_key.env); break;
+                                case SecretRef::Source::command: hint = "run the command yourself and check it prints the key"; break;
+                                default: hint = std::format("store the key with `forti configure --profile {}`", profile->name);
+                            }
                         }
+                        checks.push_back({"secrets", "fail", failure.what(), hint, std::string(engine::to_string(failure.code()))});
                     }
-                    checks.push_back({"secrets", "fail", failure.what(), hint, std::string(engine::to_string(failure.code()))});
                 }
-                checks.push_back(check_files(*profile));
+                checks.push_back(check_files(engine.options().paths, engine.profiles(), *profile));
             } else skip({"secrets", "tls_files"}, "needs a profile");
 
             json capabilities;
@@ -1351,6 +1730,7 @@ namespace forti::cli {
                                        {"details", data}}}};
             if (context.output.format == Format::json) return emit(context.output, failure);
             emit(context.output, engine::ok(data), render_checks);
+            context.output.out->flush();   // the summary belongs after the report on a terminal
             *context.output.err << std::format("forti: doctor: {}\n", printable(failure["error"]["message"].get<std::string>()));
             return exit_status(first_code);
         }
@@ -1359,27 +1739,25 @@ namespace forti::cli {
 
     std::vector<Command> setup_commands() {
         std::vector<Command> commands = {
-            {"configure", "Create or update a device profile and verify it",
-             "usage: forti configure                              prompt on the terminal\n"
-             "       forti configure --profile NAME --host HOST [options] <credential>\n"
+            {"configure", "Set up a FortiGate (or change one): address, API key, certificate, mode",
+             "usage: forti configure                          a new FortiGate, at the terminal\n"
+             "       forti configure --like PROFILE           a new one, starting from PROFILE's settings\n"
+             "       forti configure -p NAME                  change profile NAME (Enter keeps each value)\n"
+             "       forti configure --host HOST <credential> [options]     scripts: no prompts\n"
              "\n"
-             "Creates or updates a profile in config.json and checks it against the device (one read of\n"
-             "monitor/system/status). Nothing is saved unless the check passes; an authentication failure is\n"
-             "never retried, because FortiOS locks out an API user after repeated failures.\n"
-             "\n"
-             "On an existing profile, the prompts start from its current values (Enter keeps each one),\n"
-             "and with options only the options given change: forti configure --profile fw01 --port 8443.\n"
-             "`forti profile set` changes settings without contacting the device.\n"
-             "\n"
-             "The prompts also offer a client certificate (PKI authentication of the API user): reuse one\n"
-             "of forti's certificates (`forti cert list`), or make one, issued by the forti CA, and get the\n"
-             "FortiGate commands to paste before the check.\n"
+             "Asks for the address (fw.example.net, 192.0.2.1:8443 or an https URL), the API key, a client\n"
+             "certificate (reuse one or make one: it prints the FortiGate commands) and the mode, checks the\n"
+             "connection with one read of monitor/system/status, then names the profile after the device.\n"
+             "Nothing is saved until the check passes or you choose to save; when it fails, forti keeps your\n"
+             "answers and offers fixes. An authentication failure is never retried on its own: FortiOS locks\n"
+             "an API user out after a few failures. Without an API key yet, answer n to print the FortiOS\n"
+             "commands that create one. The first profile becomes the default.\n"
              "\n"
              "connection:\n"
-             "  --host HOST              FortiGate host name or address (no scheme, no port)\n"
+             "  --host ADDRESS           host name or address, optionally with :port, or an https URL\n"
              "  --port N                 admin HTTPS port (default 443)\n"
-             "  --vdom NAME              default VDOM for this profile\n"
-             "  --ca-bundle PATH         PEM CA bundle that verifies the device certificate\n"
+             "  --vdom NAME              VDOM for this profile (asked only when the device has several)\n"
+             "  --ca-bundle PATH         PEM file that verifies the device certificate\n"
              "  --resolve-ip IP          connect to IP while verifying the certificate for HOST\n"
              "  --cert NAME              one of forti's client certificates (forti cert list)\n"
              "  --client-cert PATH       a PKCS#12 client certificate of your own\n"
@@ -1392,19 +1770,23 @@ namespace forti::cli {
              "                           the client certificate's password, from the same kinds of source\n"
              "  --cert-password-file PATH  or from a file only you can read (0600). Not needed with --cert\n"
              "\n"
-             "policy:\n"
+             "other:\n"
+             "  -p, --profile NAME       the profile (scripts: needed once a profile exists; the first is \"default\")\n"
+             "  --like PROFILE           start from PROFILE's mode, VDOM, timeouts and client certificate\n"
+             "  --advanced               also ask for VDOM, CA bundle and connect-to IP\n"
              "  --mode MODE              read-only (default), guarded or autonomous\n"
              "  --default                make this the default profile\n"
              "  --skip-check             save without contacting the device\n"
              "\n"
              "examples:\n"
              "  forti configure\n"
-             "  op read op://ops/fw01/api-key | forti configure --profile fw01 --host fw01.example.net \\\n"
-             "      --ca-bundle ~/fw01-ca.pem --api-key-stdin --default\n"
-             "  forti configure --profile lab --host 192.0.2.10 --api-key-env FORTI_LAB_KEY --mode guarded\n",
+             "  forti configure --like fw01\n"
+             "  op read op://ops/fw01/api-key | forti configure -p fw01 --host fw01.example.net:8443 \\\n"
+             "      --api-key-stdin --default\n"
+             "  forti configure -p lab --host 192.0.2.10 --api-key-env FORTI_LAB_KEY --mode guarded\n",
              {{"host", "port", "ca-bundle", "client-cert", "cert", "resolve-ip", "api-key-env", "api-key-command",
-               "cert-password-env", "cert-password-command", "cert-password-file", "mode"},
-              {"api-key-stdin", "cert-password-stdin", "default", "skip-check"},
+               "cert-password-env", "cert-password-command", "cert-password-file", "mode", "like"},
+              {"api-key-stdin", "cert-password-stdin", "default", "skip-check", "advanced"},
               {}},
              run_configure},
             {"profile", "List, show, change, rename, copy or remove device profiles",

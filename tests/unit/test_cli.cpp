@@ -61,7 +61,7 @@ TEST(Args, SplitsCommandLinesLikeAShellWithoutOne) {
 TEST_F(CliTest, HelpListsGroupsAndEveryCommandHasConsistentHelp) {
     EXPECT_EQ(run({"--help"}), 0);
     std::string help = out.str();
-    for (const char* text: {"setup:", "read:", "configure", "doctor", "profile", "get", "global options:", "exit status:"})
+    for (const char* text: {"setup:", "read:", "configure", "doctor", "profile", "get", "global options:", "man forti"})
         EXPECT_NE(help.find(text), std::string::npos) << text;
 
     for (const auto& command: cli::commands()) {
@@ -77,8 +77,8 @@ TEST_F(CliTest, HelpListsGroupsAndEveryCommandHasConsistentHelp) {
 }
 
 TEST_F(CliTest, UsageErrorsExitTwoWithSuggestionsAndJsonEnvelopes) {
-    EXPECT_EQ(run({}), 2);
-    EXPECT_NE(err.str().find("usage:"), std::string::npos);
+    EXPECT_EQ(run({}), 0);   // nothing configured yet: where to start
+    EXPECT_NE(out.str().find("Start with `forti configure`"), std::string::npos) << out.str();
 
     EXPECT_EQ(run({"confgure"}), 2);
     EXPECT_NE(err.str().find("unknown command \"confgure\""), std::string::npos);
@@ -148,7 +148,7 @@ TEST_F(ReadCli, ExitCodesFollowTheErrorTable) {
 
     transport->reply(401, json{{"status", "error"}, {"http_status", 401}});
     EXPECT_EQ(read({"get", "firewall/address"}), 4);
-    EXPECT_NE(err.str().find("does not retry"), std::string::npos);
+    EXPECT_NE(err.str().find("did not retry"), std::string::npos);
 
     EXPECT_EQ(read({"get", "firewall/adress"}), 5);    // unknown_resource
     EXPECT_EQ(read({"get", "firewall/address", "--fields", "subnett"}), 6);   // validation
@@ -192,7 +192,7 @@ TEST(Output, ErrorsGoToStderrWithHintsAndJsonToStdout) {
     EXPECT_TRUE(out.str().empty());
     EXPECT_NE(err.str().find("forti: error: cannot reach fw"), std::string::npos);
     EXPECT_NE(err.str().find("hint:"), std::string::npos);
-    EXPECT_NE(err.str().find("--ca-bundle"), std::string::npos);
+    EXPECT_NE(err.str().find("never turned off"), std::string::npos);
 
     std::ostringstream jout, jerr;
     cli::Output machine{.format = cli::Format::json, .out = &jout, .err = &jerr};

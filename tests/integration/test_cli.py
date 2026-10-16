@@ -149,6 +149,13 @@ class Terminal:
         os.write(self.fd, (reply + "\n").encode())
         return before
 
+    def answer_hidden(self, prompt: str, reply: str) -> str:
+        """A hidden prompt switches echo off with TCSAFLUSH, which drops anything typed before it."""
+        before = self.expect(prompt)
+        time.sleep(0.3)
+        os.write(self.fd, (reply + "\n").encode())
+        return before
+
     def finish(self, timeout: float = 60) -> int:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -174,80 +181,133 @@ class Terminal:
         raise AssertionError(f"forti did not exit; the terminal shows:\n{self.text[-3000:]}")
 
 
-class InteractiveCertificates(CliTest):
-    """forti configure at a terminal: make a client certificate, set the device up, check; then reuse it."""
+class InteractiveConfigure(CliTest):
+    """forti configure at a terminal: address, key, certificate, mode; check; then the name."""
 
-    def configure(self, profile: str) -> Terminal:
-        term = Terminal([FORTI, "configure"], self.sb.env)
-        term.answer("Profile name [lab]: ", profile)
-        term.answer("FortiGate host name or address: ", "localhost")
-        term.answer("Admin HTTPS port [443]: ", str(self.mock.port))
-        term.answer("VDOM", "")
-        term.answer("CA bundle, PEM", str(self.mock.ca_path))
-        term.answer("Connect to this IP instead", "")
-        term.answer("Choice [1]: ", "2")
-        term.answer("Variable name [FORTI_API_KEY]: ", KEY_VAR)
-        term.answer("Use a client certificate? (y/N): ", "y")
-        return term
+    def start(self, *args: str) -> Terminal:
+        return Terminal([FORTI, "configure", *args], self.sb.env)
 
-    def finish_profile(self, term: Terminal) -> str:
-        term.answer("Mode [1]: ", "")
-        term.answer("Make this the default profile? (y/N): ", "n")
-        steps = term.expect("Press Enter when the FortiGate is ready")
+    def checks(self) -> list:  # type: ignore[type-arg]
+        """The connection checks (configure also lists the VDOMs after one succeeds)."""
+        return [r for r in self.mock.requests if r.api == "monitor/system/status"]
+
+    def address_and_key(self, term: Terminal, have_key: bool = True) -> str:
+        term.answer("FortiGate address (name or IP, optionally :port): ", f"localhost:{self.mock.port}")
+        steps = term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "" if have_key else "n")
+        term.answer_hidden("API key: ", f"env:{KEY_VAR}")
         return steps
+
+    def trust_the_mock(self, term: Terminal) -> None:
+        """The check fails on the mock's private CA: the recovery menu takes a CA bundle."""
+        menu = term.answer("choice [1]: ", "2")
+        self.assertIn("is not trusted", menu)
+        self.assertIn("use a CA bundle", menu)
+        term.answer("CA bundle, PEM: ", str(self.mock.ca_path))
+
+    def name_it(self, term: Terminal, name: str) -> None:
+        term.answer("Profile name [fw-mock]: ", name)
+        term.answer("Make it the default profile? (y/N): ", "n")
 
     def test_create_then_reuse_a_certificate(self) -> None:
         home = Path(self.sb.env["FORTI_HOME"])
-        term = self.configure("fw01")
+        term = self.start()
+        term.answer("Start from lab's settings (mode read-only)? (Y/n): ", "n")
+        self.address_and_key(term)
+        term.answer("Use a client certificate? (y/N): ", "y")
         term.answer("choice [1]: ", "")                    # New certificate: issued by the forti CA
-        term.answer("Certificate name [fw01]: ", "")
+        term.answer("Certificate name [", "fw01")
         term.expect("done")
-        steps = self.finish_profile(term)
+        term.answer("Mode [1]: ", "")
+        steps = term.expect("Press Enter when the FortiGate is ready")
         for keyword in ("config vpn certificate ca", "-----BEGIN CERTIFICATE-----", 'set cn "forti-fw01"',
                         "set peer-auth enable", "once per FortiGate"):
             self.assertIn(keyword, steps)
         # The operator does the steps: from now on the device requires a certificate from the forti CA.
         self.mock.require_client_certificate(home / "ca" / "ca.crt")
         os.write(term.fd, b"\n")
+        self.trust_the_mock(term)
+        self.name_it(term, "fw01")
         self.assertEqual(term.finish(), 0, term.text)
         self.assertIn('Saved profile "fw01"', term.text)
         self.assertIn('client cert  certificate "fw01"', term.text)
-        self.assertEqual(self.mock.requests[-1].client_cn, "forti-fw01")
-        self.assertEqual(self.mock.requests[-1].status, 200)
+        self.assertEqual(term.text.count("is not trusted"), 1)   # said once
+        self.assertEqual(self.checks()[-1].client_cn, "forti-fw01")
+        self.assertEqual(self.checks()[-1].status, 200)
         profile = json.loads((self.sb.config / "config.json").read_text())["profiles"]["fw01"]
         self.assertEqual(profile["client_cert"], str(home / "certs" / "fw01" / "client.p12"))
         self.assertEqual(profile["cert_password"], {"source": "file", "path": str(home / "certs" / "fw01" / "client.pass")})
+        self.assertEqual(profile["api_key"], {"source": "env", "env": KEY_VAR})
 
         # A profile without the certificate no longer gets through; fw01 does.
         self.assertNotEqual(self.forti("doctor", "--profile", "lab", expect=None).code, 0)
         self.json_of("doctor", "--profile", "fw01")
 
-        # A second FortiGate profile reuses it: listed, chosen with Enter.
-        term = self.configure("fw02")
-        term.answer("Reuse a certificate you already have? (Y/n): ", "")
-        listing = term.answer("Certificate [1]: ", "")
-        self.assertIn("1) fw01  forti CA, until", listing)
-        self.assertIn("used by fw01", listing)
-        self.assertIn("0) none of these: create a new one", listing)
-        self.finish_profile(term)
+        # A second FortiGate starts from fw01's settings: its certificate comes along.
+        self.forti("profile", "default", "fw01")
+        term = self.start()
+        term.answer("Start from fw01's settings (mode read-only, its client certificate)? (Y/n): ", "")
+        self.address_and_key(term)
+        term.expect('Client certificate: "fw01" (as fw01)')
+        term.expect("Mode: read-only (as fw01")
+        term.expect("Press Enter when the FortiGate is ready")
         os.write(term.fd, b"\n")
+        self.trust_the_mock(term)
+        term.answer("Profile name [fw-mock]: ", "fw02")
+        term.answer("Make it the default profile? (y/N): ", "n")
         self.assertEqual(term.finish(), 0, term.text)
-        self.assertEqual(self.mock.requests[-1].client_cn, "forti-fw01")
+        self.assertEqual(self.checks()[-1].client_cn, "forti-fw01")
         listed = self.json_of("cert", "list")["data"]["certificates"]
         self.assertEqual([(c["name"], c["used_by"]) for c in listed], [("fw01", ["fw01", "fw02"])])
 
-    def test_skip_the_check_after_making_a_certificate(self) -> None:
-        term = self.configure("fw03")
-        term.answer("choice [1]: ", "2")                   # a CA of its own
-        term.answer("Certificate name [fw03]: ", "edge")
-        term.expect("done")
-        self.finish_profile(term)
+    def test_reuse_from_the_list_and_skip_the_check(self) -> None:
+        self.forti("cert", "create", "spare", "--own-ca")
+        term = self.start("--advanced")
+        term.answer("FortiGate address (name or IP, optionally :port): ", f"localhost:{self.mock.port}")
+        term.answer("VDOM", "")
+        term.answer("CA bundle, PEM", str(self.mock.ca_path))
+        term.answer("Connect to this IP instead", "")
+        steps = term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "n")
+        term.answer_hidden("API key: ", f"env:{KEY_VAR}")
+        term.answer("Use a client certificate? (y/N): ", "y")
+        term.answer("Reuse a certificate you already have? (Y/n): ", "")
+        listing = term.answer("Certificate [1]: ", "")
+        self.assertIn("1) spare  own CA, until", listing)
+        term.answer("Mode [1]: ", "2")
+        term.expect("Press Enter when the FortiGate is ready")
         os.write(term.fd, b"s\n")
+        term.answer("Profile name [localhost]: ", "fw03")
+        term.answer("Make it the default profile? (y/N): ", "")
         self.assertEqual(term.finish(), 0, term.text)
         self.assertIn("not checked", term.text)
-        shown = self.json_of("cert", "show", "edge")["data"]
-        self.assertEqual(shown["issuer"], "own CA")
+        # Without a key, forti printed the FortiOS commands that make one.
+        for keyword in ("config system accprofile", "config system api-user", "set accprofile \"forti\"",
+                        "config trusthost", "execute api-user generate-key forti"):
+            self.assertIn(keyword, term.text)
+        shown = self.json_of("cert", "show", "spare")["data"]
         self.assertEqual(shown["used_by"], ["fw03"])
+        profile = json.loads((self.sb.config / "config.json").read_text())["profiles"]["fw03"]
+        self.assertEqual(profile["mode"], "guarded")
+        self.assertEqual(profile["port"], self.mock.port)
+
+    def test_a_rejected_key_is_typed_again_never_retried_alone(self) -> None:
+        term = self.start()
+        term.answer("Start from lab's settings (mode read-only)? (Y/n): ", "n")
+        term.answer("FortiGate address (name or IP, optionally :port): ", f"localhost:{self.mock.port}")
+        term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "")
+        term.answer_hidden("API key: ", "wrong-key")
+        term.answer("Use a client certificate? (y/N): ", "")
+        term.answer("Mode [1]: ", "")
+        self.trust_the_mock(term)
+        menu = term.expect("choice [1]: ")
+        self.assertIn("rejected the API key", menu)
+        statuses = [r.status for r in self.checks()]
+        self.assertEqual(statuses[-1], 401)
+        self.assertEqual(statuses.count(401), 1)   # never retried on its own
+        os.write(term.fd, b"1\n")
+        term.answer_hidden("API key: ", f"env:{KEY_VAR}")
+        self.name_it(term, "fw04")
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual([r.status for r in self.checks()[-2:]], [401, 200])
 
 
 class Discover(CliTest):

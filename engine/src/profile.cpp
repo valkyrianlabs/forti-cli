@@ -211,15 +211,21 @@ namespace forti::engine {
     }
 
     const Profile& ProfileSet::select(std::string_view name) const {
+        // The profile names travel in the details, so each front end can say how to choose one.
+        auto names = [&] {
+            nlohmann::json list = nlohmann::json::array();
+            for (const auto& [profile_name, profile]: profiles) list.push_back(profile_name);
+            return list;
+        };
         if (name.empty()) {
             if (!default_profile.empty()) name = default_profile;
             else if (profiles.size() == 1) return profiles.begin()->second;
             else if (profiles.empty())
-                throw Failure(Code::config, "no device profile is configured (run `forti configure`)");
-            else throw Failure(Code::config, "several profiles exist and none is the default: pass --profile");
+                throw Failure(Code::config, "no device profile is configured (run `forti configure`)", {{"profiles", names()}});
+            else throw Failure(Code::config, "several profiles exist and none is the default", {{"profiles", names()}});
         }
         auto it = profiles.find(std::string(name));
-        if (it == profiles.end()) throw Failure(Code::config, std::format("no profile named \"{}\"", name));
+        if (it == profiles.end()) throw Failure(Code::config, std::format("no profile named \"{}\"", name), {{"profiles", names()}});
         return it->second;
     }
 

@@ -61,7 +61,25 @@ namespace forti::cli {
         std::string command_help(const Command& command) {
             std::string text(command.help);
             while (!text.empty() && text.back() == '\n') text.pop_back();
-            return std::format("{}\n\n{}", text, global_help);
+            return std::format("{}\n\nglobal options: -p/--profile NAME, --vdom NAME, --json, --no-color (see forti --help)\n", text);
+        }
+
+        // `forti` alone before anything is configured: where to start, not the whole reference.
+        constexpr std::string_view welcome =
+                "forti " FORTI_VERSION ": FortiOS from the command line.\n"
+                "\n"
+                "Start with `forti configure`: it asks for your FortiGate's address and API key.\n"
+                "Then `forti get firewall/policy`, or `forti mcp install` to give AI agents the FortiGate tools.\n"
+                "\n"
+                "All commands: forti --help. Full reference: man forti.\n";
+
+        bool configured(const engine::Options& options) {
+            if (options.profiles) return !options.profiles->profiles.empty();
+            try {
+                return !engine::ProfileStore(options.paths).load().profiles.empty();
+            } catch (const Failure&) {
+                return true;   // a configuration exists, even if broken: the full usage helps more
+            }
         }
 
     }  // namespace
@@ -78,18 +96,8 @@ namespace forti::cli {
         text += global_help;
         text += "      --version        print the version and the FortiOS schema version\n"
                 "\n"
-                "environment:\n"
-                "  FORTI_HOME                                            the forti home (default ~/.forti; `forti home`)\n"
-                "  FORTI_CONFIG_DIR, FORTI_STATE_DIR, FORTI_CACHE_DIR   override one location inside it\n"
-                "  FORTI_SECRET_STORE=file|keychain                      choose the secret store\n"
-                "  FORTI_OUTPUT=json, NO_COLOR                           output format and color\n"
-                "\n"
-                "exit status: 0 ok, 1 internal error, 2 usage, 3 configuration, 4 connection or authentication,\n"
-                "             5 not found, 6 validation or FortiOS error, 7 refused (mode, approval, stale plan),\n"
-                "             8 partial or unknown outcome\n"
-                "\n"
-                "Start with `forti configure`, then `forti doctor`. `forti help <command>` shows a command's\n"
-                "options; `man forti` has the full reference.\n";
+                "Start with `forti configure`. `forti help <command>` shows a command's options; `man forti` has\n"
+                "the full reference, including the environment (FORTI_HOME, FORTI_OUTPUT) and exit statuses.\n";
         return text;
     }
 
@@ -121,6 +129,10 @@ namespace forti::cli {
         if (command_at >= arguments.size()) {
             if (help) {
                 *output.out << usage_text();
+                return 0;
+            }
+            if (!configured(options)) {
+                *output.out << welcome;
                 return 0;
             }
             *output.err << usage_text();

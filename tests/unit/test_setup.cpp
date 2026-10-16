@@ -73,16 +73,65 @@ TEST_F(SetupCli, ConfigureRefusesSecretsAsArgumentsAndBadInput) {
     EXPECT_EQ(run({"configure", "--profile", "x", "--host", "h", "--api-key", "abc"}), 2);   // no such option
     EXPECT_EQ(run({"configure", "--profile", "x", "--host", "h"}), 2);                       // no credential
     EXPECT_NE(err.str().find("--api-key-stdin"), std::string::npos);
-    EXPECT_EQ(run({"configure", "--profile", "x", "--host", "https://fw/", "--api-key-env", "K"}), 2);
-    EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw:8443", "--api-key-env", "K"}), 2);
+    EXPECT_EQ(run({"configure", "--profile", "x", "--host", "http://fw/", "--api-key-env", "K"}), 2);    // HTTPS only
+    EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw:99999", "--api-key-env", "K"}), 2);
+    EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw:8443", "--port", "443", "--api-key-env", "K"}), 2);   // they disagree
+    EXPECT_EQ(run({"configure", "--profile", "x", "--host", "[2001:db8::1", "--api-key-env", "K"}), 2);
     EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw", "--api-key-env", "not a name"}), 2);
     EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw", "--api-key-env", "K", "--mode", "yolo"}), 2);
     EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw", "--api-key-env", "K", "--resolve-ip", "fw.lan"}), 2);
     EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw", "--api-key-env", "K", "--ca-bundle", "/nonexistent/ca.pem"}), 3);
     EXPECT_EQ(run({"configure", "--profile", "x", "--host", "fw", "--api-key-stdin"}, ""), 2);   // empty stdin
-    EXPECT_EQ(run({"configure", "--host", "fw", "--api-key-env", "K"}), 2);                      // --profile required
     EXPECT_FALSE(fs::exists(paths.config_file()));
     EXPECT_TRUE(transport->requests.empty());
+}
+
+TEST_F(SetupCli, ScriptedConfigureTakesAddressFormsAndNamesTheFirstProfileDefault) {
+    // No profile yet: --profile may be left out, and the address may carry the port or be a URL.
+    ASSERT_EQ(run({"configure", "--host", "https://fw.example.net:8443/ng/", "--api-key-env", "K", "--skip-check"}), 0) << err.str();
+    auto set = engine::ProfileStore(paths).load();
+    ASSERT_TRUE(set.profiles.contains("default"));
+    EXPECT_EQ(set.profiles.at("default").host, "fw.example.net");
+    EXPECT_EQ(set.profiles.at("default").port, 8443u);
+    EXPECT_EQ(set.default_profile, "default");
+    // Once a profile exists, scripts name the next one.
+    EXPECT_EQ(run({"--json", "configure", "--host", "fw2", "--api-key-env", "K", "--skip-check"}), 2);
+    EXPECT_NE(json_out()["error"]["details"]["hint"].get<std::string>().find("default"), std::string::npos);
+    ASSERT_EQ(run({"configure", "-p", "v6", "--host", "2001:db8::1", "--api-key-env", "K", "--skip-check"}), 0) << err.str();
+    ASSERT_EQ(run({"configure", "-p", "v6b", "--host", "[2001:db8::2]:8443", "--api-key-env", "K", "--skip-check"}), 0) << err.str();
+    set = engine::ProfileStore(paths).load();
+    EXPECT_EQ(set.profiles.at("v6").host, "[2001:db8::1]");
+    EXPECT_EQ(set.profiles.at("v6b").host, "[2001:db8::2]");
+    EXPECT_EQ(set.profiles.at("v6b").port, 8443u);
+}
+
+TEST_F(SetupCli, ConfigureLikeCopiesTheSettingsButNotTheDeviceOrKey) {
+    ASSERT_EQ(run({"configure", "-p", "fw01", "--host", "fw01.test:8443", "--vdom", "dmz", "--mode", "guarded", "--api-key-env", "K1",
+                   "--skip-check"}), 0) << err.str();
+    ASSERT_EQ(run({"configure", "-p", "fw02", "--like", "fw01", "--host", "fw02.test", "--api-key-env", "K2", "--skip-check"}), 0)
+            << err.str();
+    auto fw02 = engine::ProfileStore(paths).load().profiles.at("fw02");
+    EXPECT_EQ(fw02.host, "fw02.test");
+    EXPECT_EQ(fw02.port, 443u);
+    EXPECT_EQ(fw02.vdom, "dmz");
+    EXPECT_EQ(fw02.mode, engine::Mode::guarded);
+    EXPECT_EQ(fw02.api_key.env, "K2");
+    EXPECT_EQ(run({"configure", "-p", "fw03", "--like", "nope", "--host", "x", "--api-key-env", "K", "--skip-check"}), 3);
+    EXPECT_NE(err.str().find("profiles: fw01, fw02"), std::string::npos) << err.str();
+    EXPECT_EQ(run({"configure", "-p", "fw01", "--like", "fw02", "--host", "x", "--api-key-env", "K", "--skip-check"}), 2);
+}
+
+TEST_F(SetupCli, ProfileErrorsListTheProfiles) {
+    ASSERT_EQ(run({"configure", "-p", "a", "--host", "a.test", "--api-key-env", "K", "--skip-check"}), 0) << err.str();
+    ASSERT_EQ(run({"configure", "-p", "b", "--host", "b.test", "--api-key-env", "K", "--skip-check"}), 0) << err.str();
+    EXPECT_EQ(run({"get", "firewall/address", "-p", "nope"}), 3);
+    EXPECT_NE(err.str().find("profiles: a, b"), std::string::npos) << err.str();
+    auto set = engine::ProfileStore(paths).load();
+    set.default_profile.clear();
+    engine::ProfileStore(paths).save(set);
+    EXPECT_EQ(run({"get", "firewall/address"}), 3);
+    EXPECT_NE(err.str().find("forti profile default NAME"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("profiles: a, b"), std::string::npos) << err.str();
 }
 
 TEST_F(SetupCli, ConfigureStopsAtTheFirstAuthFailureAndSavesNothing) {
