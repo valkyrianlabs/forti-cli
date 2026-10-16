@@ -71,12 +71,14 @@ REST API Admin.
 forti configure
 ```
 
-forti asks for the address (`fw.example.net`, `192.0.2.1:8443` or an https URL), the API key (typed
-with echo off; it goes to the macOS Keychain or a 0600 file), whether to use a client certificate,
-and the operating mode. It then checks the connection with one read of the device. If the check
-fails, forti keeps your answers and offers fixes: type the key again, change the address, or give the
-CA bundle of a self-signed device (TLS is always verified). Last, it names the profile after the
-device. Profiles are `read-only` unless you choose otherwise.
+forti asks for the address (`fw.example.net`, `192.0.2.1:8443` or an https URL). When the FortiGate's
+certificate is self-signed or a factory one, forti shows it with its fingerprint and asks whether to
+trust it; a yes pins that certificate, and TLS stays verified against it. Then come the API key
+(typed with echo off; it goes to the macOS Keychain or a 0600 file), whether to use a client
+certificate, and the operating mode. forti checks the connection with one read of the device. If the
+check fails, it keeps your answers and offers fixes, such as typing the key again or changing the
+address. Last, it names the profile after the device. Profiles are `read-only` unless you choose
+otherwise.
 
 More devices later: `forti configure --like fw01` starts from fw01's settings and asks only for the
 address and the key. See [Profiles and credentials](/guides/profiles-and-credentials).

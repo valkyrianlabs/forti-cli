@@ -291,7 +291,31 @@ Certificate verification is always on, and no option, environment variable or co
 it.
 :::
 
-A FortiGate with a self-signed or private-CA certificate needs one of:
+### Trust on first use
+
+Most FortiGates present a self-signed or factory certificate, which no trust store knows. At the
+terminal, `forti configure` looks at the certificate right after you give the address, before
+anything else is sent. It connects, completes the TLS handshake and stops: no request, no API key.
+When the certificate does not verify, forti shows it and asks:
+
+```text
+The certificate of 192.0.2.1 is not trusted (SSL certificate problem: self-signed certificate).
+  subject   CN = FGT60FTK20000000
+  issuer    CN = FGT60FTK20000000 (self-signed)
+  names     (none)
+  expires   2032-04-01T10:00:00Z
+  SHA-256   3B:7E:…:C2
+Trust this certificate for this FortiGate? (y/N):
+```
+
+Compare the fingerprint with the one the FortiGate shows (System, Certificates) if you can. A yes
+saves that exact certificate in `~/.forti/tls/` and makes it the profile's CA bundle: forti then
+verifies the FortiGate against it on every request, and refuses any other certificate. When the
+certificate names something other than what you typed (a factory certificate names the serial
+number), forti offers to connect to the address and verify the certificate for its own name
+(`resolve_ip`). After a TLS failure, the recovery menu offers the same choice.
+
+### Other ways
 
 - `--ca-bundle PATH`: export the device's CA certificate (or its self-signed certificate) as PEM and
   point the profile at it.

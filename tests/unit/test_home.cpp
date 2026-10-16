@@ -4,6 +4,7 @@
 
 #include <cli_harness.hpp>
 
+#include <certs.hpp>
 #include <commands.hpp>
 #include <process.hpp>
 #include <tty.hpp>
@@ -741,4 +742,22 @@ TEST_F(HomeCli, HelpCoversTheNewCommands) {
     EXPECT_NE(out.str().find("--cert-password-file"), std::string::npos);
     ASSERT_EQ(run({"doctor", "--help"}), 0);
     EXPECT_NE(out.str().find("forti home migrate"), std::string::npos);
+}
+
+// ---- trust on first use: the names a certificate carries ----
+
+TEST(Certs, CoversMatchesNamesIpsAndOneWildcardLabel) {
+    json cert = {{"cn", "FGT60FTK20000000"}, {"names", {"DNS:fw.example.net", "DNS:*.lab.example.net", "IP:192.0.2.1", "IP:2001:DB8::1"}}};
+    EXPECT_TRUE(cli::certs::covers(cert, "fw.example.net"));
+    EXPECT_TRUE(cli::certs::covers(cert, "FW.Example.Net"));
+    EXPECT_TRUE(cli::certs::covers(cert, "a.lab.example.net"));
+    EXPECT_FALSE(cli::certs::covers(cert, "a.b.lab.example.net"));   // one label only
+    EXPECT_FALSE(cli::certs::covers(cert, "lab.example.net"));
+    EXPECT_TRUE(cli::certs::covers(cert, "192.0.2.1"));
+    EXPECT_TRUE(cli::certs::covers(cert, "[2001:db8::1]"));
+    EXPECT_FALSE(cli::certs::covers(cert, "192.0.2.2"));
+    EXPECT_FALSE(cli::certs::covers(cert, "FGT60FTK20000000"));   // names present: the CN does not count
+    json factory = {{"cn", "FGT60FTK20000000"}, {"names", json::array()}};
+    EXPECT_TRUE(cli::certs::covers(factory, "fgt60ftk20000000"));
+    EXPECT_FALSE(cli::certs::covers(factory, "192.0.2.1"));
 }
