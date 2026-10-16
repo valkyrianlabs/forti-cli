@@ -1,5 +1,5 @@
 //
-// AI client adapters for `forti install mcp`. Each client (Claude Code, Codex, ...) is one class
+// AI client adapters for `forti mcp install`. Each client (Claude Code, Codex, ...) is one class
 // implementing ClientAdapter in its own file plus one line in registry.cpp; the installer only talks
 // to this interface. Adapters never execute anything while planning: install/uninstall/repair return
 // Actions (an exact description plus a function), so the installer can show them, ask, dry-run, then run.
@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -58,6 +59,10 @@ namespace forti::install {
         std::string version;   // first line of `--version`
     };
 
+    // `<client> --version` answers by executable path, kept for one command run: every copy of a
+    // Context shares them, so a client is probed once however often its detection is asked for.
+    using DetectionCache = std::map<std::string, Detection, std::less<>>;
+
     // Everything adapters may depend on, gathered once (tests build it by hand).
     struct Context {
         fs::path home;
@@ -66,6 +71,7 @@ namespace forti::install {
         std::optional<fs::path> claude_config_dir;   // $CLAUDE_CONFIG_DIR
         std::optional<fs::path> codex_home;          // $CODEX_HOME
         std::chrono::milliseconds timeout{30'000};   // per client CLI call
+        std::shared_ptr<DetectionCache> detections = std::make_shared<DetectionCache>();
 
         // From $HOME, $CLAUDE_CONFIG_DIR, $CODEX_HOME, $FORTI_HOME; the project directory defaults to the cwd.
         static Context from_environment(const std::optional<fs::path>& project_dir = std::nullopt);

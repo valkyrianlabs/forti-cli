@@ -32,13 +32,16 @@ namespace forti::install {
         return find_executable("forti-mcp");
     }
 
+    // forti-mcp is its own package (forti-cli's packages bring it along, but it can be removed on its own).
     Failure forti_mcp_missing() {
         static constexpr std::string_view brew = "brew install valkyrianlabs/tap/forti-mcp";
-        static constexpr std::string_view apt = "sudo apt install forti-mcp   (after adding the apt.valkyrianlabs.com repository)";
+        static constexpr std::string_view apt = "sudo apt install forti-mcp";
         return Failure(Code::not_found,
-                       "forti-mcp is not installed (looked next to forti and on PATH). Install it, then run this again",
-                       {{"hint", std::format("macOS: {}\n        Debian/Ubuntu: {}", brew, apt)},
-                        {"install", {{"homebrew", brew}, {"apt", "sudo apt install forti-mcp"}}}});
+                       "forti-mcp, the MCP server AI clients start, was not found next to forti or on PATH",
+                       {{"hint", std::format("install it, then run forti mcp install again:\n"
+                                             "          macOS (Homebrew): {}\n"
+                                             "          Debian/Ubuntu:    {}  (from apt.valkyrianlabs.com)", brew, apt)},
+                        {"install", {{"homebrew", brew}, {"apt", apt}}}});
     }
 
     std::optional<std::string> forti_mcp_version(const fs::path& path, std::chrono::milliseconds timeout) {
@@ -255,11 +258,11 @@ namespace forti::install {
                     } else if (runnable && !versioned) {
                         plan.state = "differs";
                         plan.message = std::format("registered `{}` works but is not the installed {}; "
-                                                   "`forti install mcp --force` switches it", entry.command, forti_mcp.string());
+                                                   "`forti mcp install --force` switches it", entry.command, forti_mcp.string());
                     } else if (entry.extra) {
                         plan.state = "custom";
                         plan.message = std::format("`{}` is broken but the entry has custom settings; re-register it with "
-                                                   "`forti install mcp --force`", entry.command);
+                                                   "`forti mcp install --force`", entry.command);
                     } else {
                         plan.state = "repair";
                         plan.message = runnable ? std::format("{} is a versioned Homebrew path that breaks on upgrade", entry.command)

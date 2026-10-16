@@ -10,7 +10,7 @@ try to run `execute`, `diagnose` or `config` commands, and do not ask for them. 
 (sessions, routes, HA, VPN status) comes from `monitor/...` resources.
 
 Usually you run in the **forti workspace**, the forti home (`~/.forti`, set up by
-`forti install mcp --scope workspace`, started with `cd ~/.forti && claude` or `codex`). The same
+`forti mcp install --scope workspace`, started with `cd ~/.forti && claude` or `codex`). The same
 directory holds forti's `config.json`, `credentials/`, `certs/` and `state/`: never read, print or
 edit them. Everything you need comes through the tools.
 
