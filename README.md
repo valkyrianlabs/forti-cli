@@ -10,8 +10,7 @@ so AI clients get the same, bounded surface.
 ```sh
 brew install valkyrianlabs/tap/forti-cli    # or: sudo apt install forti-cli (apt.valkyrianlabs.com)
 
-forti configure                 # prompts for host, CA bundle, API key (hidden) and mode
-forti cert create               # optional: a client certificate, and the FortiGate steps to trust it
+forti configure                 # prompts for host, CA bundle, API key (hidden), client certificate, mode
 forti doctor                    # checks the home, credentials, TLS, auth and the FortiOS version
 forti install mcp               # pick "~/.forti workspace (recommended)"; needs forti-mcp
 cd ~/.forti && claude           # or: codex. The agent gets the FortiGate tools here, nowhere else
@@ -25,7 +24,8 @@ Everything lives in one directory, the forti home: `~/.forti` (or `$FORTI_HOME`,
 ~/.forti/
 ├── config.json       profiles, one per FortiGate (no secrets)
 ├── credentials/      file-stored API keys (0600; macOS uses the Keychain)
-├── certs/<profile>/  client certificates from forti cert create
+├── certs/<name>/     client certificates (forti cert list), shared by any profiles
+├── ca/               the forti CA that issues them
 ├── state/            plans, approvals, backups, audit log
 └── cache/
 ```
@@ -53,7 +53,7 @@ statuses follow the error code.
 
 - [Docs index](docs/index.md): installation, quick start, guides, reference and development
 - [Profiles and credentials](docs/guides/profiles-and-credentials.md): several FortiGates, credential sources, TLS
-- [Client certificates](docs/guides/client-certificates.md): `forti cert create` and the FortiGate side
+- [Client certificates](docs/guides/client-certificates.md): `forti configure`, `forti cert` and the FortiGate side
 - [AI agent integration](docs/guides/ai-agent-integration.md): the `~/.forti` workspace for Claude Code and Codex
 - [Configuration files](docs/reference/configuration-files.md): the forti home, migration from 0.1, `config.json`
 - [Commands](docs/reference/commands.md): every command and option

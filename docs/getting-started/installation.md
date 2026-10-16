@@ -10,7 +10,7 @@ tags:
 # Installation
 
 `forti` is a single executable. Its only runtime library dependency is libcurl; the forti-api SDK is
-header-only and compiled in. `forti cert create` also runs the `openssl` command, which macOS ships
+header-only and compiled in. Client certificates (`forti configure`, `forti cert`) also use the `openssl` command, which macOS ships
 (`/usr/bin/openssl`, LibreSSL) and the Debian package depends on. The package installs `forti` and its
 man page (`man forti`).
 

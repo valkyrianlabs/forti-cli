@@ -94,6 +94,7 @@ A leading `/` anchors a rule to the directory of the settings file, the forti ho
       "Read(/certs/**/*.pass)",
       "Read(/certs/**/*.p12)",
       "Read(/certs/**/ca/**)",
+      "Read(/ca/**)",
       "Edit(/config.json)"
     ]
   }
@@ -113,13 +114,14 @@ extends = ":workspace"
 "certs/**/*.pass" = "deny"
 "certs/**/*.p12" = "deny"
 "certs/**/ca/**" = "deny"
+"ca" = "deny"
 "config.json" = "read"
 ```
 
 What they cover:
 
 - **Claude Code**: its file tools cannot read the file secret store (`credentials/`), certificate
-  passwords (`*.pass`), PKCS#12 bundles (`*.p12`) or CA keys (`certs/<profile>/ca/`), and cannot edit
+  passwords (`*.pass`), PKCS#12 bundles (`*.p12`) or CA keys (`ca/`, `certs/<name>/ca/`), and cannot edit
   `config.json`.
 - **Codex**: commands it runs in its sandbox cannot read or write the same paths, and see
   `config.json` read-only. Codex applies the profile only once it trusts `~/.forti`

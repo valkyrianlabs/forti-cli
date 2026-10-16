@@ -156,13 +156,14 @@ TEST_F(Workspace, InstallWritesTheRegistrationAndScaffoldInTheFortiHome) {
     auto settings = json::parse(slurp(forti / ".claude" / "settings.json"));
     EXPECT_EQ(settings["permissions"]["deny"], json(workspace::claude_deny_rules()));
     for (const char* rule: {"Read(/credentials/**)", "Read(/certs/**/*.pass)", "Read(/certs/**/*.p12)", "Read(/certs/**/ca/**)",
-                            "Edit(/config.json)"})
+                            "Read(/ca/**)", "Edit(/config.json)"})
         EXPECT_NE(std::ranges::find(settings["permissions"]["deny"], json(rule)), settings["permissions"]["deny"].end()) << rule;
 
     auto line = toml::find_top_level(codex, "default_permissions");
     ASSERT_TRUE(line);
     EXPECT_EQ(toml::parse_string(line->value), "forti-workspace");
     EXPECT_NE(codex.find("[permissions.forti-workspace.filesystem.\":workspace_roots\"]\n\"credentials\" = \"deny\"\n"), std::string::npos);
+    EXPECT_NE(codex.find("\n\"ca\" = \"deny\"\n"), std::string::npos);   // the forti CA's key
     EXPECT_NE(codex.find("\"config.json\" = \"read\"\n"), std::string::npos);
 
     // Trust, with consent: exactly the one table.

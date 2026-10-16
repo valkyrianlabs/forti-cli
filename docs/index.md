@@ -46,8 +46,7 @@ AI clients get the same bounded surface as you do at the terminal.
 :::
 
 ```sh
-forti configure                       # host, CA bundle, API key (hidden) and mode
-forti cert create                     # optional: a client certificate for the API user
+forti configure                       # host, CA bundle, API key (hidden), client certificate, mode
 forti doctor                          # home, credentials, TLS, auth, FortiOS version
 forti install mcp                     # the FortiGate tools for Claude Code and Codex, in ~/.forti
 cd ~/.forti && claude                 # or: codex
@@ -93,7 +92,7 @@ it; `autonomous` profiles apply without approval, with every safeguard still on.
 
 :::card[One home, many FortiGates]{eyebrow="Setup"}
 Profiles, credentials, certificates and plans live in `~/.forti`. Copy, rename and edit profiles
-for a fleet of devices, and add a client certificate with `forti cert create`.
+for a fleet of devices, and share one client certificate across them.
 :::
 
 :::card[Credentials kept out of sight]{eyebrow="Security"}
@@ -140,7 +139,7 @@ Several FortiGates: add, copy, rename and edit profiles, credential sources, TLS
 :::
 
 :::card[Client certificates]{href="/guides/client-certificates"}
-`forti cert create`, the FortiGate PKI user and peer group, renewal and removal.
+Made or reused by `forti configure`, the forti CA, the FortiGate commands, renewal and removal.
 :::
 
 :::card[Discovering and reading]{href="/guides/discovering-and-reading"}

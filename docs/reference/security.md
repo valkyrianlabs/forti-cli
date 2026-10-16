@@ -22,8 +22,8 @@ and do not protect against.
 | Profiles (host, port, VDOM, paths, mode, credential *reference*) | `~/.forti/config.json` | 0600 file in a 0700 directory. No secrets: a config file containing one is rejected |
 | API keys and certificate passwords (secret-store source) | macOS: login Keychain (service `forti`). Elsewhere: `~/.forti/credentials/` | Keychain ACL; or 0600 files that forti refuses to read when group or others can access them. Bound to the profile's host:port |
 | API keys (env / command source) | not stored | only the variable name or the command's argv is saved |
-| Certificate passwords from `forti cert create` | `~/.forti/certs/<profile>/client.pass`, or the secret store with `--keychain` | 0600 file in a 0700 directory, read through the `file` source (refused when group or others can access it); never printed |
-| Client certificate keys and the private CA key | `~/.forti/certs/<profile>/client.p12` (encrypted), `ca/ca.key` | 0600 files in 0700 directories; the CA key never leaves the machine |
+| Passwords of forti's client certificates | `~/.forti/certs/<name>/client.pass`, or the secret store with `--keychain` | 0600 file in a 0700 directory, read through the `file` source (refused when group or others can access it); never printed |
+| Client certificate keys and the private CA keys | `~/.forti/certs/<name>/client.p12` (encrypted); the forti CA's `~/.forti/ca/ca.key`, and `certs/<name>/ca/ca.key` for a certificate with its own CA | 0600 files in 0700 directories; CA keys never leave the machine |
 | Plans, approvals, audit log | `~/.forti/state/` | 0600 files. Plan files keep real values (apply needs them) |
 | Pre-change configuration backups (critical plans) | `~/.forti/state/backups/<plan id>.conf` | 0600 file in a 0700 directory, streamed to disk, never logged or printed; the 20 most recent are kept |
 
@@ -79,7 +79,7 @@ stored, so they are not bound.
   owned by another user, or accessible by group or others.
 - `FORTI_HOME`, `FORTI_CONFIG_DIR`, `FORTI_STATE_DIR` and `FORTI_CACHE_DIR` must be absolute paths, so
   profiles, credentials and modes never depend on the working directory.
-- `forti cert create` runs `openssl` with an argument vector, never a shell, and passes the
+- `forti cert` and `forti configure` run `openssl` with an argument vector, never a shell, and passes the
   certificate password to it as a `file:` reference, never in argv.
 - A credential command runs without a shell, with its standard input from `/dev/null` and only
   descriptors 0 to 2 inherited.

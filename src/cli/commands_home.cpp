@@ -9,6 +9,7 @@
 // the command again finishes it. Keychain items are untouched (their account names do not change).
 //
 
+#include "certs.hpp"
 #include "commands.hpp"
 #include "setup_support.hpp"
 
@@ -58,6 +59,7 @@ namespace forti::cli {
                          {"state", paths.state.string()},
                          {"cache", paths.cache.string()},
                          {"certs", paths.certs().string()},
+                         {"forti_ca", certs::forti_ca_dir(paths).string()},
                          {"legacy", paths.legacy},
                          {"overrides", overrides_in_effect()}};
             try {
@@ -82,7 +84,8 @@ namespace forti::cli {
             line("credentials", data.value("credentials", "") + "/", "file store");
             line("state", data.value("state", "") + "/", "plans, approvals, audit log, backups");
             line("cache", data.value("cache", "") + "/");
-            line("certs", data.value("certs", "") + "/", "forti cert create");
+            line("certs", data.value("certs", "") + "/", "client certificates (forti cert list)");
+            line("forti CA", data.value("forti_ca", "") + "/", "issues them; its key never leaves this machine");
             std::string store = data.value("secret_store", "");
             out << std::format("  {:<12} {}\n", "secrets", store == "keychain" ? "macOS Keychain (service \"forti\")"
                                                          : store == "file" ? "file store (credentials/, 0600)" : store);
@@ -237,9 +240,9 @@ namespace forti::cli {
              "       forti home migrate         move a pre-0.2 setup into the home\n"
              "\n"
              "The forti home is $FORTI_HOME, else ~/.forti. It holds config.json and credentials/\n"
-             "(profiles and file-stored secrets), state/ (plans, approvals, audit log, backups), cache/\n"
-             "and certs/<profile>/ (forti cert create). FORTI_CONFIG_DIR, FORTI_STATE_DIR and\n"
-             "FORTI_CACHE_DIR still override single locations.\n"
+             "(profiles and file-stored secrets), state/ (plans, approvals, audit log, backups), cache/,\n"
+             "certs/<name>/ (client certificates) and ca/ (the forti CA that issues them).\n"
+             "FORTI_CONFIG_DIR, FORTI_STATE_DIR and FORTI_CACHE_DIR still override single locations.\n"
              "\n"
              "Releases before 0.2 used ~/.config/forti, ~/.local/state/forti and ~/.cache/forti (or\n"
              "$XDG_CONFIG_HOME, $XDG_STATE_HOME, $XDG_CACHE_HOME). That setup keeps working until it is\n"

@@ -7,7 +7,8 @@
 //   <home>/config.json, credentials/   profiles and file-stored secrets   ($FORTI_CONFIG_DIR overrides)
 //   <home>/state/                       plans/, approvals/, audit.jsonl, backups/   ($FORTI_STATE_DIR)
 //   <home>/cache/                       reserved (live schemas are not cached yet)  ($FORTI_CACHE_DIR)
-//   <home>/certs/<profile>/             client certificates made by `forti cert create`
+//   <home>/certs/<name>/                client certificates (`forti cert`), usable by any profile
+//   <home>/ca/                          the forti CA that issues them (its key never leaves the machine)
 //
 // The home is also the recommended MCP workspace (`forti install mcp`): an agent started there sees
 // the FortiGate tools, an agent started anywhere else does not.

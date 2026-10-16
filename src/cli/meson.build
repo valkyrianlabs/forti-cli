@@ -2,6 +2,7 @@
 cli_sources = files(
     'app.cpp',
     'args.cpp',
+    'certs.cpp',
     'commands.cpp',
     'commands_cert.cpp',
     'commands_home.cpp',

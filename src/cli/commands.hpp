@@ -46,7 +46,7 @@ namespace forti::cli {
 
     std::vector<Command> setup_commands();     // commands_setup.cpp: configure, doctor, profiles (+ home, cert)
     std::vector<Command> home_commands();      // commands_home.cpp: home, home migrate
-    std::vector<Command> cert_commands();      // commands_cert.cpp: cert create|show|remove
+    std::vector<Command> cert_commands();      // commands_cert.cpp: cert create|list|show|use|remove
     std::vector<Command> read_commands();      // commands_read.cpp: devices, discover, get
     std::vector<Command> plan_commands();      // commands_plan.cpp: plan, apply
     std::vector<Command> install_commands();   // commands_install.cpp: install, mcp

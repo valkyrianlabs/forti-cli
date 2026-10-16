@@ -45,14 +45,11 @@ More devices later: `forti profile copy fw01 fw02`, then `forti configure --prof
 
 ### Add a client certificate (optional)
 
-```sh
-forti cert create
-```
-
-When the FortiGate should require a client certificate as well as the API key, this makes a private
-CA and a client certificate in `~/.forti/certs/<profile>/`, points the profile at them, and prints the
-FortiGate commands to run. The certificate's password stays in a private file and is never printed.
-See [Client certificates](/guides/client-certificates).
+When the FortiGate should require a client certificate as well as the API key, answer **y** to
+*Use a client certificate?* in `forti configure`. forti makes the certificate in `~/.forti/certs/`,
+issued by its own CA, prints the FortiGate commands to paste, and checks the connection once you press
+Enter. For more devices, choose the same certificate again from the list. Its password stays in a
+private file and is never printed. See [Client certificates](/guides/client-certificates).
 
 ### Check everything
 

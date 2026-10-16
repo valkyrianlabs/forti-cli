@@ -317,6 +317,7 @@ namespace forti::install::workspace {
                                "\"certs/**/*.pass\" = \"deny\"\n"
                                "\"certs/**/*.p12\" = \"deny\"\n"
                                "\"certs/**/ca/**\" = \"deny\"\n"
+                               "\"ca\" = \"deny\"\n"
                                "\"config.json\" = \"read\"\n",
                                codex_profile);
         }
@@ -529,7 +530,7 @@ namespace forti::install::workspace {
     const std::vector<std::string>& claude_deny_rules() {
         static const std::vector<std::string> rules = {
                 "Read(/credentials/**)", "Read(/certs/**/*.pass)", "Read(/certs/**/*.p12)", "Read(/certs/**/ca/**)",
-                "Edit(/config.json)",
+                "Read(/ca/**)", "Edit(/config.json)",
         };
         return rules;
     }
@@ -549,7 +550,7 @@ namespace forti::install::workspace {
                 "## For agents\n"
                 "\n"
                 "- Use the forti MCP tools and the `forti` skill (`.claude/skills/forti`, `.agents/skills/forti`).\n"
-                "- Never read, print or edit `credentials/`, `certs/`, `config.json` or `state/`. They hold API keys,\n"
+                "- Never read, print or edit `credentials/`, `certs/`, `ca/`, `config.json` or `state/`. They hold API keys,\n"
                 "  private keys and the profiles; never ask for credentials either.\n"
                 "- Never run `forti plan approve`, `forti configure`, `forti profile` or `forti cert`: approvals and\n"
                 "  profile changes are the human's.\n"

@@ -6,6 +6,7 @@
 
 #include <commands.hpp>
 #include <process.hpp>
+#include <tty.hpp>
 
 #include <algorithm>
 #include <fstream>
@@ -272,13 +273,16 @@ namespace {
 
 }  // namespace
 
-TEST_F(CertCli, CreateShowRemoveWithEveryLocalOpenssl) {
+TEST_F(CertCli, CreateShowUseRemoveWithEveryLocalOpenssl) {
     auto programs = openssl_programs();
     if (programs.empty()) GTEST_SKIP() << "no openssl on this machine";
+    fs::path forti_ca = paths.home / "ca";
     for (const auto& program: programs) {
         SCOPED_TRACE(program.string());
         use(program);
+        fs::remove_all(forti_ca);
         fs::path dir = dir_of("lab");
+        // Without NAME, for the default profile; issued by the forti CA, made now.
         ASSERT_EQ(run({"--json", "cert", "create", "--days", "30"}), 0) << out.str() << err.str();
         std::string printed = out.str();
         json data = json_out()["data"];
@@ -286,14 +290,17 @@ TEST_F(CertCli, CreateShowRemoveWithEveryLocalOpenssl) {
         // Files and modes.
         EXPECT_EQ(mode_of(paths.certs()), 0700u);
         EXPECT_EQ(mode_of(dir), 0700u);
-        EXPECT_EQ(mode_of(dir / "ca"), 0700u);
-        EXPECT_EQ(mode_of(dir / "ca" / "ca.key"), 0600u);
+        EXPECT_EQ(mode_of(forti_ca), 0700u);
+        EXPECT_EQ(mode_of(forti_ca / "ca.key"), 0600u);
+        EXPECT_FALSE(fs::exists(dir / "ca"));   // the forti CA's key stays in one place
+        EXPECT_EQ(slurp(dir / "ca.crt"), slurp(forti_ca / "ca.crt"));
         EXPECT_EQ(mode_of(dir / "client.pass"), 0600u);
         EXPECT_EQ(mode_of(dir / "client.p12"), 0600u);
-        EXPECT_TRUE(fs::is_regular_file(dir / "ca.crt"));
         EXPECT_TRUE(fs::is_regular_file(dir / "client.crt"));
         for (const char* scratch: {"client.key", "client.csr", "client.ext", "ca.srl"}) EXPECT_FALSE(fs::exists(dir / scratch)) << scratch;
         EXPECT_TRUE(std::ranges::none_of(fs::directory_iterator(paths.certs()),
+                                         [](const auto& entry) { return entry.path().filename().string().starts_with("."); }));
+        EXPECT_TRUE(std::ranges::none_of(fs::directory_iterator(paths.home),
                                          [](const auto& entry) { return entry.path().filename().string().starts_with("."); }));
 
         // The profile points at them; the password comes from client.pass.
@@ -306,17 +313,21 @@ TEST_F(CertCli, CreateShowRemoveWithEveryLocalOpenssl) {
         EXPECT_EQ(printed.find(password), std::string::npos);   // never printed, never in JSON
         EXPECT_EQ(slurp(paths.config_file()).find(password), std::string::npos);
         EXPECT_EQ(data["password_command"], "cat " + (dir / "client.pass").string());
+        EXPECT_EQ(data["profile"], "lab");
         EXPECT_EQ(data["cn"], "forti-lab");
-        EXPECT_NE(data["certificate"]["subject"].get<std::string>().find("forti-lab"), std::string::npos);
-        EXPECT_EQ(data["certificate"]["fingerprint_sha256"].get<std::string>().size(), 95u);   // 32 bytes as XX:…
+        EXPECT_EQ(data["issuer"], "forti CA");
+        EXPECT_EQ(data["forti_ca_created"], true);
+        EXPECT_EQ(data["fingerprint_sha256"].get<std::string>().size(), 95u);   // 32 bytes as XX:…
+        std::string ca_name = data["fortigate"]["ca_name"];
+        EXPECT_TRUE(ca_name.starts_with("forti-ca-")) << ca_name;
 
-        // The .p12 opens with the password and holds the client certificate, its key and the CA, with
-        // the legacy PBE every consumer reads.
+        // The .p12 opens with the password and holds the client certificate, its key and the forti CA,
+        // with the legacy PBE every consumer reads.
         auto dump = openssl({"pkcs12", "-in", (dir / "client.p12").string(), "-passin", "file:" + (dir / "client.pass").string(), "-nodes"});
         ASSERT_TRUE(dump.ok()) << dump.err;
         EXPECT_EQ(count(dump.out, "BEGIN CERTIFICATE"), 2u);
         EXPECT_EQ(count(dump.out, "PRIVATE KEY-----"), 2u);   // BEGIN and END
-        EXPECT_NE(dump.out.find("forti-lab CA"), std::string::npos);
+        EXPECT_NE(dump.out.find("forti CA "), std::string::npos);
         auto info = openssl({"pkcs12", "-in", (dir / "client.p12").string(), "-passin", "file:" + (dir / "client.pass").string(),
                              "-info", "-noout"});
         ASSERT_TRUE(info.ok()) << info.err;
@@ -324,42 +335,89 @@ TEST_F(CertCli, CreateShowRemoveWithEveryLocalOpenssl) {
         EXPECT_NE(details.find("pbeWithSHA1And3-KeyTripleDES-CBC"), std::string::npos) << details;
         EXPECT_EQ(details.find("AES"), std::string::npos) << details;
         EXPECT_EQ(openssl({"pkcs12", "-in", (dir / "client.p12").string(), "-passin", "pass:wrong", "-nodes"}).ok(), false);
-        auto verify = openssl({"verify", "-CAfile", (dir / "ca.crt").string(), (dir / "client.crt").string()});
+        auto verify = openssl({"verify", "-CAfile", (forti_ca / "ca.crt").string(), (dir / "client.crt").string()});
         EXPECT_TRUE(verify.ok()) << verify.out << verify.err;
         auto purpose = openssl({"x509", "-in", (dir / "client.crt").string(), "-noout", "-text"});
         EXPECT_NE(purpose.out.find("TLS Web Client Authentication"), std::string::npos);
 
-        // The FortiGate steps use only keywords of the FortiOS 7.4.8 schema.
+        // The FortiGate steps use only keywords of the FortiOS 7.4.8 schema, with the CA inline.
+        std::string steps;
+        for (const auto& line: data["fortigate"]["steps"]) steps += line.get<std::string>() + "\n";
+        for (std::string keyword: {std::string("config vpn certificate ca"), "edit \"" + ca_name + "\"", std::string("set ca \"-----BEGIN CERTIFICATE-----"),
+                                   std::string("-----END CERTIFICATE-----\""), std::string("once per FortiGate"),
+                                   std::string("config user peer\n"), std::string("edit \"forti-lab\""), "set ca \"" + ca_name + "\"",
+                                   std::string("set cn \"forti-lab\""), std::string("config user peergrp"), std::string("edit \"forti-lab-peers\""),
+                                   std::string("set member \"forti-lab\""), std::string("config system api-user"), std::string("set peer-auth enable"),
+                                   std::string("set peer-group \"forti-lab-peers\"")})
+            EXPECT_NE(steps.find(keyword), std::string::npos) << keyword << "\n" << steps;
+        EXPECT_NE(steps.find(cli::trim(slurp(forti_ca / "ca.crt"))), std::string::npos);
+
+        // Without --force an existing certificate stays.
+        std::string client = slurp(dir / "client.crt");
+        EXPECT_EQ(run({"cert", "create"}), 3);
+        EXPECT_NE(err.str().find("--force"), std::string::npos);
+        EXPECT_EQ(slurp(dir / "client.crt"), client);
+
+        // Renewal from the forti CA: same CA and CN, so the FortiGate needs no change.
+        std::string ca = slurp(forti_ca / "ca.crt");
         ASSERT_EQ(run({"cert", "create", "--force"}), 0) << err.str();
         std::string text = out.str();
-        for (const char* keyword: {"config vpn certificate ca", "edit \"forti-lab-ca\"", "set ca \"<paste",
-                                   "config user peer\n", "edit \"forti-lab\"", "set ca \"forti-lab-ca\"", "set cn \"forti-lab\"",
-                                   "config user peergrp", "edit \"forti-lab-peers\"", "set member \"forti-lab\"",
-                                   "config system api-user", "set peer-auth enable", "set peer-group \"forti-lab-peers\"",
-                                   "cat " , "client.pass", "forti doctor --profile lab"})
-            EXPECT_NE(text.find(keyword), std::string::npos) << keyword << "\n" << text;
         EXPECT_NE(text.find("Replaced"), std::string::npos);
+        EXPECT_NE(text.find("needs no change"), std::string::npos) << text;
+        EXPECT_NE(text.find("forti doctor --profile lab"), std::string::npos);
+        EXPECT_NE(slurp(dir / "client.crt"), client);
+        EXPECT_EQ(slurp(forti_ca / "ca.crt"), ca);
         password = engine::resolve_secret(saved().profiles.at("lab").cert_password, "a", *secrets, "");
         EXPECT_EQ(text.find(password), std::string::npos);
 
-        // Without --force an existing CA stays.
-        std::string ca = slurp(dir / "ca.crt");
-        EXPECT_EQ(run({"cert", "create"}), 3);
-        EXPECT_NE(err.str().find("--force"), std::string::npos);
-        EXPECT_EQ(slurp(dir / "ca.crt"), ca);
+        // A named certificate needs no profile; one with its own CA.
+        ASSERT_EQ(run({"cert", "create", "edge", "--own-ca"}), 0) << err.str();
+        text = out.str();
+        EXPECT_EQ(mode_of(dir_of("edge") / "ca" / "ca.key"), 0600u);
+        for (const char* keyword: {"edit \"forti-edge-ca\"", "set ca \"forti-edge-ca\"", "set cn \"forti-edge\"", "forti cert use edge"})
+            EXPECT_NE(text.find(keyword), std::string::npos) << keyword << "\n" << text;
+        EXPECT_EQ(text.find("once per FortiGate"), std::string::npos);
+        ASSERT_EQ(run({"cert", "create", "spare"}), 0) << err.str();
+        EXPECT_EQ(saved().profiles.at("lab").client_cert, (dir / "client.p12").string());   // untouched
 
-        // show
+        // list
+        ASSERT_EQ(run({"--json", "cert", "list"}), 0) << err.str();
+        json listed = json_out()["data"];
+        EXPECT_EQ(listed["forti_ca"]["exists"], true);
+        EXPECT_EQ(listed["forti_ca"]["fortigate_name"], ca_name);
+        ASSERT_EQ(listed["certificates"].size(), 3u);
+        EXPECT_EQ(listed["certificates"][0]["name"], "edge");
+        EXPECT_EQ(listed["certificates"][0]["issuer"], "own CA");
+        EXPECT_EQ(listed["certificates"][1]["name"], "lab");
+        EXPECT_EQ(listed["certificates"][1]["used_by"], json::array({"lab"}));
+        EXPECT_EQ(listed["certificates"][2]["issuer"], "forti CA");
+        EXPECT_EQ(listed["certificates"][2]["used_by"], json::array());
+        ASSERT_EQ(run({"cert", "list"}), 0);
+        EXPECT_NE(out.str().find(ca_name), std::string::npos) << out.str();
+
+        // show: NAME, else the default profile's certificate.
         ASSERT_EQ(run({"--json", "cert", "show"}), 0) << err.str();
         json shown = json_out()["data"];
-        EXPECT_NE(shown["client"]["subject"].get<std::string>().find("forti-lab"), std::string::npos);
-        EXPECT_NE(shown["ca"]["subject"].get<std::string>().find("forti-lab CA"), std::string::npos);
-        EXPECT_EQ(shown["client"]["expired"], false);
-        EXPECT_GE(shown["client"]["days_left"].get<long long>(), 1095 - 1);
-        EXPECT_EQ(shown["in_use"], true);
-        EXPECT_EQ(shown["files"]["ca_key"]["mode"], "0600");
+        EXPECT_EQ(shown["name"], "lab");
+        EXPECT_NE(shown["subject"].get<std::string>().find("forti-lab"), std::string::npos);
+        EXPECT_EQ(shown["expired"], false);
+        EXPECT_GE(shown["days_left"].get<long long>(), 1095 - 1);
+        EXPECT_EQ(shown["profiles"][0]["profile"], "lab");
+        EXPECT_EQ(shown["files"]["client_pass"]["mode"], "0600");
         EXPECT_EQ(out.str().find(password), std::string::npos);
-        ASSERT_EQ(run({"cert", "show", "--profile", "lab"}), 0);
+        ASSERT_EQ(run({"cert", "show", "edge"}), 0);
         EXPECT_NE(out.str().find("SHA-256"), std::string::npos);
+        EXPECT_NE(out.str().find("not used by a profile"), std::string::npos);
+
+        // use: the profile switches certificate; the old one stays.
+        ASSERT_EQ(run({"cert", "use", "spare"}), 0) << err.str();
+        EXPECT_NE(out.str().find("forti-ca-"), std::string::npos);
+        lab = saved().profiles.at("lab");
+        EXPECT_EQ(lab.client_cert, (dir_of("spare") / "client.p12").string());
+        EXPECT_EQ(lab.cert_password.path, (dir_of("spare") / "client.pass").string());
+        EXPECT_TRUE(fs::exists(dir));
+        EXPECT_EQ(run({"cert", "use", "nope"}), 3);
+        ASSERT_EQ(run({"cert", "use", "lab", "--profile", "lab"}), 0) << err.str();
 
         // doctor resolves the file-sourced password and finds the .p12.
         device_replies();
@@ -369,15 +427,64 @@ TEST_F(CertCli, CreateShowRemoveWithEveryLocalOpenssl) {
         EXPECT_NE(check(checks, "secrets")["message"].get<std::string>().find("client.pass"), std::string::npos);
         EXPECT_EQ(check(checks, "tls_files")["status"], "pass");
 
-        // remove
+        // remove: the default profile's certificate, then named ones. The forti CA stays.
         ASSERT_EQ(run({"--json", "cert", "remove"}), 0) << err.str();
+        EXPECT_EQ(json_out()["data"]["profiles_updated"], json::array({"lab"}));
         EXPECT_FALSE(fs::exists(dir));
         lab = saved().profiles.at("lab");
         EXPECT_TRUE(lab.client_cert.empty());
         EXPECT_EQ(lab.cert_password.source, engine::SecretRef::Source::none);
         EXPECT_EQ(run({"cert", "show"}), 3);
         EXPECT_EQ(run({"cert", "remove"}), 3);
+        ASSERT_EQ(run({"cert", "remove", "edge"}), 0) << err.str();
+        ASSERT_EQ(run({"cert", "remove", "spare"}), 0) << err.str();
+        EXPECT_TRUE(fs::exists(forti_ca / "ca.key"));
     }
+}
+
+TEST_F(CertCli, CertificatesNeedNoProfile) {
+    auto programs = openssl_programs();
+    if (programs.empty()) GTEST_SKIP() << "no openssl on this machine";
+    use(programs.front());
+    ASSERT_EQ(run({"profile", "remove", "lab"}), 0) << err.str();
+    ASSERT_TRUE(saved().profiles.empty());
+
+    // No profile at all: the certificate is named "default".
+    ASSERT_EQ(run({"--json", "cert", "create"}), 0) << out.str() << err.str();
+    json data = json_out()["data"];
+    EXPECT_EQ(data["name"], "default");
+    EXPECT_TRUE(data["profile"].is_null());
+    EXPECT_EQ(data["password_command"], "cat " + (dir_of("default") / "client.pass").string());
+    ASSERT_EQ(run({"cert", "create", "fw"}), 0) << err.str();
+    EXPECT_NE(out.str().find("forti cert use fw --profile NAME"), std::string::npos) << out.str();
+    EXPECT_EQ(run({"cert", "create", "other", "--keychain"}), 2);   // a stored password belongs to a profile
+
+    // configure picks it up by name; the password comes from its client.pass.
+    device_replies();
+    ASSERT_EQ(run({"--json", "configure", "--profile", "fw01", "--host", "fortigate.test", "--api-key-stdin", "--cert", "default"}, "k\n"), 0)
+            << err.str();
+    EXPECT_EQ(json_out()["data"]["client_cert"], "certificate \"default\"");
+    // and a second device reuses it.
+    ASSERT_EQ(run({"configure", "--profile", "fw02", "--host", "fw02.test", "--api-key-stdin", "--cert", "default", "--skip-check"}, "k\n"), 0)
+            << err.str();
+    auto set = saved();
+    for (const char* name: {"fw01", "fw02"}) {
+        EXPECT_EQ(set.profiles.at(name).client_cert, (dir_of("default") / "client.p12").string()) << name;
+        EXPECT_EQ(set.profiles.at(name).cert_password.source, engine::SecretRef::Source::file) << name;
+        EXPECT_EQ(set.profiles.at(name).cert_password.path, (dir_of("default") / "client.pass").string()) << name;
+    }
+    ASSERT_EQ(run({"--json", "cert", "list"}), 0);
+    EXPECT_EQ(json_out()["data"]["certificates"][0]["used_by"], json::array({"fw01", "fw02"}));
+
+    EXPECT_EQ(run({"configure", "--profile", "fw03", "--host", "x.test", "--api-key-env", "K", "--cert", "nope", "--skip-check"}), 3);
+    EXPECT_EQ(run({"configure", "--profile", "fw03", "--host", "x.test", "--api-key-env", "K", "--cert", "fw", "--client-cert",
+                   (dir_of("fw") / "client.p12").string(), "--skip-check"}), 2);
+    EXPECT_FALSE(saved().profiles.contains("fw03"));
+
+    // remove detaches every profile that used it.
+    ASSERT_EQ(run({"--json", "cert", "remove", "default"}), 0) << err.str();
+    EXPECT_EQ(json_out()["data"]["profiles_updated"], json::array({"fw01", "fw02"}));
+    EXPECT_TRUE(saved().profiles.at("fw02").client_cert.empty());
 }
 
 TEST_F(CertCli, KeychainOptionKeepsThePasswordInTheSecretStore) {
@@ -401,28 +508,52 @@ TEST_F(CertCli, KeychainOptionKeepsThePasswordInTheSecretStore) {
     engine::write_private_file(pass, stored->secret + "\n");
     EXPECT_TRUE(openssl({"pkcs12", "-in", (dir_of("lab") / "client.p12").string(), "-passin", "file:" + pass.string(), "-nodes"}).ok());
 
+    // Another profile reusing it gets the password from the store too.
+    ASSERT_EQ(run({"configure", "--profile", "edge", "--host", "edge.test", "--api-key-env", "EDGE_KEY", "--cert", "lab", "--skip-check"}), 0)
+            << err.str();
+    EXPECT_EQ(saved().profiles.at("edge").cert_password.source, engine::SecretRef::Source::store);
+    ASSERT_TRUE(secrets->get("edge/cert-password"));
+    EXPECT_EQ(secrets->get("edge/cert-password")->secret, stored->secret);
+    EXPECT_EQ(secrets->get("edge/cert-password")->binding, "edge.test:443");
+
     // Back to a file: the stored password is erased.
     ASSERT_EQ(run({"cert", "create", "--force"}), 0) << err.str();
     EXPECT_FALSE(secrets->get("lab/cert-password"));
     EXPECT_EQ(saved().profiles.at("lab").cert_password.source, engine::SecretRef::Source::file);
 
-    // remove erases a stored password too.
+    // remove erases stored passwords of every profile using it.
     ASSERT_EQ(run({"cert", "create", "--force", "--keychain"}), 0) << err.str();
     ASSERT_EQ(run({"cert", "remove"}), 0) << err.str();
     EXPECT_FALSE(secrets->get("lab/cert-password"));
+    EXPECT_FALSE(secrets->get("edge/cert-password"));
 }
 
-TEST_F(CertCli, CreateNeedsAProfileAndOpenssl) {
+TEST_F(CertCli, CreateNeedsOpensslAndValidNames) {
     path_var.emplace("PATH", bin.path.c_str());   // a PATH without openssl
     EXPECT_EQ(run({"--json", "cert", "create"}), 3);
     EXPECT_NE(json_out()["error"]["details"]["hint"].get<std::string>().find("install openssl"), std::string::npos);
     EXPECT_FALSE(fs::exists(dir_of("lab")));
+    EXPECT_FALSE(fs::exists(paths.home / "ca"));
     EXPECT_EQ(saved().profiles.at("lab").client_cert, "");
     EXPECT_EQ(run({"cert", "create", "--profile", "nope"}), 3);
     EXPECT_EQ(run({"cert", "create", "--profile", "../x"}), 2);
+    EXPECT_EQ(run({"cert", "create", "../x"}), 2);
+    EXPECT_EQ(run({"cert", "create", "a", "b"}), 2);
     EXPECT_EQ(run({"cert", "show", "--days", "3"}), 2);
+    EXPECT_EQ(run({"cert", "use"}), 2);
     EXPECT_EQ(run({"cert"}), 2);
     EXPECT_EQ(run({"cert", "create", "--days", "0"}), 2);
+    EXPECT_EQ(run({"cert", "create", "--days", "9000"}), 3);   // missing openssl first; see below for the CA limit
+}
+
+TEST_F(CertCli, TheFortiCaLimitsTheValidity) {
+    auto programs = openssl_programs();
+    if (programs.empty()) GTEST_SKIP() << "no openssl on this machine";
+    use(programs.front());
+    EXPECT_EQ(run({"--json", "cert", "create", "--days", "9000"}), 2);
+    EXPECT_NE(json_out()["error"]["details"]["hint"].get<std::string>().find("--own-ca"), std::string::npos);
+    EXPECT_FALSE(fs::exists(dir_of("lab")));
+    ASSERT_EQ(run({"cert", "create", "--days", "9000", "--own-ca"}), 0) << err.str();
 }
 
 // ---- configure --cert-password-file ----
@@ -601,7 +732,7 @@ TEST_F(HomeCli, HelpCoversTheNewCommands) {
     ASSERT_EQ(run({"help", "home"}), 0);
     EXPECT_NE(out.str().find("forti home migrate"), std::string::npos);
     ASSERT_EQ(run({"cert", "--help"}), 0);
-    for (const char* text: {"--days", "--force", "--keychain", "client.p12", "never printed"})
+    for (const char* text: {"--days", "--force", "--keychain", "--own-ca", "forti CA", "client.p12", "never printed", "cert use", "cert list"})
         EXPECT_NE(out.str().find(text), std::string::npos) << text;
     ASSERT_EQ(run({"profile", "--help"}), 0);
     for (const char* text: {"profile set NAME key=value", "profile rename OLD NEW", "profile copy SOURCE NEW", "backup_before_critical"})

@@ -26,7 +26,8 @@ same home, so both see the same profiles.
 ├── config.json                  0600   profiles and the default profile; no secrets
 ├── credentials/                 0700   the file secret store
 │   └── <profile>.api-key        0600   (and <profile>.cert-password)
-├── certs/<profile>/             0700   forti cert create: ca.crt, ca/ca.key, client.crt, client.p12, client.pass
+├── certs/<name>/                0700   client certificates: ca.crt, client.crt, client.p12, client.pass
+├── ca/                          0700   the forti CA that issues them: ca.crt, ca.key
 ├── state/                       0700   plans, approvals, backups, the audit log
 │   ├── plans/  approvals/  backups/
 │   └── audit.jsonl
@@ -46,7 +47,8 @@ forti home: ~/.forti
   credentials  ~/.forti/credentials/  file store
   state        ~/.forti/state/  plans, approvals, audit log, backups
   cache        ~/.forti/cache/
-  certs        ~/.forti/certs/  forti cert create
+  certs        ~/.forti/certs/  client certificates (forti cert list)
+  forti CA     ~/.forti/ca/  issues them; its key never leaves this machine
   secrets      macOS Keychain (service "forti")
 ```
 
@@ -109,7 +111,8 @@ Then run `forti home` and `forti doctor`.
 | `~/.forti/config.json` | 0600, directory 0700 | profiles and the default profile; no secrets |
 | `~/.forti/credentials/<profile>.api-key`, `<profile>.cert-password` | 0600, directory 0700 | the file secret store: a `binding host:port` line, then the secret |
 | macOS login Keychain, service `forti` | Keychain ACL | the macOS secret store: accounts `<profile>/api-key` and `<profile>/cert-password` |
-| `~/.forti/certs/<profile>/` | 0700 | made by `forti cert create`: `ca.crt` and `client.crt` (0644), `ca/ca.key`, `client.p12` and `client.pass` (0600). See [Client certificates](/guides/client-certificates#the-files) |
+| `~/.forti/certs/<name>/` | 0700 | a client certificate (`forti configure`, `forti cert`): `ca.crt` and `client.crt` (0644), `client.p12` and `client.pass` (0600), and `ca/ca.key` for one with its own CA. See [Client certificates](/guides/client-certificates#the-files) |
+| `~/.forti/ca/` | 0700 | the forti CA: `ca.crt` (0644), `ca.key` (0600) |
 | `~/.forti/state/plans/<id>.json` | 0600, directory 0700 | stored plans, including rollback plans, with real values |
 | `~/.forti/state/plans/<id>.applied` | 0600 | marks a plan as applied: a plan runs at most once |
 | `~/.forti/state/approvals/<id>.json` | 0600, directory 0700 | a guarded-mode approval: plan id, digest, `approved_at`, `expires_at`, `approved_by` |

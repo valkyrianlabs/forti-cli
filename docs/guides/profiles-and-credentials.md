@@ -24,8 +24,9 @@ forti configure
 ```
 
 forti asks for a profile name (Enter takes `default`), the host, the admin HTTPS port, an optional
-VDOM, CA bundle, connect-to address and client certificate, where the API key comes from (it is typed
-with echo off), and the [operating mode](/guides/planning-and-applying-changes#operating-modes).
+VDOM, CA bundle and connect-to address, where the API key comes from (it is typed with echo off),
+whether to use a [client certificate](/guides/client-certificates) (it reuses one or makes one, and
+prints the FortiGate commands), and the [operating mode](/guides/planning-and-applying-changes#operating-modes).
 Before saving, it checks the profile with one read of `monitor/system/status`. If the check fails,
 nothing is written; when it fails at the terminal for a network reason, forti offers to save the
 profile anyway, so a typed key is not lost. The first profile becomes the default.
@@ -98,8 +99,9 @@ forti configure --profile fw02                 # prompts, prefilled from fw02; t
 
 `profile copy` never copies the API key or the client certificate and its password: they belong to the
 source device. It does copy everything else, including `resolve_ip` and `ca_bundle`, so check that
-those fit the new device (`forti profile show fw02`). To give the new device a client certificate, run
-`forti cert create --profile fw02` ([Client certificates](/guides/client-certificates)).
+those fit the new device (`forti profile show fw02`). To give the new device a client certificate,
+reuse one with `forti cert use fw01 --profile fw02`, or choose one in `forti configure --profile fw02`
+([Client certificates](/guides/client-certificates)).
 
 ### Change settings
 
@@ -144,9 +146,9 @@ forti profile rename lab fw-lab
 ```
 
 The rename takes everything along: stored secrets (Keychain or file store) move to the new name and
-stay bound to the same device, `~/.forti/certs/lab/` moves to `certs/fw-lab/` with every profile path
-that pointed into it, and the default follows. A certificate made by `forti cert create` keeps its CN
-(`forti-lab`), so the FortiGate needs no change. Plans made before the rename name the old profile:
+stay bound to the same device, a certificate named after the profile (`~/.forti/certs/lab/`) moves to
+`certs/fw-lab/` with every profile path that pointed into it, and the default follows. The certificate
+keeps its CN (`forti-lab`), so the FortiGate needs no change. Plans made before the rename name the old profile:
 plan them again.
 
 ### Remove a profile
@@ -158,7 +160,7 @@ forti profile remove fw-lab
 `remove` deletes the profile's stored secrets first; if the secret store refuses (a locked keychain),
 the profile stays so you can remove it later. When the default profile is removed and exactly one
 profile remains, that one becomes the default. Removing a profile never contacts the device, and it
-does not delete `certs/<profile>/` (use `forti cert remove` first).
+does not delete its certificate, which other profiles may use (`forti cert remove NAME`).
 
 ### Several devices and AI agents
 
@@ -196,7 +198,8 @@ forti profile remove NAME
 | `--vdom NAME` | VDOM for every request (default: the device's default VDOM) |
 | `--ca-bundle PATH` | PEM file of CA certificates that verify the device's certificate |
 | `--resolve-ip IP` | connect to this IPv4 or IPv6 address, while still verifying the certificate for `--host` |
-| `--client-cert PATH` | PKCS#12 client certificate, when the device requires one |
+| `--cert NAME` | one of forti's [client certificates](/guides/client-certificates) (`forti cert list`), with its password |
+| `--client-cert PATH` | a PKCS#12 client certificate of your own, when the device requires one |
 | `--api-key-stdin` / `--api-key-env VAR` / `--api-key-command CMD` | where the API key comes from (exactly one) |
 | `--cert-password-stdin` / `--cert-password-env VAR` / `--cert-password-command CMD` / `--cert-password-file PATH` | the client certificate's password (needs a client certificate) |
 | `--mode MODE` | `read-only` (default), `guarded` or `autonomous` |
@@ -225,8 +228,8 @@ users and end up in shell history. It comes from one of these sources:
 | file (`--cert-password-file PATH`) | `{"source": "file", "path": "/abs/path"}` | a file only you can read; its first line is the secret |
 
 A client certificate password uses the same sources, under the account `<profile>/cert-password`. The
-`file` source has a `forti configure` option for the certificate password only (`forti cert create`
-sets it up); in `config.json` it works for the API key as well. A file source must be a regular file,
+`file` source has a `forti configure` option for the certificate password only (forti's own
+certificates use it for `client.pass`); in `config.json` it works for the API key as well. A file source must be a regular file,
 not a symbolic link, owned by you, with no access for group or others (`chmod 600`).
 
 A credential command runs on every use, without a shell (found on `PATH`), with standard input from

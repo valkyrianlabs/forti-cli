@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import json
 import os
+import pty
+import select
 import stat
 import sys
+import time
 import unittest
+import warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mock-fortios"))
@@ -105,6 +109,145 @@ class Setup(CliTest):
         self.outputs += [bad_name.out, bad_name.err]
         self.assertEqual(bad_name.code, 4, bad_name.out)
         self.assertTrue(all(r.authorized for r in self.mock.requests))
+
+
+class Terminal:
+    """`forti` on a pseudo-terminal, as an operator at the keyboard sees it: prompts go to /dev/tty."""
+
+    def __init__(self, argv: list[str], env: dict[str, str]) -> None:
+        with warnings.catch_warnings():
+            # The mock's server thread makes this process multi-threaded; the child only calls execve.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.pid, self.fd = pty.fork()
+        if self.pid == 0:  # child
+            os.execve(argv[0], argv, env)
+        self.text = ""
+        self.pos = 0
+
+    def expect(self, needle: str, timeout: float = 60) -> str:
+        """Reads until `needle` appears after the previous match; returns the text up to it."""
+        deadline = time.monotonic() + timeout
+        while needle not in self.text[self.pos:]:
+            remaining = deadline - time.monotonic()
+            ready = select.select([self.fd], [], [], max(remaining, 0))[0] if remaining > 0 else []
+            if not ready:
+                raise AssertionError(f"timed out waiting for {needle!r}; the terminal shows:\n{self.text[-3000:]}")
+            try:
+                data = os.read(self.fd, 4096)
+            except OSError:
+                data = b""
+            if not data:
+                raise AssertionError(f"forti exited before {needle!r}; the terminal shows:\n{self.text[-3000:]}")
+            self.text += data.decode(errors="replace").replace("\r\n", "\n")
+        at = self.text.index(needle, self.pos)
+        before = self.text[self.pos:at]
+        self.pos = at + len(needle)
+        return before
+
+    def answer(self, prompt: str, reply: str) -> str:
+        before = self.expect(prompt)
+        os.write(self.fd, (reply + "\n").encode())
+        return before
+
+    def finish(self, timeout: float = 60) -> int:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if select.select([self.fd], [], [], 0.2)[0]:
+                try:
+                    data = os.read(self.fd, 4096)
+                except OSError:
+                    data = b""
+                self.text += data.decode(errors="replace").replace("\r\n", "\n")
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                try:
+                    while select.select([self.fd], [], [], 0.1)[0]:
+                        data = os.read(self.fd, 4096)
+                        if not data:
+                            break
+                        self.text += data.decode(errors="replace").replace("\r\n", "\n")
+                except OSError:
+                    pass
+                os.close(self.fd)
+                return os.waitstatus_to_exitcode(status)
+        os.kill(self.pid, 9)
+        raise AssertionError(f"forti did not exit; the terminal shows:\n{self.text[-3000:]}")
+
+
+class InteractiveCertificates(CliTest):
+    """forti configure at a terminal: make a client certificate, set the device up, check; then reuse it."""
+
+    def configure(self, profile: str) -> Terminal:
+        term = Terminal([FORTI, "configure"], self.sb.env)
+        term.answer("Profile name [lab]: ", profile)
+        term.answer("FortiGate host name or address: ", "localhost")
+        term.answer("Admin HTTPS port [443]: ", str(self.mock.port))
+        term.answer("VDOM", "")
+        term.answer("CA bundle, PEM", str(self.mock.ca_path))
+        term.answer("Connect to this IP instead", "")
+        term.answer("Choice [1]: ", "2")
+        term.answer("Variable name [FORTI_API_KEY]: ", KEY_VAR)
+        term.answer("Use a client certificate? (y/N): ", "y")
+        return term
+
+    def finish_profile(self, term: Terminal) -> str:
+        term.answer("Mode [1]: ", "")
+        term.answer("Make this the default profile? (y/N): ", "n")
+        steps = term.expect("Press Enter when the FortiGate is ready")
+        return steps
+
+    def test_create_then_reuse_a_certificate(self) -> None:
+        home = Path(self.sb.env["FORTI_HOME"])
+        term = self.configure("fw01")
+        term.answer("choice [1]: ", "")                    # New certificate: issued by the forti CA
+        term.answer("Certificate name [fw01]: ", "")
+        term.expect("done")
+        steps = self.finish_profile(term)
+        for keyword in ("config vpn certificate ca", "-----BEGIN CERTIFICATE-----", 'set cn "forti-fw01"',
+                        "set peer-auth enable", "once per FortiGate"):
+            self.assertIn(keyword, steps)
+        # The operator does the steps: from now on the device requires a certificate from the forti CA.
+        self.mock.require_client_certificate(home / "ca" / "ca.crt")
+        os.write(term.fd, b"\n")
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn('Saved profile "fw01"', term.text)
+        self.assertIn('client cert  certificate "fw01"', term.text)
+        self.assertEqual(self.mock.requests[-1].client_cn, "forti-fw01")
+        self.assertEqual(self.mock.requests[-1].status, 200)
+        profile = json.loads((self.sb.config / "config.json").read_text())["profiles"]["fw01"]
+        self.assertEqual(profile["client_cert"], str(home / "certs" / "fw01" / "client.p12"))
+        self.assertEqual(profile["cert_password"], {"source": "file", "path": str(home / "certs" / "fw01" / "client.pass")})
+
+        # A profile without the certificate no longer gets through; fw01 does.
+        self.assertNotEqual(self.forti("doctor", "--profile", "lab", expect=None).code, 0)
+        self.json_of("doctor", "--profile", "fw01")
+
+        # A second FortiGate profile reuses it: listed, chosen with Enter.
+        term = self.configure("fw02")
+        term.answer("Reuse a certificate you already have? (Y/n): ", "")
+        listing = term.answer("Certificate [1]: ", "")
+        self.assertIn("1) fw01  forti CA, until", listing)
+        self.assertIn("used by fw01", listing)
+        self.assertIn("0) none of these: create a new one", listing)
+        self.finish_profile(term)
+        os.write(term.fd, b"\n")
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual(self.mock.requests[-1].client_cn, "forti-fw01")
+        listed = self.json_of("cert", "list")["data"]["certificates"]
+        self.assertEqual([(c["name"], c["used_by"]) for c in listed], [("fw01", ["fw01", "fw02"])])
+
+    def test_skip_the_check_after_making_a_certificate(self) -> None:
+        term = self.configure("fw03")
+        term.answer("choice [1]: ", "2")                   # a CA of its own
+        term.answer("Certificate name [fw03]: ", "edge")
+        term.expect("done")
+        self.finish_profile(term)
+        os.write(term.fd, b"s\n")
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn("not checked", term.text)
+        shown = self.json_of("cert", "show", "edge")["data"]
+        self.assertEqual(shown["issuer"], "own CA")
+        self.assertEqual(shown["used_by"], ["fw03"])
 
 
 class Discover(CliTest):

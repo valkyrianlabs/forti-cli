@@ -8,12 +8,14 @@
 // failure is never retried: FortiOS locks the API user out after a few failed attempts.
 //
 
+#include "certs.hpp"
 #include "commands.hpp"
 #include "setup_support.hpp"
 #include "tty.hpp"
 
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
@@ -246,6 +248,8 @@ namespace forti::cli {
             bool existed = false;
             bool make_default = false;
             PendingStore* secrets = nullptr;
+            std::optional<std::string> certificate;   // a forti certificate newly chosen: the FortiGate may not know it
+            bool created_certificate = false;
         };
 
         // An owner-only secret file (SecretRef source "file"), as an absolute path. The engine checks it
@@ -291,7 +295,7 @@ namespace forti::cli {
         }
 
         bool interactive_requested(const Args& args) {
-            for (const char* name: {"host", "port", "vdom", "ca-bundle", "client-cert", "resolve-ip", "api-key-env",
+            for (const char* name: {"host", "port", "vdom", "ca-bundle", "client-cert", "cert", "resolve-ip", "api-key-env",
                                     "api-key-command", "cert-password-env", "cert-password-command", "cert-password-file", "mode"})
                 if (args.value(name)) return false;
             for (const char* name: {"api-key-stdin", "cert-password-stdin", "default"})
@@ -299,7 +303,7 @@ namespace forti::cli {
             return true;
         }
 
-        void non_interactive(const Context& context, const Args& args, Draft& draft) {
+        void non_interactive(const Context& context, const Args& args, const ProfileSet& set, Draft& draft) {
             Profile& p = draft.profile;
             if (auto host = args.value("host")) p.host = *host;
             if (p.host.empty())
@@ -308,6 +312,7 @@ namespace forti::cli {
             if (auto port = args.value("port")) p.port = parse_port(*port);
             if (auto vdom = args.value("vdom")) validate_vdom(p.vdom = *vdom);
             if (auto path = args.value("ca-bundle")) p.ca_bundle = readable_file("ca-bundle", *path);
+            if (args.value("cert") && args.value("client-cert")) throw Failure(Code::usage, "pass --cert NAME or --client-cert PATH, not both");
             if (auto path = args.value("client-cert")) p.client_cert = readable_file("client-cert", *path);
             if (auto ip = args.value("resolve-ip")) {
                 if (!ip->empty()) validate_ip(*ip);
@@ -318,6 +323,20 @@ namespace forti::cli {
                 throw Failure(Code::usage, "standard input can carry only one secret: use --cert-password-env or "
                                            "--cert-password-command for the certificate password");
             credential_options(context, args, "api-key", p.api_key, p.api_key_account(), *draft.secrets);
+            if (auto name = args.value("cert")) {
+                // One of forti's certificates: its client.p12 and, unless a password option is given, its password.
+                const auto& paths = context.engine.options().paths;
+                certs::validate_name(*name);
+                bool password_given = args.flag("cert-password-stdin") || args.value("cert-password-env") ||
+                                      args.value("cert-password-command") || args.value("cert-password-file");
+                if (password_given) {
+                    certs::Set files(paths, *name);
+                    if (!fs::exists(files.client_p12))
+                        throw Failure(Code::config, std::format("no certificate named \"{}\"", *name), {{"hint", "forti cert list shows them"}});
+                    p.client_cert = files.client_p12.string();
+                } else if (auto password = certs::attach(p, paths, set, context.engine.secrets(), *name))
+                    draft.secrets->stage(p.cert_password_account(), *password);
+            }
             credential_options(context, args, "cert-password", p.cert_password, p.cert_password_account(), *draft.secrets);
             if (p.api_key.source == SecretRef::Source::none)
                 throw Failure(Code::usage, "no API key source: pass --api-key-stdin, --api-key-env VAR or --api-key-command \"argv\"",
@@ -325,6 +344,133 @@ namespace forti::cli {
             if (p.cert_password.source != SecretRef::Source::none && p.client_cert.empty())
                 throw Failure(Code::usage, "a certificate password needs --client-cert");
             if (args.flag("default")) draft.make_default = true;
+        }
+
+        // The password of a PKCS#12 file of the operator's own (not one of forti's certificates).
+        void external_password(const Context& context, Draft& draft, const Tty& tty) {
+            Profile& p = draft.profile;
+            bool had = p.cert_password.source != SecretRef::Source::none;
+            if (!tty.confirm("Does the client certificate have a password?", had)) {
+                p.cert_password = {};
+                return;
+            }
+            // Enter keeps the current source (a stored password, a variable, a command or a file); a typed
+            // password goes to the secret store.
+            std::string label = had ? std::format("Certificate password (Enter keeps the {})",
+                                                  describe_source(p.cert_password, context.engine.secrets().kind()))
+                                    : std::string("Certificate password (stored in the secret store)");
+            for (;;) {
+                std::string password = tty.ask(label, "", true);
+                if (password.empty() && !had) continue;
+                if (!password.empty()) {
+                    p.cert_password = {SecretRef::Source::store, {}, {}, {}};
+                    draft.secrets->stage(p.cert_password_account(), password);
+                }
+                return;
+            }
+        }
+
+        // Points the profile at a forti certificate set; a set made with --keychain whose password no
+        // profile holds asks for it.
+        void attach_certificate(const Context& context, const ProfileSet& set, Draft& draft, const Tty& tty, const std::string& name) {
+            Profile& p = draft.profile;
+            const auto& paths = context.engine.options().paths;
+            try {
+                if (auto password = certs::attach(p, paths, set, context.engine.secrets(), name))
+                    draft.secrets->stage(p.cert_password_account(), *password);
+            } catch (const Failure& failure) {
+                tty.say(std::format("  {}\n", failure.what()));
+                std::string password;
+                while (password.empty()) password = tty.ask("Password of its client.p12 (stored in the secret store)", "", true);
+                p.client_cert = certs::Set(paths, name).client_p12.string();
+                p.cert_password = {SecretRef::Source::store, {}, {}, {}};
+                draft.secrets->stage(p.cert_password_account(), password);
+            }
+            draft.certificate = name;
+        }
+
+        // Client certificate: keep the current one, reuse one of the forti certificates, make a new one
+        // (issued by the forti CA, or with its own CA), or name a PKCS#12 file.
+        void certificate_step(const Context& context, const ProfileSet& set, Draft& draft, const Tty& tty) {
+            Profile& p = draft.profile;
+            const auto& paths = context.engine.options().paths;
+            if (!p.client_cert.empty()) {
+                auto current = certs::used_by(paths, p);
+                std::string what = current ? std::format("certificate \"{}\"", *current) : display_path(p.client_cert);
+                if (tty.confirm(std::format("\nKeep the client certificate ({})?", what), true)) {
+                    if (!current) external_password(context, draft, tty);
+                    return;
+                }
+                p.client_cert.clear();
+                p.cert_password = {};
+            }
+            tty.say("\nA client certificate makes the FortiGate require this machine's certificate on top of the\n"
+                    "API key (PKI authentication of the API user). forti makes one and prints the FortiGate commands.\n");
+            if (!tty.confirm("Use a client certificate?", false)) return;
+
+            json existing = certs::list(paths, set);
+            if (!existing.empty() && tty.confirm("Reuse a certificate you already have?", true)) {
+                std::size_t width = 0;
+                for (const auto& cert: existing) width = std::max(width, cert.value("name", "").size());
+                tty.say("\n");
+                for (std::size_t k = 0; k < existing.size(); ++k) {
+                    const json& cert = existing[k];
+                    std::string users;
+                    for (const auto& user: cert["used_by"]) users += (users.empty() ? "" : ", ") + user.get<std::string>();
+                    std::string expires = cert.value("expires", "?").substr(0, 10);
+                    tty.say(std::format("  {}) {:<{}}  {}, until {}{}{}\n", k + 1, cert.value("name", ""), width, cert.value("issuer", ""),
+                                        expires, cert.value("expired", false) ? " (EXPIRED)" : "", users.empty() ? "" : "; used by " + users));
+                }
+                tty.say("  0) none of these: create a new one\n");
+                for (;;) {
+                    std::string answer = tty.ask("Certificate", "1");
+                    std::size_t value = 0;
+                    auto [end, ec] = std::from_chars(answer.data(), answer.data() + answer.size(), value);
+                    if (ec != std::errc() || end != answer.data() + answer.size() || value > existing.size()) continue;
+                    if (value == 0) break;
+                    attach_certificate(context, set, draft, tty, existing[value - 1].value("name", ""));
+                    return;
+                }
+            }
+
+            std::size_t kind = tty.choose("\nNew certificate:",
+                                          {"issued by the forti CA (recommended: a FortiGate imports the forti CA once and then\n"
+                                           "     accepts every certificate it issues)",
+                                           "with a CA of its own (the FortiGate imports that CA as well)",
+                                           "a PKCS#12 file I already have"},
+                                          0);
+            if (kind == 2) {
+                for (;;) {
+                    try {
+                        p.client_cert = readable_file("client-cert", tty.ask("PKCS#12 file"));
+                        break;
+                    } catch (const Failure& failure) {
+                        tty.say(std::format("  {}\n", failure.what()));
+                    }
+                }
+                external_password(context, draft, tty);
+                return;
+            }
+            std::string fallback = p.name;
+            for (int n = 2; certs::Set(paths, fallback).exists(); ++n) fallback = std::format("{}-{}", p.name, n);
+            std::string name;
+            for (;;) {
+                name = tty.ask("Certificate name", fallback);
+                try {
+                    certs::validate_name(name);
+                } catch (const Failure& failure) {
+                    tty.say(std::format("  {}\n", failure.what()));
+                    continue;
+                }
+                if (!certs::Set(paths, name).exists()) break;
+                tty.say(std::format("  \"{}\" already exists: reuse it, or pick another name\n", name));
+            }
+            tty.say("Making the certificate... ");
+            json made = certs::create(paths, set, name, {.own_ca = kind == 1});
+            tty.say(std::format("done: {}{}\n", display_path(made.value("dir", "")),
+                                made.value("forti_ca_created", false) ? " (and the forti CA, " + display_path(certs::forti_ca_dir(paths)) + ")" : ""));
+            attach_certificate(context, set, draft, tty, name);
+            draft.created_certificate = true;
         }
 
         void interactive(const Context& context, const Args& args, const ProfileSet& set, Draft& draft, const Tty& tty) {
@@ -378,10 +524,6 @@ namespace forti::cli {
                 if (!ip.empty()) validate_ip(ip);
                 p.resolve_ip = ip;
             });
-            retry([&] {
-                std::string path = tty.ask("Client certificate, PKCS#12 (optional; - to clear)", p.client_cert);
-                p.client_cert = path == "-" ? "" : readable_file("client-cert", path);
-            });
 
             std::string store = describe_source({SecretRef::Source::store, {}, {}, {}}, context.engine.secrets().kind());
             tty.say(std::format("\nWhere should forti get the API key?\n"
@@ -421,25 +563,7 @@ namespace forti::cli {
                     break;
                 }
             }
-            if (!p.client_cert.empty()) {
-                bool had = p.cert_password.source != SecretRef::Source::none;
-                if (tty.confirm("Does the client certificate have a password?", had)) {
-                    // Enter keeps the current source (a client.pass file from `forti cert create`, a stored
-                    // password, a variable or a command); a typed password goes to the secret store.
-                    std::string label = had ? std::format("Certificate password (Enter keeps the {})",
-                                                          describe_source(p.cert_password, context.engine.secrets().kind()))
-                                            : std::string("Certificate password (stored in the secret store)");
-                    for (;;) {
-                        std::string password = tty.ask(label, "", true);
-                        if (password.empty() && !had) continue;
-                        if (!password.empty()) {
-                            p.cert_password = {SecretRef::Source::store, {}, {}, {}};
-                            draft.secrets->stage(p.cert_password_account(), password);
-                        }
-                        break;
-                    }
-                } else p.cert_password = {};
-            } else p.cert_password = {};
+            certificate_step(context, set, draft, tty);
 
             tty.say("\nOperating mode:\n"
                     "  1) read-only   reads only; every change is refused (recommended to start)\n"
@@ -490,8 +614,9 @@ namespace forti::cli {
                     if (device.contains(key) && device[key].is_string())
                         text += (text.empty() ? "" : "  ") + device[key].get<std::string>();
                 line("device", text);
-            } else line("device", styled("not checked (--skip-check)", Style::yellow));
+            } else line("device", styled("not checked", Style::yellow));
             line("api key", data.value("api_key_source", ""));
+            if (data.contains("client_cert")) line("client cert", data["client_cert"].get<std::string>());
             line("mode", profile.value("mode", "read-only"));
             if (data.contains("schema_note")) out << styled("  note: ", Style::yellow) << data["schema_note"].get<std::string>() << "\n";
             if (data.contains("notice")) out << "\n" << data["notice"].get<std::string>();
@@ -531,13 +656,26 @@ namespace forti::cli {
             } else {
                 if (!args.value("profile"))
                     throw Failure(Code::usage, "--profile NAME is required with configuration options");
-                non_interactive(context, args, draft);
+                non_interactive(context, args, set, draft);
             }
             Profile& profile = draft.profile;
             secrets.bind(profile.secret_binding());
 
             json result = {{"profile", nullptr}};
-            if (!args.flag("skip-check")) {
+            bool check = !args.flag("skip-check");
+            // A certificate the FortiGate may not know yet: its commands first, then the check.
+            if (tty && draft.certificate) {
+                json fortigate = certs::fortigate(paths, *draft.certificate);
+                tty->say(std::format("On the FortiGate (FortiOS CLI), for certificate \"{}\"; skip what it already has:\n\n{}\n",
+                                     *draft.certificate, certs::steps_text(fortigate)));
+                if (check) {
+                    std::string answer = tty->ask("Press Enter when the FortiGate is ready, to check the connection (s: save without checking)");
+                    if (answer == "s" || answer == "S" || answer == "skip") check = false;
+                }
+            }
+            if (draft.certificate) result["certificate"] = *draft.certificate;
+            if (check) {
+                if (tty) tty->say(std::format("Checking the connection to {}:{}...\n", profile.host, profile.port));
                 try {
                     json capabilities = verify(context, profile, secrets);
                     result["device"] = capabilities.value("device", json::object());
@@ -548,6 +686,12 @@ namespace forti::cli {
                                 engine::sdk_schema_version);
                 } catch (...) {
                     Failure failure = with_advice(engine::translate(std::current_exception()), profile, false);
+                    if (draft.created_certificate) {
+                        json details = failure.details();
+                        details["hint"] = details.value("hint", "") + std::format(
+                                " The certificate \"{}\" is kept: choose it again (reuse) when you rerun forti configure.", *draft.certificate);
+                        failure = Failure(failure.code(), failure.what(), details);
+                    }
                     // A typed secret would be lost; offer to keep the profile when only the network failed.
                     if (!(tty && failure.code() == Code::connection)) throw failure;
                     tty->say(std::format("\nforti: {}\n  hint: {}\n", failure.what(), failure.details().value("hint", "")));
@@ -578,7 +722,11 @@ namespace forti::cli {
             result["default"] = set.default_profile == profile.name;
             result["config_file"] = paths.config_file().string();
             result["api_key_source"] = describe_source(profile.api_key, store.kind());
-            result["verified"] = !args.flag("skip-check") && result.contains("device");
+            result["verified"] = check && result.contains("device");
+            if (!profile.client_cert.empty()) {
+                auto name = certs::used_by(paths, profile);
+                result["client_cert"] = name ? std::format("certificate \"{}\"", *name) : display_path(profile.client_cert);
+            }
             if (profile.mode == Mode::autonomous && draft.previous.mode != Mode::autonomous && !tty)
                 result["notice"] = autonomous_notice;
             if (paths.legacy)
@@ -1221,13 +1369,18 @@ namespace forti::cli {
              "and with options only the options given change: forti configure --profile fw01 --port 8443.\n"
              "`forti profile set` changes settings without contacting the device.\n"
              "\n"
+             "The prompts also offer a client certificate (PKI authentication of the API user): reuse one\n"
+             "of forti's certificates (`forti cert list`), or make one, issued by the forti CA, and get the\n"
+             "FortiGate commands to paste before the check.\n"
+             "\n"
              "connection:\n"
              "  --host HOST              FortiGate host name or address (no scheme, no port)\n"
              "  --port N                 admin HTTPS port (default 443)\n"
              "  --vdom NAME              default VDOM for this profile\n"
              "  --ca-bundle PATH         PEM CA bundle that verifies the device certificate\n"
              "  --resolve-ip IP          connect to IP while verifying the certificate for HOST\n"
-             "  --client-cert PATH       PKCS#12 client certificate\n"
+             "  --cert NAME              one of forti's client certificates (forti cert list)\n"
+             "  --client-cert PATH       a PKCS#12 client certificate of your own\n"
              "\n"
              "credential (the API key is never accepted as an argument):\n"
              "  --api-key-stdin          read the key from standard input and keep it in the secret store\n"
@@ -1235,8 +1388,7 @@ namespace forti::cli {
              "  --api-key-command CMD    run CMD (split like a shell, run without one); its first line is the key\n"
              "  --cert-password-stdin | --cert-password-env VAR | --cert-password-command CMD\n"
              "                           the client certificate's password, from the same kinds of source\n"
-             "  --cert-password-file PATH  or from a file only you can read (0600; forti cert create\n"
-             "                           writes one and sets it for you)\n"
+             "  --cert-password-file PATH  or from a file only you can read (0600). Not needed with --cert\n"
              "\n"
              "policy:\n"
              "  --mode MODE              read-only (default), guarded or autonomous\n"
@@ -1248,7 +1400,7 @@ namespace forti::cli {
              "  op read op://ops/fw01/api-key | forti configure --profile fw01 --host fw01.example.net \\\n"
              "      --ca-bundle ~/fw01-ca.pem --api-key-stdin --default\n"
              "  forti configure --profile lab --host 192.0.2.10 --api-key-env FORTI_LAB_KEY --mode guarded\n",
-             {{"host", "port", "ca-bundle", "client-cert", "resolve-ip", "api-key-env", "api-key-command",
+             {{"host", "port", "ca-bundle", "client-cert", "cert", "resolve-ip", "api-key-env", "api-key-command",
                "cert-password-env", "cert-password-command", "cert-password-file", "mode"},
               {"api-key-stdin", "cert-password-stdin", "default", "skip-check"},
               {}},

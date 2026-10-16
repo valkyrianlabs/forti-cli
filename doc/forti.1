@@ -79,6 +79,8 @@ Print the version and the FortiOS version the models were generated from.
 .It Cm configure
 Create or update a profile.
 Without options it prompts on the terminal; the API key is typed with echo disabled.
+The prompts also offer a client certificate: reuse one of forti's certificates, or make one and print
+the FortiOS commands that make the FortiGate require it, before the connection check.
 With options it runs without prompts:
 .Bl -tag -width "--api-key-command cmd"
 .It Fl -profile Ar name
@@ -98,8 +100,12 @@ PEM CA bundle that verifies the device certificate.
 .It Fl -resolve-ip Ar ip
 Connect to this address while verifying the certificate for
 .Ar host .
+.It Fl -cert Ar name
+One of forti's client certificates
+.Pq Cm cert list ,
+with its password.
 .It Fl -client-cert Ar path
-PKCS#12 client certificate.
+A PKCS#12 client certificate of your own.
 .It Fl -api-key-stdin
 Read the API key from standard input and keep it in the secret store.
 .It Fl -api-key-env Ar var
@@ -114,8 +120,7 @@ Run
 The client certificate's password, from the same kinds of source.
 .It Fl -cert-password-file Ar path
 Or from a file that only the user can read (mode 0600, not a symbolic link).
-.Cm cert create
-writes such a file and sets it.
+forti's own certificates use such a file.
 .It Fl -mode Ar mode
 .Cm read-only
 (default),
@@ -195,45 +200,62 @@ equivalents) into the home: config.json, credentials/, the state and the cache.
 Moves are renames, so modes are kept; config.json moves last.
 It never overwrites a config.json already in the home, and running it again is harmless.
 Keychain items need no change.
-.It Cm cert create Oo Fl -profile Ar name Oc Oo Fl -days Ar n Oc Oo Fl -force Oc Op Fl -keychain
-Create a private CA and a client certificate (CN
-.Li forti- Ns Ar profile )
-for FortiOS PKI authentication of the REST API user, in
-.Pa <home>/certs/ Ns Ar profile Ns / :
+.It Cm cert create Oo Ar name Oc Oo Fl -profile Ar profile Oc Oo Fl -own-ca Oc Oo Fl -days Ar n Oc Oo Fl -force Oc Op Fl -keychain
+Create a client certificate for FortiOS PKI authentication of the REST API user, named
+.Ar name
+(CN
+.Li forti- Ns Ar name ) ,
+in
+.Pa <home>/certs/ Ns Ar name Ns / :
 .Pa ca.crt ,
-.Pa ca/ca.key
-(0600),
 .Pa client.crt ,
 .Pa client.p12
 and
 .Pa client.pass
 (0600).
-The profile's client certificate becomes
-.Pa client.p12 ,
-its password is read from
+Certificates need no profile; several profiles may use one.
+It is issued by the forti CA,
+.Pa <home>/ca/
+(made on first use; a FortiGate imports it once), or with
+.Fl -own-ca
+by a CA of its own
+.Pq Pa ca/ca.key , No 0600 .
+Without
+.Ar name
+it is named after the default profile, which then uses it
+.Pq Li default No when there is no profile ;
+.Fl -profile
+names the profile that uses it.
+A profile's password is read from
 .Pa client.pass
 (or, with
 .Fl -keychain ,
-kept in the secret store instead).
+kept in the secret store of
+.Fl -profile ) .
 The PKCS#12 uses PBE-SHA1-3DES with a SHA-1 MAC, which OpenSSL 3, LibreSSL and FortiOS all read.
 It prints the paths, the command that reads the password (never the password), and the FortiOS
-commands to import the CA
+commands, with the CA certificate inline, to import the CA
 .Pq Li config vpn certificate ca ,
 create a PKI user and peer group
 .Pq Li config user peer , config user peergrp
 and require the certificate for the API user
 .Pq Li set peer-auth enable , set peer-group .
 .Fl -days
-sets the client certificate's validity (default 1095).
-An existing CA is replaced only with
-.Fl -force .
+sets the validity (default 1095).
+An existing certificate is replaced only with
+.Fl -force ;
+one from the forti CA then needs no change on the FortiGate.
 Needs the
 .Xr openssl 1
 command.
-.It Cm cert show Op Fl -profile Ar name
-Subject, expiry and SHA-256 fingerprint of the profile's certificates.
-.It Cm cert remove Op Fl -profile Ar name
-Delete the profile's certificate directory and clear its client certificate setting.
+.It Cm cert list
+The forti CA and every certificate: issuer, expiry and the profiles using it.
+.It Cm cert show Op Ar name
+Subject, issuer, expiry, SHA-256 fingerprint and files of a certificate (default: the one the selected profile uses).
+.It Cm cert use Ar name Op Fl -profile Ar profile
+Make a profile (default: the default profile) use a certificate.
+.It Cm cert remove Op Ar name
+Delete a certificate and detach it from every profile that used it.
 .It Cm doctor
 Run ordered checks: the forti home (a pre-0.2 setup is a warning), configuration directory and file modes, profile, secret resolution, CA bundle
 and client certificate files, connection (DNS, TCP, TLS), authentication, FortiOS version against
@@ -326,9 +348,11 @@ The file secret store: one 0600 file per secret.
 .It Pa ~/.forti/state/
 Plans, approvals, pre-change backups and
 .Pa audit.jsonl .
-.It Pa ~/.forti/certs/ Ns Ar profile Ns /
-Certificates made by
-.Cm cert create .
+.It Pa ~/.forti/certs/ Ns Ar name Ns /
+Client certificates
+.Pq Cm cert list .
+.It Pa ~/.forti/ca/
+The forti CA that issues them; its key never leaves the machine.
 .It Pa ~/.config/forti/ , ~/.local/state/forti/
 A pre-0.2 setup, used until
 .Cm home migrate
@@ -370,8 +394,8 @@ forti get firewall/policy --fields policyid,name,action,status
 .Pp
 Use a client certificate as well as the API key:
 .Bd -literal -offset indent
-forti cert create --profile fw01
-cat ~/.forti/certs/fw01/client.pass   # only if you need the password
+forti cert create --profile fw01      # or answer y in forti configure
+forti cert use fw01 --profile fw02    # a second FortiGate, same certificate
 .Ed
 .Pp
 A second device with the same settings:

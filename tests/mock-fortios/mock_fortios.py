@@ -201,6 +201,7 @@ class Request:
     authorized: bool
     connection: int
     status: int | None = None
+    client_cn: str | None = None            # CN of the TLS client certificate, when one was presented
 
     @property
     def api(self) -> str:                   # "cmdb/firewall/address/web"
@@ -263,6 +264,7 @@ class MockFortiOS:
         self.lock = threading.RLock()
         self.ca_path: Path | None = None
         self.port = 0
+        self._context: ssl.SSLContext | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._connections = 0
@@ -280,6 +282,7 @@ class MockFortiOS:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(str(cert), str(key))
+        self._context = context
         mock = self
 
         class Handler(_Handler):
@@ -294,6 +297,13 @@ class MockFortiOS:
         self._thread = threading.Thread(target=server.serve_forever, name="mock-fortios", daemon=True)
         self._thread.start()
         return self
+
+    def require_client_certificate(self, ca_file: Path | str) -> None:
+        """Like peer-auth for the API user: from now on, every connection needs a TLS client certificate
+        issued by `ca_file` (a handshake without one fails)."""
+        assert self._context, "start() first"
+        self._context.load_verify_locations(str(ca_file))
+        self._context.verify_mode = ssl.CERT_REQUIRED
 
     def stop(self) -> None:
         if self._server:
@@ -432,6 +442,12 @@ class _Handler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         self.request.settimeout(30)
         self.request.do_handshake()
+        self.client_cn = None
+        peer = self.request.getpeercert()
+        for rdn in (peer or {}).get("subject", ()):
+            for key, value in rdn:
+                if key == "commonName":
+                    self.client_cn = value
         with self.owner.lock:
             self.owner._connections += 1
             self.connection_id = self.owner._connections
@@ -478,7 +494,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length).decode() if length else ""
         authorized = self.headers.get("Authorization") == f"Bearer {mock.api_key}"
-        record = Request(method, split.path, query, body, authorized, self.connection_id)
+        record = Request(method, split.path, query, body, authorized, self.connection_id, client_cn=self.client_cn)
         with mock.lock:
             mock.requests.append(record)
 

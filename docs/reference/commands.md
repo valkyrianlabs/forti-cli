@@ -78,11 +78,14 @@ forti configure --profile NAME --host HOST [options] <credential>
 
 Creates or updates a profile and verifies it with one read of `monitor/system/status` before saving.
 On an existing profile the prompts start from its current values, and with options only the options
-given change. See [Profiles and credentials](/guides/profiles-and-credentials).
+given change. The prompts also offer a client certificate: reuse one, or make one and get the
+FortiGate commands before the check. See [Profiles and credentials](/guides/profiles-and-credentials)
+and [Client certificates](/guides/client-certificates).
 
 | Options | |
 |---|---|
-| connection | `--host`, `--port`, `--vdom`, `--ca-bundle`, `--resolve-ip`, `--client-cert` |
+| connection | `--host`, `--port`, `--vdom`, `--ca-bundle`, `--resolve-ip` |
+| client certificate (optionally one of) | `--cert NAME` (one of forti's, password included), `--client-cert PATH` (a PKCS#12 file of your own) |
 | API key (one of) | `--api-key-stdin`, `--api-key-env VAR`, `--api-key-command CMD` |
 | certificate password (optionally one of) | `--cert-password-stdin`, `--cert-password-env VAR`, `--cert-password-command CMD`, `--cert-password-file PATH` |
 | other | `--mode`, `--default`, `--skip-check` |
@@ -103,8 +106,9 @@ forti profile remove NAME
 - `set` changes settings without contacting the device. Keys: `host`, `port`, `vdom`, `ca_bundle`,
   `client_cert`, `resolve_ip`, `connect_timeout_ms`, `timeout_ms`, `backup_before_critical`, `mode`;
   an empty value restores the default. A changed host or port re-binds the profile's stored secrets.
-- `rename` moves the stored secrets, `~/.forti/certs/OLD/` and the paths that point into it, and the
-  default. A certificate keeps its CN, so the FortiGate needs no change.
+- `rename` moves the stored secrets, a certificate named after the profile (`~/.forti/certs/OLD/`) and
+  the paths that point into it, and the default. A certificate keeps its CN, so the FortiGate needs no
+  change.
 - `copy` copies settings only: never the API key, the client certificate or its password.
 - `remove` also deletes the profile's secrets from the secret store.
 
@@ -137,24 +141,31 @@ and is safe to run again. See [Configuration files](/reference/configuration-fil
 ### cert
 
 ```text
-forti cert create [--profile NAME] [--days N] [--force] [--keychain]
-forti cert show [--profile NAME]
-forti cert remove [--profile NAME]
+forti cert create [NAME] [--profile PROFILE] [--own-ca] [--days N] [--force] [--keychain]
+forti cert list
+forti cert show [NAME]
+forti cert use NAME [--profile PROFILE]
+forti cert remove [NAME]
 ```
 
-`create` makes a private CA and a client certificate (CN `forti-<profile>`) in
-`~/.forti/certs/<profile>/`, points the profile at them, and prints the FortiGate commands and the
-command that reads the password (never the password). Needs the `openssl` command.
+Certificates are named, live in `~/.forti/certs/<name>/` and need no profile: one can serve several
+FortiGates. `create` makes one (CN `forti-<name>`), issued by the forti CA (`~/.forti/ca/`, made on
+first use) unless `--own-ca`, and prints the FortiGate commands, ready to paste, and the command that
+reads the password (never the password). Without NAME it is named after the default profile, which
+then uses it; with no profile at all it is named `default`. Needs the `openssl` command.
 
 | Option | Meaning |
 |---|---|
-| `--days N` | client certificate validity (default 1095; the CA gets at least 3650) |
-| `--force` | replace an existing CA and certificate (the FortiGate must then import the new `ca.crt`) |
-| `--keychain` | keep the password in the secret store instead of `client.pass` |
+| `--profile PROFILE` | the profile that uses the new certificate |
+| `--own-ca` | a CA for this certificate only, instead of the forti CA |
+| `--days N` | validity (default 1095); a forti CA certificate cannot outlive the CA |
+| `--force` | replace a certificate of that name. From the forti CA, the FortiGate needs no change |
+| `--keychain` | keep the password in the secret store of `--profile` instead of `client.pass` |
 
-`show` prints the subject, expiry and SHA-256 fingerprint of the certificates. `remove` deletes the
-directory and clears the profile's client certificate when it pointed there. See
-[Client certificates](/guides/client-certificates).
+`list` shows the forti CA and every certificate with its issuer, expiry and the profiles using it.
+`show` prints one (NAME, else the certificate of `--profile` or the default profile). `use` points a
+profile (`--profile`, else the default) at a certificate. `remove` deletes a certificate and detaches
+it from every profile that used it. See [Client certificates](/guides/client-certificates).
 
 ## Read
 
