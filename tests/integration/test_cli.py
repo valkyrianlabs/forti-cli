@@ -364,6 +364,77 @@ class Get(CliTest):
         self.assertEqual(data["error"]["code"], "validation")
         self.assertEqual(self.mock.requests, [])
 
+    def test_resources_by_cli_words_tail_and_path(self) -> None:
+        # The same object, four ways: path and key, CLI words, the last word alone, the object's path.
+        for spelling in (["firewall/address", "host-00003"], ["firewall", "address", "host-00003"],
+                         ["address", "host-00003"], ["firewall/address/host-00003"]):
+            one = self.json_of("get", *spelling)
+            self.assertEqual(one["data"]["name"], "host-00003", spelling)
+            self.assertEqual(one["meta"]["resource"], "firewall/address")
+            self.assertEqual(one["meta"]["key"], "host-00003")
+            self.assertEqual(self.mock.requests[-1].api, "cmdb/firewall/address/host-00003")
+        self.assertEqual(self.json_of("get", "system", "global")["data"]["hostname"], "fw-mock")
+        self.assertEqual(self.json_of("get", "firewall", "address", "--count", "3")["meta"]["returned"], 3)
+        # A key with '/' after the table's path.
+        self.json_of("get", "firewall/address/LAN 10.0.0.0/24", expect=5)
+        self.assertEqual(self.mock.requests[-1].api, "cmdb/firewall/address/LAN%2010.0.0.0%2F24")
+
+    def test_ambiguous_and_doubled_spellings_are_refused_before_any_request(self) -> None:
+        ambiguous = self.forti("get", "policy", expect=5)
+        for name in ("firewall/policy", "router/policy"):
+            self.assertIn(name, ambiguous.err)
+        twice = self.forti("get", "firewall/address/host-00001", "host-00002", expect=2)
+        self.assertIn("key is given twice", twice.err)
+        self.forti("get", "firewall", "address", "a", "b", expect=2)
+        self.assertEqual(self.mock.requests, [])
+
+    def test_unknown_attributes_get_suggestions(self) -> None:
+        typo = self.forti("get", "firewall/address", "--fields", "name,colour", expect=6)
+        self.assertIn("did you mean color", typo.err)
+        data = self.json_of("get", "firewall/address", "--filter", "subnett==x", expect=6)
+        self.assertIn("subnet", data["error"]["details"]["suggestions"])
+        self.assertEqual(self.mock.requests, [])
+
+    def test_all_reads_every_page(self) -> None:
+        every = self.json_of("get", "address", "--all", "--count", "50")
+        self.assertEqual([o["name"] for o in every["data"]], [f"host-{i:05d}" for i in range(120)])
+        self.assertEqual(every["meta"]["returned"], 120)
+        self.assertTrue(every["meta"]["all"])
+        self.assertNotIn("next_start", every["meta"])
+        self.assertEqual([r.query[-2:] for r in self.mock.requests],
+                         [[("start", "0"), ("count", "50")], [("start", "50"), ("count", "50")],
+                          [("start", "100"), ("count", "50")]])
+        # Without --count, pages of 1000: one request here.
+        self.mock.clear_requests()
+        self.assertEqual(len(self.json_of("get", "firewall/address", "--all")["data"]), 120)
+        self.assertEqual(len(self.mock.requests), 1)
+        # Monitors window their results in the engine; --all reads them whole too.
+        untyped = self.json_of("get", "monitor/firewall/session-count-list", "--count", "2", "--all")
+        self.assertEqual(len(untyped["data"]), 5)
+        self.assertNotIn("truncated", untyped["meta"])
+        self.forti("get", "firewall/address", "host-00001", "--all", expect=2)
+        self.forti("get", "firewall/address", "--all", "--start", "5", expect=2)
+
+    def test_more_results_are_announced_on_stderr_only(self) -> None:
+        text = self.forti("get", "firewall/address")
+        self.assertEqual(len([line for line in text.out.splitlines() if line.startswith("host-")]), 50)
+        self.assertNotIn("more results", text.out)
+        self.assertIn("more results: --start 50, or --all", text.err)
+        piped = self.forti("get", "firewall/address", "--json")
+        self.assertEqual(json.loads(piped.out)["meta"]["next_start"], 50)
+        self.assertIn("--all", piped.err)
+        last = self.forti("get", "firewall/address", "--start", "100")
+        self.assertEqual(last.err, "")
+        window = self.forti("get", "monitor/firewall/session-count-list", "--count", "2")
+        self.assertNotIn("more results", window.out)
+        self.assertIn("more results: --start 2", window.err)
+        self.assertEqual(self.forti("get", "address", "--all").err, "")
+
+    def test_discover_takes_cli_words(self) -> None:
+        shown = self.json_of("discover", "firewall", "address")
+        self.assertEqual(shown["data"]["resource"], "firewall/address")
+        self.assertEqual(self.json_of("discover", "firewall", "service", "custom")["data"]["resource"], "firewall.service/custom")
+
     def test_keyed_singleton_monitor_and_404(self) -> None:
         one = self.json_of("get", "firewall/address", "host-00003")
         self.assertEqual(one["data"]["name"], "host-00003")

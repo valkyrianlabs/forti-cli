@@ -46,11 +46,19 @@ namespace forti::engine {
             for (const auto& name: names)
                 if (!resource.field(name, fields)) unknown.push_back(name);
             if (unknown.empty()) return;
+            std::vector<std::string> known;
+            for (const auto& field: fields) known.push_back(field.name);
             std::string list;
-            for (const auto& name: unknown) list += (list.empty() ? "" : ", ") + name;
+            json suggestions = json::array();
+            for (const auto& name: unknown) {
+                list += (list.empty() ? "" : ", ") + name;
+                auto close = closest_names(name, known);
+                if (!close.empty()) list += std::format(" (did you mean {}?)", close.front());
+                for (auto& candidate: close) suggestions.push_back(std::move(candidate));
+            }
             throw Failure(Code::validation, std::format("{}: unknown attribute(s) in {}: {}", resource.name(), what, list),
-                          {{"unknown", unknown}, {"resource", resource.name()},
-                           {"hint", "forti discover <resource> lists the attributes"}});
+                          {{"unknown", unknown}, {"resource", resource.name()}, {"suggestions", suggestions},
+                           {"hint", std::format("`forti discover {}` lists the attributes", resource.name())}});
         }
 
         // Query parameters a caller may add. Engine-managed ones and anything that could carry a
@@ -182,7 +190,7 @@ namespace forti::engine {
         }
 
         if (what == "resource") {
-            Resource resource = Catalog::instance().resolve(text(request, "resource"));
+            Resource resource = Catalog::instance().lookup(text(request, "resource"));
             auto selected = strings(request, "fields");
             auto fields = resource.fields();
             json data = resource.summary();
@@ -263,7 +271,17 @@ namespace forti::engine {
 
     json Engine::read(const json& request, Secrets secrets) {
         allow_keys(request, {"resource", "key", "filter", "fields", "start", "count", "vdom", "profile", "params"}, "read");
-        Resource resource = Catalog::instance().resolve(text(request, "resource"));
+        // The resource as people spell it (catalog lookup), or a table object by its path
+        // ("firewall/address/web"), which carries the key.
+        std::string key = text(request, "key");
+        Resource resource;
+        if (auto keyed = Catalog::instance().keyed(text(request, "resource"))) {
+            if (!key.empty())
+                throw Failure(Code::usage, std::format("the key is given twice: \"{}\" in the resource path and \"{}\"", keyed->key, key),
+                              {{"hint", std::format("forti get {} KEY, or forti get {}/KEY", keyed->resource->name(), keyed->resource->name())}});
+            resource = *keyed->resource;
+            key = keyed->key;
+        } else resource = Catalog::instance().lookup(text(request, "resource"));
         const Profile& profile = this->profile(text(request, "profile"));
 
         fortiapi::Query query;
@@ -273,7 +291,6 @@ namespace forti::engine {
             query.vdom(vdom);
         }
 
-        std::string key = text(request, "key");
         if (!key.empty()) detail::validate_key(key, resource.name());
         if (!key.empty() && resource.kind != Kind::table)
             throw Failure(Code::usage, std::format("{} is a {}: it has no keyed objects", resource.name(), to_string(resource.kind)));
@@ -325,6 +342,7 @@ namespace forti::engine {
         json results = body.contains("results") ? std::move(body["results"]) : json();
 
         json meta = {{"resource", resource.name()}, {"profile", profile.name}, {"device", device_meta(body)}};
+        if (!key.empty()) meta["key"] = key;
         if (auto it = body.find("vdom"); it != body.end()) meta["vdom"] = *it;
         if (!key.empty() && results.is_array()) {
             if (results.empty()) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), key));

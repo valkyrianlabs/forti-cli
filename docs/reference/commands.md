@@ -180,7 +180,7 @@ Lists the configured profiles; the default is marked with `*`. The same as `fort
 
 ```text
 forti discover [search]          resources whose path contains `search`
-forti discover <resource>        a resource's attributes, operations and risk tier
+forti discover <resource>        a resource's attributes, operations and risk tier (path or CLI words)
   --kind table|singleton|monitor   restrict a search
   --fields a,b                     full detail for these attributes
   --live                           merge the device's schema (help, options, ranges)
@@ -195,6 +195,7 @@ Works offline except with `--live`. See [Discovering and reading](/guides/discov
 forti get <resource> [key]
   --filter EXPR      FortiOS filter, repeatable (AND); ',' inside one is OR (name==a,name==b)
   --fields a,b       return only these attributes
+  --all              read every page of a listing
   --start N          first item (default 0)
   --count N          items per page (default 50, max 1000)
   --param name=val   extra query parameter (monitor endpoints), repeatable
@@ -202,12 +203,17 @@ forti get <resource> [key]
 ```
 
 ```sh
-forti get firewall/policy --fields policyid,name,action,status
-forti get firewall/address "LAN 10.0.0.0/24"
+forti get firewall/policy --fields policyid,name,action,status --all
+forti get firewall address "LAN 10.0.0.0/24"
+forti get firewall/address/web
 forti get monitor/system/status
 ```
 
-See [Discovering and reading](/guides/discovering-and-reading#get).
+The resource is its path, its FortiOS CLI words, or a last word only one resource has (`address`); a
+table object can be named by its path. When a listing has more pages, forti says so on standard
+error; `--all` reads them all. See
+[Naming a resource](/guides/discovering-and-reading#naming-a-resource) and
+[Discovering and reading](/guides/discovering-and-reading#get).
 
 ## Change
 

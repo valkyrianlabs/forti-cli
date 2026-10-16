@@ -31,6 +31,31 @@ endpoint of the FortiOS 7.4.8 schema and the typed monitor endpoints of the SDK 
 singletons, 47 monitors). Any other `monitor/...` path is still readable, untyped: forti returns
 whatever the device sends.
 
+### Naming a resource
+
+`forti get` and `forti discover` (and forti-mcp's tools) accept a resource the way FortiOS admins
+write it:
+
+| You write | It reads |
+|---|---|
+| `firewall/address`, `cmdb/firewall/address` | the path, as above |
+| `firewall address`, `firewall service custom` | FortiOS CLI words (`config firewall service custom`): `firewall.service/custom` |
+| `address`, `service custom` | the last word or words, when only one resource ends that way |
+| `firewall/address/web` | one object of a table, by its path: `firewall/address`, key `web` |
+
+A short name that fits several resources is refused with the list, so it never reads the wrong one:
+
+```text
+$ forti get policy
+forti: error: "policy" could be any of 3 resources: firewall/policy, router/policy, switch-controller.dsl/policy
+  hint: name it in full, e.g. firewall/policy
+```
+
+A configuration resource wins over a monitor endpoint with the same last word. In an object's path,
+everything after the table is the key, so keys may contain `/` (`firewall/address/LAN 10.0.0.0/24`).
+`meta.resource` and `meta.key` in the result show what forti read; with `--json`, an ambiguous name's
+error lists the resources in `error.details.candidates`. Plans keep to exact paths.
+
 ## Discover
 
 `discover` works without a device, except with `--live`.
@@ -48,10 +73,10 @@ forti discover <resource>        a resource's attributes, operations and risk ti
 forti discover addr
 forti discover --kind monitor system
 forti discover firewall/policy
-forti discover firewall/policy --fields srcaddr,action --live
+forti discover firewall policy --fields srcaddr,action --live
 ```
 
-An exact resource name shows the resource; anything else is a search. A search lists up to 1000
+An exact resource name, or several CLI words, shows the resource; one other word is a search. A search lists up to 1000
 matches unless you pass `--count`.
 
 For a resource, forti prints its kind, key and risk tier (`low`, `elevated` or `critical`; see
@@ -71,6 +96,7 @@ Monitor endpoints have no live schema. The live schema is fetched from the devic
 forti get <resource> [key]
   --filter EXPR      FortiOS filter, repeatable (AND); ',' inside one is OR (name==a,name==b)
   --fields a,b       return only these attributes
+  --all              read every page of a listing
   --start N          first item (default 0)
   --count N          items per page (default 50, max 1000)
   --param name=val   extra query parameter (monitor endpoints)
@@ -78,10 +104,11 @@ forti get <resource> [key]
 ```
 
 ```sh
-forti get firewall/policy --fields policyid,name,action,status
-forti get firewall/address "LAN 10.0.0.0/24"
-forti get firewall/policy 12
-forti get system/global --fields hostname,admin-sport
+forti get firewall/policy --fields policyid,name,action,status --all
+forti get firewall address "LAN 10.0.0.0/24"
+forti get firewall/policy/12
+forti get system interface port1
+forti get system global --fields hostname,admin-sport
 forti get monitor/system/status
 forti --vdom dmz get firewall/address
 ```
@@ -110,8 +137,8 @@ forti get firewall/address --filter name==web1,name==web2
 
 :::callout[Names are checked before anything is sent]{variant="tip"}
 For typed resources, forti checks every attribute named in `--filter` and `--fields` against the
-catalog before sending anything; an unknown one fails with `validation` (exit 6) and the list of
-unknown names.
+catalog before sending anything. An unknown one fails with `validation` (exit 6), the list of unknown
+names and the closest real ones: `colour (did you mean color?)`.
 :::
 
 ### Fields
@@ -123,11 +150,24 @@ bookkeeping attribute `q_origin_key` is hidden in text output and kept in `--jso
 
 ### Paging
 
-Lists are paged: 50 items by default, at most 1000 per request. When more remain, `meta.next_start`
-says where to continue (text output ends with `… more results: --start N`):
+Lists are paged: 50 items by default, at most 1000 per request. `--all` reads every page and
+returns them as one list:
 
 ```sh
-forti get firewall/address --count 1000
+forti get firewall/address --all
+forti get firewall/policy --all --json | jq '.data[] | .name'
+```
+
+Without `--all`, `meta.next_start` says where to continue when more remain, and forti says so on
+standard error, never in the output itself, so a pipeline is not misled and is still told it got
+only one page:
+
+```text
+$ forti get firewall/address | grep web
+forti: more results: --start 50, or --all to read every page
+```
+
+```sh
 forti get firewall/address --count 1000 --start 1000
 ```
 

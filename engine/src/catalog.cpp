@@ -113,6 +113,48 @@ namespace forti::engine {
             return path;
         }
 
+        // A path as FortiOS CLI words: "cmdb/firewall.service/custom" → firewall service custom,
+        // "monitor/system/status" → monitor system status.
+        std::vector<std::string> words_of(std::string_view path) {
+            if (path.starts_with("cmdb/")) path.remove_prefix(5);
+            std::vector<std::string> words;
+            std::string word;
+            for (char c: path) {
+                if (c == '.' || c == '/') {
+                    if (!word.empty()) words.push_back(std::move(word));
+                    word.clear();
+                } else word += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            if (!word.empty()) words.push_back(std::move(word));
+            return words;
+        }
+
+        // CLI words as a path: all but the last joined by '.', then '/' and the last
+        // ("firewall service custom" → firewall.service/custom); monitor words all by '/'.
+        std::string path_of(const std::vector<std::string>& words) {
+            if (words.empty()) return "";
+            std::string path;
+            if (words.front() == "monitor") {
+                for (const auto& word: words) path += (path.empty() ? "" : "/") + word;
+                return path;
+            }
+            for (std::size_t i = 0; i + 1 < words.size(); ++i) path += (i ? "." : "") + words[i];
+            return words.size() == 1 ? words.front() : path + "/" + words.back();
+        }
+
+        std::vector<std::string> split_words(std::string_view text) {
+            std::vector<std::string> words;
+            std::string word;
+            for (char c: text) {
+                if (std::isspace(static_cast<unsigned char>(c))) {
+                    if (!word.empty()) words.push_back(std::move(word));
+                    word.clear();
+                } else word += c;
+            }
+            if (!word.empty()) words.push_back(std::move(word));
+            return words;
+        }
+
     }  // namespace
 
     Catalog::Catalog() {
@@ -149,6 +191,71 @@ namespace forti::engine {
         throw Failure(Code::unknown_resource, message, {{"resource", name}, {"suggestions", suggestions}});
     }
 
+    Catalog::Match Catalog::match(const std::vector<std::string>& words) const {
+        Match out;
+        if (words.empty()) return out;
+        if (words.size() == 1) {
+            if (const Resource* known = find(words.front())) {
+                out.resource = *known;
+                return out;
+            }
+            if (normalize(words.front()).starts_with("monitor/")) {
+                out.resource = resolve(words.front());   // untyped monitor path, or usage when malformed
+                return out;
+            }
+        }
+        // CLI words and tails of them. A word with '/' is a path or a key, never part of CLI words.
+        std::vector<std::string> wanted;
+        for (const auto& word: words) {
+            if (word.empty() || word.find('/') != std::string::npos) return out;
+            wanted.push_back(lower(word));
+        }
+        if (words.size() > 1)
+            if (const Resource* known = find(path_of(wanted))) {
+                out.resource = *known;
+                return out;
+            }
+        std::vector<const Resource*> config, monitors;
+        for (const auto& resource: resources_) {
+            auto have = words_of(resource.path);
+            if (have.size() < wanted.size() || !std::equal(wanted.rbegin(), wanted.rend(), have.rbegin())) continue;
+            (resource.kind == Kind::monitor ? monitors : config).push_back(&resource);
+        }
+        const auto& found = config.empty() ? monitors : config;
+        if (found.size() == 1) out.resource = *found.front();
+        else
+            for (const Resource* resource: found) out.candidates.emplace_back(resource->name());
+        return out;
+    }
+
+    Resource Catalog::lookup(std::string_view name) const {
+        auto words = split_words(name);
+        if (words.empty()) throw Failure(Code::usage, "a resource name is required");
+        auto found = match(words);
+        if (found.resource) return *found.resource;
+        if (!found.candidates.empty()) {
+            std::string list;
+            for (std::size_t i = 0; i < found.candidates.size() && i < 8; ++i) list += (i ? ", " : "") + found.candidates[i];
+            if (found.candidates.size() > 8) list += std::format(" and {} more", found.candidates.size() - 8);
+            throw Failure(Code::unknown_resource, std::format("\"{}\" could be any of {} resources: {}", name, found.candidates.size(), list),
+                          {{"resource", name}, {"candidates", found.candidates}, {"hint", "name it in full, e.g. " + found.candidates.front()}});
+        }
+        return resolve(words.size() == 1 ? words.front() : path_of(words));
+    }
+
+    std::optional<Catalog::Keyed> Catalog::keyed(std::string_view name) const {
+        if (find(name)) return std::nullopt;
+        std::string path = normalize(name);
+        if (!path.starts_with("cmdb/")) return std::nullopt;
+        for (std::size_t slash = path.find('/', 5); slash != std::string::npos; slash = path.find('/', slash + 1)) {
+            const Resource* table = find(std::string_view(path).substr(0, slash));
+            if (!table) continue;
+            if (table->kind != Kind::table || slash + 1 >= path.size()) return std::nullopt;
+            return Keyed{table, path.substr(slash + 1)};
+        }
+        return std::nullopt;
+    }
+
     std::vector<const Resource*> Catalog::search(std::string_view query, std::optional<Kind> kind) const {
         std::string needle = lower(query);
         std::vector<const Resource*> out;
@@ -179,6 +286,24 @@ namespace forti::engine {
         for (const auto& [score, resource]: scored) {
             if (out.size() == limit) break;
             out.emplace_back(resource->name());
+        }
+        return out;
+    }
+
+    std::vector<std::string> closest_names(std::string_view wanted, const std::vector<std::string>& candidates, std::size_t limit) {
+        std::string needle = lower(wanted);
+        std::vector<std::pair<std::size_t, std::string>> scored;
+        for (const auto& candidate: candidates) {
+            std::string name = lower(candidate);
+            std::size_t distance = edit_distance(needle, name);
+            bool contained = needle.size() >= 3 && (name.find(needle) != std::string::npos || needle.find(name) != std::string::npos);
+            if (distance <= std::max<std::size_t>(1, needle.size() / 3) || contained) scored.emplace_back(contained ? std::min<std::size_t>(distance, 2) : distance, candidate);
+        }
+        std::ranges::stable_sort(scored, {}, &std::pair<std::size_t, std::string>::first);
+        std::vector<std::string> out;
+        for (auto& [distance, name]: scored) {
+            if (out.size() == limit) break;
+            out.push_back(std::move(name));
         }
         return out;
     }
