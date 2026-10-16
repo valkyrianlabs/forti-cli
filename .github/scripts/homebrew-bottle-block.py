@@ -28,8 +28,10 @@ def block(paths: list[Path]) -> str:
             root_url = bottle["root_url"]
             rebuild = max(rebuild, int(bottle.get("rebuild", 0)))
             for tag, info in sorted(bottle["tags"].items()):
-                cellar = info.get("cellar", bottle.get("cellar", ":any"))
-                cellar = cellar if cellar.startswith(":") else f'"{cellar}"'
+                # brew writes the relocatable cellars as "any" / "any_skip_relocation" (symbols in the
+                # formula); anything else is a Cellar path, a string.
+                cellar = str(info.get("cellar", bottle.get("cellar", "any"))).lstrip(":")
+                cellar = f":{cellar}" if cellar in ("any", "any_skip_relocation") else f'"{cellar}"'
                 lines.append(f'    sha256 cellar: {cellar}, {tag}: "{info["sha256"]}"')
     if not lines:
         raise SystemExit("no bottles in the JSON files")
