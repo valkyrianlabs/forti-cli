@@ -66,3 +66,5 @@ packages install the scripts; `forti completion bash|zsh|fish` prints them.
   the API user's trusted hosts, which forti now says first. 403 points at the admin profile.
 - **Startup** is back to about 6 ms (0.3 took about 25 ms).
 - **Homebrew** pours bottles on Apple silicon and Intel Macs running macOS 15 or later.
+- **APT** packages depend on `valkyrianlabs-archive-keyring`, which keeps the repository signing key
+  current through normal upgrades.
