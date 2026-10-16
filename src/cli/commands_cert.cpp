@@ -136,7 +136,10 @@ namespace forti::cli {
 
             auto& store = context.engine.secrets();
             Profile* profile = attach_to ? &set.profiles.at(*attach_to) : nullptr;
-            certs::CreateOptions options{.own_ca = args.flag("own-ca"), .days = days, .replace = args.flag("force")};
+            certs::CreateOptions options;
+            options.own_ca = args.flag("own-ca");
+            options.days = days;
+            options.replace = args.flag("force");
             if (args.flag("keychain"))
                 options.keep_password = [&](const std::string& password) {
                     store.put(profile->cert_password_account(), password, profile->secret_binding());

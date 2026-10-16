@@ -466,7 +466,9 @@ namespace forti::cli {
                 tty.say(std::format("  \"{}\" already exists: reuse it, or pick another name\n", name));
             }
             tty.say("Making the certificate... ");
-            json made = certs::create(paths, set, name, {.own_ca = kind == 1});
+            certs::CreateOptions options;
+            options.own_ca = kind == 1;
+            json made = certs::create(paths, set, name, options);
             tty.say(std::format("done: {}{}\n", display_path(made.value("dir", "")),
                                 made.value("forti_ca_created", false) ? " (and the forti CA, " + display_path(certs::forti_ca_dir(paths)) + ")" : ""));
             attach_certificate(context, set, draft, tty, name);
