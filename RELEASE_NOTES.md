@@ -1,5 +1,17 @@
 # forti-cli release notes
 
+<!-- vl-release:entry version=0.4.2 -->
+## 0.4.2 — Bottles for every Mac on macOS 15 or later
+
+_Released 2026-10-16_
+
+- **Homebrew pours a bottle on macOS 15 or later, on Apple silicon and Intel.** forti 0.4.1 could
+  not be built on macOS 15 at all, because forti-api 1.1.0 needed Xcode 26's C++ library; forti-api
+  1.1.1 fixes that, and forti now requires it.
+- **The `.deb` installs on its own again.** It recommends `valkyrianlabs-archive-keyring` instead of
+  depending on it: installs from the APT repository still get the keyring (APT installs recommended
+  packages by default), and the package from a GitHub release installs without the repository.
+
 <!-- vl-release:entry version=0.4.1 -->
 ## 0.4.1 — One command per change, one approval for agents
 

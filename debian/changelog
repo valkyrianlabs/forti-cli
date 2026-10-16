@@ -1,3 +1,15 @@
+forti-cli (0.4.2-1) unstable; urgency=medium
+
+  * forti-api >= 1.1.1 (build-depends, wrap, meson): builds on macOS 15 / Xcode
+    16 again (forti-api G16).
+  * Homebrew bottles for arm64 and Intel, built on macOS 15.
+  * Recommend (not depend on) valkyrianlabs-archive-keyring: the .deb from a
+    GitHub release installs without the repository, and the clean-install smoke
+    test is a standalone install again. Release tooling vl-release 0.5.1
+    (refuses a hard dependency on the keyring).
+
+ -- Cooper Larson <cooper@valkyrianlabs.com>  Fri, 16 Oct 2026 22:28:39 +0000
+
 forti-cli (0.4.1-1) unstable; urgency=medium
 
   * Depend on valkyrianlabs-archive-keyring so renewed APT signing-key metadata
