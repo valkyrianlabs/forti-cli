@@ -8,7 +8,7 @@ in the parent workspace. A copy of the engine contract is in `.claude/context/en
 ```sh
 ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api   # SDK co-development (else the wrap downloads v1.1.0)
 meson setup build/dev -Dtests=enabled --buildtype=debugoptimized
-meson compile -C build/dev -j "$(ci/build-jobs)"   # every core memory allows (~2 GB per engine shard with GCC)
+meson compile -C build/dev   # about 12 s; no TU needs more than ~1.2 GB (GCC)
 meson test -C build/dev --suite unit   # network-free; what CI runs
 meson test -C build/dev --suite integration   # real `forti` vs a mock FortiOS over TLS (python3 + openssl)
 meson install -C build/rel --skip-subprojects   # source installs: never install the SDK from the wrap
@@ -29,7 +29,7 @@ certs/, state/, cache/, and the MCP workspace files). `FORTI_CONFIG_DIR`, `FORTI
 | Path | What |
 |---|---|
 | `engine/include/forti/engine/` | Engine contract: `engine.hpp` (discover/read/plan/apply, JSON in and out), `catalog.hpp`, `profile.hpp`, `error.hpp` |
-| `engine/src/` | Implementation. `catalog_shard.cpp` is compiled N times and holds the typed SDK glue (`ops.hpp`); `policy.cpp` holds risk tiers; `plan.cpp` plan/apply (rollback plans, management probe); `plan_store.cpp` plan files, approvals, audit log, redaction; `approval.cpp` the CLI-only approve/show/list API (`approval.hpp`) |
+| `engine/src/` | Implementation. `schema_ops.cpp` is the SDK glue on forti-api's runtime schema (`ops.hpp`); `policy.cpp` holds risk tiers; `plan.cpp` plan/apply (rollback plans, management probe); `plan_store.cpp` plan files, approvals, audit log, redaction; `approval.cpp` the CLI-only approve/show/list API (`approval.hpp`) |
 | `src/cli/` | `forti`: argument parsing, the command table (`commands.cpp`), output (text, or `--json` envelope) |
 | `src/install/` | AI client adapters for `forti install mcp` |
 | `skill/` | The agent skill installed alongside the MCP registration |
