@@ -78,6 +78,15 @@ namespace forti::cli::certs {
     std::optional<std::string> attach(engine::Profile& profile, const engine::Paths& paths, const engine::ProfileSet& set,
                                       engine::SecretStore& store, const std::string& name);
 
+    // A PEM certificate someone is asked to trust: subject, cn, issuer, names (["DNS:fw", "IP:192.0.2.1"]),
+    // expires, expired, fingerprint_sha256 and self_signed. Needs the openssl command.
+    nlohmann::json inspect_pem(const std::string& pem);
+    // True when `host` (a name, an IP or [IPv6]) is among the names of `inspected`.
+    bool covers(const nlohmann::json& inspected, std::string_view host);
+    // Saves a device certificate the operator trusts as <home>/tls/<host>-<port>.pem, for a profile's
+    // ca_bundle (trust on first use), and returns its path.
+    std::filesystem::path pin(const engine::Paths& paths, std::string_view host, unsigned port, const std::string& pem);
+
     // What a FortiGate needs to accept set `name` for an API user: ca_name, peer, peer_group, and
     // steps (FortiOS CLI, one line per element, with the CA certificate inline, ready to paste).
     nlohmann::json fortigate(const engine::Paths& paths, const std::string& name);

@@ -74,6 +74,10 @@ class Setup(CliTest):
         config = json.loads((self.sb.config / "config.json").read_text())
         profile = config["profiles"]["lab"]
         self.assertEqual(profile["api_key"], {"source": "env", "env": KEY_VAR})
+        # The trusted certificate is pinned: the device's own certificate is the CA bundle.
+        pinned = Path(profile["ca_bundle"])
+        self.assertEqual(pinned.parent, home / "tls")
+        self.assertIn("BEGIN CERTIFICATE", pinned.read_text())
         self.assertEqual(profile["mode"], "read-only")
         self.assertEqual(stat.S_IMODE(os.stat(self.sb.config / "config.json").st_mode), 0o600)
         # configure verified the device through the SDK: one authorized GET of monitor/system/status.
@@ -191,18 +195,20 @@ class InteractiveConfigure(CliTest):
         """The connection checks (configure also lists the VDOMs after one succeeds)."""
         return [r for r in self.mock.requests if r.api == "monitor/system/status"]
 
-    def address_and_key(self, term: Terminal, have_key: bool = True) -> str:
+    def address(self, term: Terminal, trust: bool = True) -> str:
+        """The mock's certificate comes from a private CA: forti shows it and asks (trust on first use)."""
         term.answer("FortiGate address (name or IP, optionally :port): ", f"localhost:{self.mock.port}")
+        shown = term.answer("Trust this certificate for this FortiGate? (y/N): ", "y" if trust else "")
+        self.assertIn("is not trusted", shown)
+        self.assertIn("SHA-256", shown)
+        self.assertIn("DNS:localhost", shown)
+        return shown
+
+    def address_and_key(self, term: Terminal, have_key: bool = True) -> str:
+        self.address(term)
         steps = term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "" if have_key else "n")
         term.answer_hidden("API key: ", f"env:{KEY_VAR}")
         return steps
-
-    def trust_the_mock(self, term: Terminal) -> None:
-        """The check fails on the mock's private CA: the recovery menu takes a CA bundle."""
-        menu = term.answer("choice [1]: ", "2")
-        self.assertIn("is not trusted", menu)
-        self.assertIn("use a CA bundle", menu)
-        term.answer("CA bundle, PEM: ", str(self.mock.ca_path))
 
     def name_it(self, term: Terminal, name: str) -> None:
         term.answer("Profile name [fw-mock]: ", name)
@@ -225,18 +231,20 @@ class InteractiveConfigure(CliTest):
         # The operator does the steps: from now on the device requires a certificate from the forti CA.
         self.mock.require_client_certificate(home / "ca" / "ca.crt")
         os.write(term.fd, b"\n")
-        self.trust_the_mock(term)
         self.name_it(term, "fw01")
         self.assertEqual(term.finish(), 0, term.text)
         self.assertIn('Saved profile "fw01"', term.text)
         self.assertIn('client cert  certificate "fw01"', term.text)
-        self.assertEqual(term.text.count("is not trusted"), 1)   # said once
         self.assertEqual(self.checks()[-1].client_cn, "forti-fw01")
         self.assertEqual(self.checks()[-1].status, 200)
         profile = json.loads((self.sb.config / "config.json").read_text())["profiles"]["fw01"]
         self.assertEqual(profile["client_cert"], str(home / "certs" / "fw01" / "client.p12"))
         self.assertEqual(profile["cert_password"], {"source": "file", "path": str(home / "certs" / "fw01" / "client.pass")})
         self.assertEqual(profile["api_key"], {"source": "env", "env": KEY_VAR})
+        # The trusted certificate is pinned: the device's own certificate is the CA bundle.
+        pinned = Path(profile["ca_bundle"])
+        self.assertEqual(pinned.parent, home / "tls")
+        self.assertIn("BEGIN CERTIFICATE", pinned.read_text())
 
         # A profile without the certificate no longer gets through; fw01 does.
         self.assertNotEqual(self.forti("doctor", "--profile", "lab", expect=None).code, 0)
@@ -251,7 +259,6 @@ class InteractiveConfigure(CliTest):
         term.expect("Mode: read-only (as fw01")
         term.expect("Press Enter when the FortiGate is ready")
         os.write(term.fd, b"\n")
-        self.trust_the_mock(term)
         term.answer("Profile name [fw-mock]: ", "fw02")
         term.answer("Make it the default profile? (y/N): ", "n")
         self.assertEqual(term.finish(), 0, term.text)
@@ -292,12 +299,15 @@ class InteractiveConfigure(CliTest):
     def test_a_rejected_key_is_typed_again_never_retried_alone(self) -> None:
         term = self.start()
         term.answer("Start from lab's settings (mode read-only)? (Y/n): ", "n")
-        term.answer("FortiGate address (name or IP, optionally :port): ", f"localhost:{self.mock.port}")
+        self.address(term, trust=False)   # declined: the check fails on TLS, and the menu offers fixes
         term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "")
         term.answer_hidden("API key: ", "wrong-key")
         term.answer("Use a client certificate? (y/N): ", "")
         term.answer("Mode [1]: ", "")
-        self.trust_the_mock(term)
+        menu = term.answer("choice [1]: ", "3")
+        self.assertIn("is not trusted", menu)
+        self.assertIn("3) use a CA bundle", menu)
+        term.answer("CA bundle, PEM: ", str(self.mock.ca_path))
         menu = term.expect("choice [1]: ")
         self.assertIn("rejected the API key", menu)
         statuses = [r.status for r in self.checks()]
