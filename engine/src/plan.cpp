@@ -339,6 +339,8 @@ namespace forti::engine {
                          {"id", id.empty() ? detail::new_plan_id(time) : std::move(id)},
                          {"kind", std::move(kind)},
                          {"created_at", detail::iso8601(time)},
+                         // Orders plans made within one second (`latest`); outside the digest.
+                         {"created_ns", std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count()},
                          {"device", std::move(device)},
                          {"operations", std::move(operations)}};
             if (!rollback_of.empty()) plan["rollback_of"] = rollback_of;

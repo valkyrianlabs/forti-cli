@@ -7,6 +7,7 @@
 
 #include <output.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
@@ -95,8 +96,11 @@ TEST_F(PlanCli, PlansAreNamedByPrefixTailOrLatest) {
 
     // A prefix of both is ambiguous and lists them; an unknown one is not_found.
     EXPECT_EQ(forti({"--json", "plan", "show", first.substr(0, 8)}), 2);
+    // Every plan made above shares the date prefix (the loop may have made more than two).
     json candidates = json_out()["error"]["details"]["candidates"];
-    EXPECT_EQ(candidates.size(), 2u);
+    EXPECT_GE(candidates.size(), 2u);
+    for (const auto& id: {first, second})
+        EXPECT_NE(std::ranges::find(candidates, json(id)), candidates.end()) << id;
     EXPECT_EQ(forti({"--json", "plan", "show", "zzzz"}), 5);
 
     // Without a terminal, a plan must be named.

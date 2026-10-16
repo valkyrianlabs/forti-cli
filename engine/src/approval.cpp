@@ -3,6 +3,7 @@
 #include <forti/engine/approval.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <format>
 
 namespace forti::engine {
@@ -113,6 +114,7 @@ namespace forti::engine {
                 json plan = detail::load_plan(paths, id);
                 json view = detail::plan_view(plan);
                 for (const char* key: {"kind", "created_at", "risk", "summary"}) item[key] = view[key];
+                if (plan.contains("created_ns") && plan["created_ns"].is_number_integer()) item["created_ns"] = plan["created_ns"];
                 item["profile"] = plan["device"].value("profile", "");
                 item["host"] = plan["device"].value("host", "");
                 item["operations"] = plan["operations"].size();
@@ -123,9 +125,12 @@ namespace forti::engine {
             }
             list.push_back(std::move(item));
         }
+        // Newest first: created_at (whole seconds), then created_ns within a second (plans before 0.3
+        // have none), then the id.
         std::sort(list.begin(), list.end(), [](const json& a, const json& b) {
-            return a.value("created_at", "") != b.value("created_at", "") ? a.value("created_at", "") > b.value("created_at", "")
-                                                                           : a.value("id", "") > b.value("id", "");
+            if (a.value("created_at", "") != b.value("created_at", "")) return a.value("created_at", "") > b.value("created_at", "");
+            std::int64_t an = a.value("created_ns", std::int64_t{0}), bn = b.value("created_ns", std::int64_t{0});
+            return an != bn ? an > bn : a.value("id", "") > b.value("id", "");
         });
         std::size_t returned = list.size();
         return ok(std::move(list), {{"returned", returned}});

@@ -19,6 +19,7 @@
 #include <forti/engine/approval.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -248,7 +249,8 @@ namespace forti::cli {
             }
         }
 
-        // Newest first. created_at has whole seconds; within one second the plan file's time decides.
+        // Newest first. created_at has whole seconds; within one second created_ns decides, and for plans
+        // made before 0.3 (no created_ns) the plan file's time.
         json stored_plans(Context& context) {
             json plans = engine::list_plans(context.engine).value("data", json::array());
             std::filesystem::path dir = context.engine.options().paths.state / "plans";
@@ -259,7 +261,10 @@ namespace forti::cli {
             };
             std::stable_sort(plans.begin(), plans.end(), [&](const json& a, const json& b) {
                 std::string at = a.value("created_at", ""), bt = b.value("created_at", "");
-                return at != bt ? at > bt : written(a) > written(b);
+                if (at != bt) return at > bt;
+                if (a.contains("created_ns") && b.contains("created_ns") && a["created_ns"] != b["created_ns"])
+                    return a["created_ns"].get<std::int64_t>() > b["created_ns"].get<std::int64_t>();
+                return written(a) > written(b);
             });
             return plans;
         }
