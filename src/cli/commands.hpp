@@ -50,6 +50,8 @@ namespace forti::cli {
     std::vector<Command> read_commands();      // commands_read.cpp: devices, discover, get
     std::vector<Command> plan_commands();      // commands_plan.cpp: plan, apply
     std::vector<Command> install_commands();   // commands_install.cpp: install, mcp
+    std::vector<Command> history_commands();   // commands_history.cpp: history
+    std::vector<Command> completion_commands();   // completion.cpp: completion (and the hidden __complete)
 
     // Runs an engine operation and emits its envelope (text or --json); returns the exit status.
     int run_engine(Context& context, const std::function<nlohmann::json()>& operation, const Renderer& render = {});

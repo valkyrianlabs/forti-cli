@@ -1,4 +1,4 @@
-.Dd October 15, 2026
+.Dd October 16, 2026
 .Dt FORTI 1
 .Os
 .Sh NAME
@@ -30,6 +30,24 @@
 .Cm get
 .Ar resource
 .Op Ar key
+.Nm
+.Cm set
+.Ar resource
+.Op Ar key
+.Ar attr Ns = Ns Ar value ...
+.Nm
+.Cm create | delete
+.Ar resource
+.Ar arguments
+.Nm
+.Cm history
+.Op Fl p Ar name
+.Op Fl n Ar count
+.Op Fl -all
+.Op Fl -verbose
+.Nm
+.Cm completion
+.Cm bash | zsh | fish
 .Sh DESCRIPTION
 .Nm
 reads and changes FortiGate configuration through the FortiOS REST API.
@@ -296,41 +314,77 @@ shows them on a terminal, or with
 .El
 .Ss Changes
 .Bl -tag -width Ds
-.It Cm plan set | create | delete | action | Fl -file Ar file Op Fl -apply
-Write a stored plan: read the device, validate, and record the diff and the exact request.
-The device is not changed.
-.Cm create
-takes
-.Ar attr Ns = Ns Ar value
-pairs or
-.Fl -object .
-.Fl -apply
-applies the plan in the same command, as the profile's mode allows.
-.It Cm plan show | approve Op Ar id
-Show a plan, or approve it (guarded mode; at a terminal
-.Cm approve
-then offers to apply it).
-.It Cm plan list
-Stored plans, newest first.
-.It Cm apply Op Ar id
-Execute a plan once.
-In guarded mode, at a terminal, it shows the plan and asks for the approval.
+.It Cm set Ar resource Oo Ar key Oc Ar attr Ns = Ns Ar value ... Oo Fl -clear Ar attr Oc
+.It Cm create Ar resource Ar attr Ns = Ns Ar value ... | Fl -object Ar json
+.It Cm delete Ar resource Ar key
+Make a change in one command.
+The resource is named as for
+.Cm get .
+.Nm
+reads the device, shows the change, and then does what the profile's mode allows:
+read-only changes nothing; guarded asks once,
+.Dq Apply these changes? [y/N] ,
+at a terminal (without one it stops at the approval); autonomous applies.
+.Fl -dry-run
+only plans;
+.Fl -verbose
+adds the request lines.
 .It Cm rollback Op Ar id
-Apply the rollback plan of the last applied plan (or of
-.Ar id ) .
+Undo the profile's last change (or that of
+.Ar id ) ,
+under the same mode rules.
+.It Cm approve Oo Ar id Oc Op Fl -yes
+.It Cm approve Fl -watch
+Approve a plan (guarded mode) so the agent or script that made it can apply it.
+At a terminal it shows the change and asks; without one only
+.Fl -yes
+approves.
+.Fl -watch
+asks about each plan as agents make them, until Ctrl-C.
+.It Cm plan set | create | delete | action | Fl -file Ar file Op Fl -apply
+Write a stored plan without applying it: read the device, validate, and record the diff and the
+exact request.
+.Fl -apply
+makes the change at once, as
+.Cm set
+does.
+.It Cm plan show Op Ar id
+.It Cm plan list
+Show a plan; list the stored plans, newest first.
+.It Cm apply Op Ar id
+Show a saved plan and apply it once, as the profile's mode allows.
+.It Cm history Oo Fl p Ar name Oc Oo Fl n Ar count Oc Oo Fl -all Oc Op Fl -verbose
+What was applied, newest last, from the audit log: the time, the profile, the result, the plan,
+the approval and what changed.
+It reads only
+.Pa audit.jsonl ,
+never the configuration or a device.
+.Fl p
+shows one profile's entries,
+.Fl n
+the last
+.Ar count
+(default 20; 0: all).
+Attempts refused before anything changed (read-only profile, missing approval, stale or already
+applied plan) are hidden unless
+.Fl -all .
+.Fl -verbose
+adds every operation, the approval, the error, the rollback plan and the
+.Cm rollback
+command that undoes the change.
+.Fl -json
+prints the events as recorded.
 .El
 .Pp
 A plan
 .Ar id
-may be shortened to a unique prefix of the id or of its last part, or be
-.Cm latest .
-At a terminal,
-.Cm show ,
-.Cm approve
-and
+may be shortened to a unique prefix of the id or of its last part.
+Without an id,
 .Cm apply
-without an id take the newest plan waiting to be applied, and show it first.
-Without a terminal a plan must be named.
+and
+.Cm approve
+take the plan waiting for the profile when only one is (at a terminal you pick among several);
+without a terminal a plan must be named.
 .Ss Integrations
 .Cm mcp
 is described by
@@ -348,6 +402,25 @@ check, fix and remove the registrations.
 .Cm install mcp
 is the same as
 .Cm mcp install .
+.Pp
+.Cm completion bash | zsh | fish
+prints the shell completion script.
+The packages install it; otherwise add
+.Dl source <(forti completion bash)
+to
+.Pa ~/.bashrc ,
+.Dl source <(forti completion zsh)
+to
+.Pa ~/.zshrc
+after
+.Ic compinit ,
+or save
+.Ic forti completion fish
+as
+.Pa ~/.config/fish/completions/forti.fish .
+On each Tab the script runs
+.Nm ,
+which reads only profile names and the plans directory.
 .Sh OPERATING MODES
 The FortiOS account's privileges are the primary authorization boundary.
 A profile's mode is the operator's policy on top of it:
@@ -359,12 +432,10 @@ The default.
 .Cm profile mode Ar name Cm guarded
 allows changes.
 .It Cm guarded
-A change is applied only after a person approves the exact plan: at a terminal when
+A change is applied only after a person approves the exact plan: the one question at a terminal,
 .Nm
-.Cm apply
-asks, or with
-.Nm
-.Cm plan approve Ar id .
+.Cm approve Ar id ,
+or in an AI client's chat when it supports MCP elicitation.
 .It Cm autonomous
 Changes are applied without interactive approval.
 The agent can do anything the API account may do.
@@ -410,7 +481,8 @@ Contains no secrets.
 The file secret store: one 0600 file per secret.
 .It Pa ~/.forti/state/
 Plans, approvals, pre-change backups and
-.Pa audit.jsonl .
+.Pa audit.jsonl
+.Pq Cm history .
 .It Pa ~/.forti/certs/ Ns Ar name Ns /
 Client certificates
 .Pq Cm cert list .
@@ -455,6 +527,12 @@ forti doctor
 forti get firewall/policy --fields policyid,name,action,status
 .Ed
 .Pp
+Change an address object, then undo it:
+.Bd -literal -offset indent
+forti set firewall/address/web comment="Web server"
+forti rollback
+.Ed
+.Pp
 Use a client certificate as well as the API key:
 .Bd -literal -offset indent
 forti cert create --profile fw01      # or answer y in forti configure
@@ -463,9 +541,7 @@ forti cert use fw01 --profile fw02    # a second FortiGate, same certificate
 .Pp
 A second device with the same settings:
 .Bd -literal -offset indent
-forti profile copy fw01 fw02
-forti profile set fw02 host=fw02.example.net
-forti configure --profile fw02
+forti configure --like fw01
 .Ed
 .Pp
 Configure from a password manager without prompts:

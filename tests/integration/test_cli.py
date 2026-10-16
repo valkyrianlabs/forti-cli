@@ -202,9 +202,9 @@ class InteractiveConfigure(CliTest):
 
     def address_and_key(self, term: Terminal, have_key: bool = True) -> str:
         self.address(term)
-        steps = term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "" if have_key else "n")
-        term.answer_hidden("API key: ", f"env:{KEY_VAR}")
-        return steps
+        if not have_key:   # Enter on the empty prompt shows the FortiGate steps, then asks again
+            term.answer_hidden("API key: ", "")
+        return term.answer_hidden("API key: ", f"env:{KEY_VAR}")
 
     def name_it(self, term: Terminal, name: str) -> None:
         term.answer("Profile name [fw-mock]: ", name)
@@ -269,8 +269,8 @@ class InteractiveConfigure(CliTest):
         term.answer("VDOM", "")
         term.answer("CA bundle, PEM", str(self.mock.ca_path))
         term.answer("Connect to this IP instead", "")
-        steps = term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "n")
-        term.answer_hidden("API key: ", f"env:{KEY_VAR}")
+        term.answer_hidden("API key: ", "")
+        steps = term.answer_hidden("API key: ", f"env:{KEY_VAR}")
         term.answer("Use a client certificate? (y/N): ", "y")
         term.answer("Reuse a certificate you already have? (Y/n): ", "")
         listing = term.answer("Certificate [1]: ", "")
@@ -296,7 +296,6 @@ class InteractiveConfigure(CliTest):
         term = self.start()
         term.answer("Start from lab's settings (mode read-only)? (Y/n): ", "n")
         self.address(term, trust=False)   # declined: the check fails on TLS, and the menu offers fixes
-        term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "")
         term.answer_hidden("API key: ", "wrong-key")
         term.answer("Use a client certificate? (y/N): ", "")
         term.answer("Mode [1]: ", "")
@@ -305,7 +304,7 @@ class InteractiveConfigure(CliTest):
         self.assertIn("3) use a CA bundle", menu)
         term.answer("CA bundle, PEM: ", str(self.mock.ca_path))
         menu = term.expect("choice [1]: ")
-        self.assertIn("rejected the API key", menu)
+        self.assertIn("did not accept the API key", menu)
         statuses = [r.status for r in self.checks()]
         self.assertEqual(statuses[-1], 401)
         self.assertEqual(statuses.count(401), 1)   # never retried on its own
@@ -477,10 +476,10 @@ class Guarded(CliTest):
 
     def test_refused_then_approved_then_applied(self) -> None:
         plan = self.plan(create_address())["data"]
-        self.assertEqual(plan["approve"], f"forti plan approve {plan['id']}")
+        self.assertEqual(plan["approve"], f"forti approve {plan['id']}")
         refused = self.json_of("apply", plan["id"], expect=7)
         self.assertEqual(refused["error"]["code"], "approval_required")
-        self.assertEqual(refused["error"]["details"]["approve_command"], f"forti plan approve {plan['id']}")
+        self.assertEqual(refused["error"]["details"]["approve_command"], f"forti approve {plan['id']}")
         self.assertEqual(self.writes(), [])
 
         shown = self.forti("plan", "show", plan["id"])
@@ -518,13 +517,15 @@ class GuardedAtTerminal(CliTest):
     def approvals(self) -> list:  # type: ignore[type-arg]
         return [e for e in self.sb.audit() if e.get("event") == "approve" and e.get("outcome") == "approved"]
 
-    def test_apply_without_an_id_shows_the_plan_and_asks_for_the_approval(self) -> None:
+    def test_apply_without_an_id_shows_the_plan_and_asks_once(self) -> None:
         plan = self.plan(create_address())["data"]
         term = self.terminal("apply")
-        shown = term.answer(f"Approve and apply plan {plan['id']}? [y/N] ", "y")
+        shown = term.answer("Apply these changes? [y/N] ", "y")
         self.assertIn("create firewall/address", shown)
+        self.assertIn(f"plan {plan['id']}", shown)
         self.assertEqual(term.finish(), 0, term.text)
         self.assertIn("1 change applied and verified.", term.text)
+        self.assertEqual(term.text.count("? ["), 1, term.text)   # one question, no "apply now?"
         self.assertIn("web", self.mock.table("firewall/address"))
         self.assertEqual([e["plan_id"] for e in self.approvals()], [plan["id"]])
         self.assertTrue(self.approvals()[0]["approved_by"].startswith("cli:"))
@@ -532,34 +533,140 @@ class GuardedAtTerminal(CliTest):
     def test_declining_applies_nothing(self) -> None:
         plan = self.plan(create_address())["data"]
         term = self.terminal("apply", plan["id"][-6:])
-        term.answer("? [y/N] ", "")
+        term.answer("Apply these changes? [y/N] ", "")
         self.assertEqual(term.finish(), 7, term.text)
-        self.assertIn("not approved", term.text)
+        self.assertIn("Nothing was changed.", term.text)
         self.assertEqual(self.writes(), [])
         self.assertEqual(self.approvals(), [])
 
-    def test_approve_then_apply_now(self) -> None:
-        plan = self.plan(create_address())["data"]
-        term = self.terminal("plan", "approve")
-        term.answer(f"Approve plan {plan['id']}? [y/N] ", "y")
-        term.answer("Apply now? [Y/n] ", "")
+    def test_set_is_one_command_and_one_question(self) -> None:
+        self.mock.add_address("web", "192.0.2.10 255.255.255.255", comment="old")
+        self.mock.clear_requests()
+        term = self.terminal("set", "firewall/address/web", "comment=Web server")
+        shown = term.answer("Apply these changes? [y/N] ", "y")
+        self.assertIn('comment  "old" → "Web server"', shown)
+        self.assertNotIn("PUT ", shown)   # the request line only with --verbose
         self.assertEqual(term.finish(), 0, term.text)
         self.assertIn("1 change applied and verified.", term.text)
+        self.assertIn("undo      forti rollback", term.text)
+        self.assertEqual(self.mock.table("firewall/address")["web"]["comment"], "Web server")
+        apply = [e for e in self.sb.audit() if e.get("event") == "apply"][-1]
+        self.assertEqual(apply["outcome"], "ok")
+        self.assertTrue(apply["approved_by"].startswith("cli:"))
+        self.assertTrue(apply["actor"].startswith("cli:"))
+
+    def test_approve_for_an_agent_then_the_agent_applies(self) -> None:
+        plan = self.plan(create_address())["data"]
+        term = self.terminal("approve")
+        shown = term.answer("Approve these changes? [y/N] ", "y")
+        self.assertIn("create firewall/address", shown)
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn("The agent can apply it now", term.text)
+        self.assertEqual(self.writes(), [])   # approving applies nothing
+        applied = self.json_of("apply", plan["id"])   # the agent, without a terminal
+        self.assertEqual(applied["data"]["verified"], 1)
+
+    def test_approve_watch_asks_about_each_new_plan(self) -> None:
+        term = self.terminal("approve", "--watch")
+        term.expect("stops.")
+        plan = self.plan(create_address())["data"]   # an agent plans meanwhile
+        shown = term.answer("Approve these changes? [y/N] ", "y")
+        self.assertIn(f"plan {plan['id']}", shown)
+        term.expect("the agent can apply it now")
+        os.write(term.fd, b"\x04")   # end of input stops the watch
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual([e["plan_id"] for e in self.approvals()], [plan["id"]])
+        self.assertEqual(self.json_of("apply", plan["id"])["data"]["verified"], 1)
+
+    def test_two_waiting_plans_are_never_guessed(self) -> None:
+        first = self.plan(create_address())["data"]
+        second = self.plan(create_address({"name": "web2", "subnet": "192.0.2.11 255.255.255.255"}))["data"]
+        # Without a terminal: refused, with both listed.
+        refused = self.json_of("apply", "latest", expect=2)
+        self.assertEqual(set(refused["error"]["details"]["candidates"]), {first["id"], second["id"]})
+        # At a terminal: the person picks one, then answers the one question.
+        term = self.terminal("apply")
+        listing = term.answer("Which one? (Enter: none) ", "1")
+        self.assertIn(first["id"], listing)
+        self.assertIn(second["id"], listing)
+        term.answer("Apply these changes? [y/N] ", "y")
+        self.assertEqual(term.finish(), 0, term.text)
         self.assertEqual(len(self.writes()), 1)
 
     def test_plan_apply_flag_and_rollback(self) -> None:
         term = self.terminal("plan", "create", "firewall/address", "name=web", "subnet=192.0.2.10 255.255.255.255", "--apply")
-        term.answer("? [y/N] ", "y")
+        term.answer("Apply these changes? [y/N] ", "y")
         self.assertEqual(term.finish(), 0, term.text)
         self.assertIn("web", self.mock.table("firewall/address"))
 
-        # forti rollback says what it undoes, asks for the approval, and deletes the object again.
+        # forti rollback says what it undoes, asks once, and deletes the object again.
         term = self.terminal("rollback")
-        before = term.expect("Approve and apply rollback plan ")
-        self.assertIn("Rolling back plan ", before)
-        term.answer("? [y/N] ", "y")
+        before = term.answer("Apply these changes? [y/N] ", "y")
+        self.assertIn("Undoes plan ", before)
+        self.assertIn("delete firewall/address", before)
         self.assertEqual(term.finish(), 0, term.text)
         self.assertNotIn("web", self.mock.table("firewall/address"))
+
+
+class ConcurrentAgents(CliTest):
+    """Several agents planning for one profile at once: every plan is its own, and none is guessed."""
+
+    mode = "autonomous"
+
+    def test_parallel_plans_are_distinct_and_applied_only_by_id(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        names = [f"agent{i}" for i in range(6)]
+
+        def plan_one(name: str):  # type: ignore[no-untyped-def]
+            body = json.dumps({"operations": [create_address({"name": name, "subnet": "192.0.2.20 255.255.255.255"})]})
+            return self.sb.forti("plan", "--file", "-", "--json", input=body)
+
+        with ThreadPoolExecutor(max_workers=len(names)) as pool:
+            results = list(pool.map(plan_one, names))
+        for result in results:
+            self.assertEqual(result.code, 0, result.err)
+        ids = [r.json()["data"]["id"] for r in results]
+        self.assertEqual(len(set(ids)), len(ids), "every plan has its own id")
+        self.assertEqual(self.writes(), [])
+
+        # Without a terminal, nothing picks "the newest" for an agent.
+        self.assertEqual(self.json_of("apply", "latest", expect=2)["error"]["code"], "usage")
+        self.forti("apply", expect=2)
+        self.assertEqual(self.writes(), [])
+
+        # Each agent applies its own plan by id, in parallel.
+        with ThreadPoolExecutor(max_workers=len(ids)) as pool:
+            applied = list(pool.map(lambda i: self.sb.forti("apply", i, "--json"), ids))
+        for result in applied:
+            self.assertEqual(result.code, 0, result.err)
+        self.assertEqual(set(names) <= set(self.mock.table("firewall/address")), True)
+        audit = [e for e in self.sb.audit() if e.get("event") == "apply" and e.get("outcome") == "ok"]
+        self.assertEqual(sorted(e["plan_id"] for e in audit), sorted(ids))
+
+
+class AutonomousAtTerminal(CliTest):
+    mode = "autonomous"
+
+    def test_set_applies_without_a_question(self) -> None:
+        self.mock.add_address("web", "192.0.2.10 255.255.255.255", comment="old")
+        term = Terminal([FORTI, "set", "address", "web", "comment=new"], self.sb.env)
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertNotIn("? [", term.text)
+        self.assertIn('"old" → "new"', term.text)
+        self.assertEqual(self.mock.table("firewall/address")["web"]["comment"], "new")
+
+
+class ReadOnlySet(CliTest):
+    mode = "read-only"
+
+    def test_set_shows_the_change_and_the_mode_command(self) -> None:
+        self.mock.add_address("web", "192.0.2.10 255.255.255.255", comment="old")
+        self.mock.clear_requests()
+        result = self.forti("set", "firewall/address/web", "comment=new", expect=7)
+        self.assertIn('"old" → "new"', result.out)
+        self.assertIn("read-only: nothing was changed", result.err)
+        self.assertIn("forti profile mode", result.err)
+        self.assertEqual(self.writes(), [])
 
 
 class Autonomous(CliTest):

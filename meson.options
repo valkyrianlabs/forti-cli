@@ -2,3 +2,5 @@ option('tests', type : 'feature', value : 'auto',
        description : 'Build the network-free unit and integration tests (GoogleTest)')
 option('subproject_cli', type : 'boolean', value : false,
        description : 'Also build (never install) the forti executable when this is a subproject (forti-mcp integration tests)')
+option('completions', type : 'feature', value : 'auto',
+       description : 'Install the bash, zsh and fish completion scripts (share/bash-completion, share/zsh/site-functions, share/fish/vendor_completions.d); disabled: do not install them')

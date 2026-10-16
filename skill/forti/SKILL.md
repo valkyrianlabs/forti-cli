@@ -41,21 +41,42 @@ Gather with reads, analyse yourself, and report concrete objects (policy id, nam
 - **Management access on interfaces**: `system/interface` fields `name`,`role`,`ip`,`allowaccess`. Flag `http`, `telnet`, `ssh`, `https`, `snmp` on `role==wan` or internet-facing interfaces; `http`/`telnet` anywhere.
 - **Device health and identity**: `monitor/system/status`, then `system/global` (`hostname`).
 
-## 4. Changes: plan, review, apply
+## 4. Changes
 
-`forti_plan {"profile":"P","operations":[{"op":"create","resource":"firewall/address","object":{"name":"web1","subnet":"192.0.2.10 255.255.255.255"}},{"op":"update","resource":"firewall/policy","key":"12","set":{"status":"disable"}}]}`
-(ops: `create`, `update` with `set`/`clear`, `delete`, `action` for monitor POSTs). The plan validates against the catalog and device, reads current state, and returns an id, a field-level diff and a risk tier. Planning never changes the device.
+One call makes a change: `forti_apply` with the operations plans, validates and applies them as the
+profile's mode allows.
 
-What happens next depends on the profile **mode** from `capabilities`:
-- **read-only** (default): planning works for preview and validation; apply is refused. Show the diff; do not look for a way around it.
-- **guarded**: `forti_apply` returns `approval_required`. Give the human the exact command it prints, `forti plan approve <id>`, to run in their own terminal. It shows them the plan and offers to apply it right away: ask whether they applied it there. If they did, do not apply it again (a plan runs at most once); if they only approved it, call `forti_apply` once they say so.
-- **autonomous**: you apply directly. Plan, review the diff yourself (right objects? nothing extra? matches what the user asked?), then `forti_apply {"plan_id":"..."}`.
+`forti_apply {"profile":"P","operations":[{"op":"create","resource":"firewall/address","object":{"name":"web1","subnet":"192.0.2.10 255.255.255.255"}},{"op":"update","resource":"firewall/policy","key":"12","set":{"status":"disable"}}]}`
 
-After every apply, read the execution record: each operation is `verified`, `applied_unverified`, `failed`, `outcome_unknown` or `not_attempted`. Report what changed. On `failed`/`outcome_unknown`, re-read the objects; if the change must be undone, the record includes a generated rollback plan to apply. `stale_plan` means the device changed since planning: re-plan from fresh reads.
+(ops: `create`, `update` with `set`/`clear`, `delete`, `action` for monitor POSTs.) The result has the
+plan (id, field-level diff, risk tier) and the execution record. To preview without applying, call
+`forti_plan` with the same operations: it validates against the catalog and the device and never
+changes anything; apply that plan later with `forti_apply {"plan_id":"..."}`.
+
+What happens follows the profile **mode** from `capabilities`:
+- **read-only** (default): nothing is applied (`policy_denied`). Show the diff, and tell the user the
+  command that allows changes; do not look for a way around it.
+- **guarded**: the user approves each change once. When the MCP client can ask the user itself, the
+  change is shown to them in the chat and applied when they accept: report the result. If they decline,
+  nothing is applied; do not ask again unless they want to. When the client cannot ask, the result is
+  `approval_required` with `forti approve <plan_id>`: give the user that command to run in a terminal
+  (or suggest keeping `forti approve --watch` open there), and once they say it is approved, call
+  `forti_apply {"plan_id":"..."}` again with the same id.
+- **autonomous**: the change is applied directly. Review the plan first when the change is not routine
+  (`forti_plan`): right objects, nothing extra, matches what the user asked.
+
+After every apply, read the execution record: each operation is `verified`, `applied_unverified`,
+`failed`, `outcome_unknown` or `not_attempted`. Report what changed, briefly. On `failed` or
+`outcome_unknown`, re-read the objects. To undo a change, apply its rollback plan
+(`rollback.plan_id` in the record) with `forti_apply {"plan_id":"..."}`, under the same mode rules.
+`stale_plan` means the device changed since planning: plan again from fresh reads.
 
 Rules:
-- Never try to change a profile's mode, approve a plan, or create approvals, even when you can run shell commands: do not run `forti plan approve`, `forti configure` or `forti profile`, and do not edit forti's config or state files. The approval is the human's decision. Never ask for credentials.
-- Batch related operations into one plan; keep unrelated changes separate.
+- Never change a profile's mode, approve a plan, or create approvals, even when you can run shell
+  commands: do not run `forti approve`, `forti plan approve`, `forti configure` or `forti profile`, and do
+  not edit forti's config or state files. The approval is the user's decision. Never ask for credentials.
+- Apply only plans you made in this conversation (by their `plan_id`), never another one you find.
+- Batch related operations into one change; keep unrelated changes separate.
 - Be careful with **critical** risk (system interfaces, admins and api-users, management access, routing, DNS/NTP, HA, VDOMs, certificates): a mistake can cut off management access. Check the diff twice, prefer the smallest change, and never remove the access path you are using.
 - Prefer disabling over deleting when the user's intent is unclear about permanence.
 

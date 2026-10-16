@@ -300,7 +300,7 @@ TEST_F(PlanTest, GuardedApplyNeedsASingleUseApproval) {
     json result = apply(id);
     EXPECT_EQ(result["error"]["code"], "approval_required");
     EXPECT_EQ(result["error"]["details"]["reason"], "missing");
-    EXPECT_EQ(result["error"]["details"]["approve_command"], "forti plan approve " + id);
+    EXPECT_EQ(result["error"]["details"]["approve_command"], "forti approve " + id);
     EXPECT_EQ(result["error"]["details"]["plan_id"], id);
 
     json approval = approve(id);

@@ -531,6 +531,9 @@ namespace forti::install::workspace {
         static const std::vector<std::string> rules = {
                 "Read(/credentials/**)", "Read(/certs/**/*.pass)", "Read(/certs/**/*.p12)", "Read(/certs/**/ca/**)",
                 "Read(/ca/**)", "Edit(/config.json)",
+                // Guarded mode means a person approves: an agent's shell must not approve its own plans
+                // or raise the profile's mode. (A prefix match: it stops accidents, not a determined process.)
+                "Bash(forti approve:*)", "Bash(forti plan approve:*)", "Bash(forti profile mode:*)",
         };
         return rules;
     }
@@ -552,7 +555,7 @@ namespace forti::install::workspace {
                 "- Use the forti MCP tools and the `forti` skill (`.claude/skills/forti`, `.agents/skills/forti`).\n"
                 "- Never read, print or edit `credentials/`, `certs/`, `ca/`, `config.json` or `state/`. They hold API keys,\n"
                 "  private keys and the profiles; never ask for credentials either.\n"
-                "- Never run `forti plan approve`, `forti configure`, `forti profile` or `forti cert`: approvals and\n"
+                "- Never run `forti approve`, `forti configure`, `forti profile` or `forti cert`: approvals and\n"
                 "  profile changes are the human's.\n"
                 "- Claude Code: `.claude/settings.json` denies reading those secrets and editing `config.json`.\n"
                 "  Codex: `.codex/config.toml` selects the `{1}` permission profile, which denies the same\n"

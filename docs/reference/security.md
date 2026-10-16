@@ -100,8 +100,9 @@ config key turns that off. For a self-signed or private-CA device, give the prof
 ## Authentication failures are not retried
 
 FortiOS locks an API user out after repeated authentication failures. `forti configure` and
-`forti doctor` make one attempt and stop on HTTP 401/403 with advice: check the key, check that
-this machine is within the API user's trusted hosts, and check its admin profile.
+`forti doctor` make one attempt and stop on HTTP 401/403 with advice. A 401 does not prove the key
+wrong: FortiOS answers the same when this machine is not within the API user's trusted hosts (before
+FortiOS 7.4.1, the admins' trusted hosts too). A 403 usually means the admin profile lacks access.
 
 ## Operating modes
 
@@ -113,7 +114,7 @@ allow, whatever forti's settings are.
 A profile's mode (`read-only`, the default; `guarded`; `autonomous`) is the operator's policy on top
 of that boundary. It is stored in config.json, and the MCP server cannot change it. The modes, the
 safeguards that apply in every mode that writes, and the limits of rollback plans and backups are in
-[Planning and applying changes](/guides/planning-and-applying-changes#operating-modes).
+[Making changes](/guides/planning-and-applying-changes#operating-modes).
 
 :::cards{
   columns="3"
@@ -180,25 +181,29 @@ Scope the account before you choose autonomous mode:
 
 ### What a mode does and does not stop
 
-A mode governs what the **forti-mcp tools** can do: nothing an MCP client sends can change a mode,
-approve a plan, or apply a plan in a read-only profile.
+A mode governs what the **forti-mcp tools** can do: nothing an MCP client sends can change a mode or
+apply a plan in a read-only profile. In guarded mode, forti-mcp records an approval only from your
+answer to the AI client's own question (MCP elicitation), bound to the exact plan; never from tool
+arguments, which the model writes. A missing terminal is never taken as approval either: without one,
+`forti approve` needs `--yes`, and `forti set` stops at the approval.
 
 :::callout[A mode is not a barrier against software running as you]{variant="warning"}
 An agent that can also run shell commands as you (Claude Code's Bash tool, Codex's shell) could run
-`forti plan approve` or `forti configure --mode autonomous`, or edit `config.json` and the approval
+`forti approve --yes` or `forti configure --mode autonomous`, or edit `config.json` and the approval
 files, exactly as you can. forti uses no passphrase or terminal-only approval, by design.
 :::
 
 For guarded mode to mean "a person approved this":
 
-- keep the client's shell permission prompts on for `forti` commands, or deny them outright (for
-  Claude Code, in your settings, as shown below);
-- read the plan (`forti plan show <id>`, which `forti plan approve` prints first) before you approve it.
+- keep the client's shell permission prompts on for `forti` commands, or deny them. The
+  [forti workspace](/guides/ai-agent-integration#the-forti-workspace) denies Claude Code's shell
+  `forti approve`, `forti plan approve` and `forti profile mode`; elsewhere, add the same to your settings:
+- read the change (the client's question, or what `forti approve` shows) before you approve it.
 
 ```json
 {
   "permissions": {
-    "deny": ["Bash(forti plan approve:*)", "Bash(forti configure:*)", "Bash(forti profile:*)"]
+    "deny": ["Bash(forti approve:*)", "Bash(forti plan approve:*)", "Bash(forti profile mode:*)", "Bash(forti configure:*)"]
   }
 }
 ```

@@ -1,52 +1,129 @@
 ---
-title: Planning and applying changes
-description: Stored, digest-bound plans; read-only, guarded and autonomous modes; approving and applying in one step, verification, forti rollback, critical backups and their limits.
+title: Making changes
+description: One command per change (forti set, create, delete) with at most one question; read-only, guarded and autonomous modes; approvals for agents; plans, verification, forti rollback, critical backups and their limits.
 order: 50
 status: published
 tags:
   - guides
 ---
 
-# Planning and applying changes
+# Making changes
 
-Every change goes through two steps. `forti plan` reads the device, validates the change and stores
-it as a plan; it never changes the device. `forti apply <id>` executes a stored plan once. Between
-the two, you (or a person you trust) read exactly what will be sent. At a terminal the two steps can
-be one command (`--apply`), and `forti rollback` undoes the last apply.
+A change is one command:
+
+```sh
+forti set firewall/address/web comment="Web server"
+forti create firewall/address name=web subnet="192.0.2.10 255.255.255.255"
+forti delete firewall/address/web
+forti rollback                                   # undo the last change
+```
+
+forti reads the device, shows exactly what will change, and then does what the profile's
+[mode](#operating-modes) allows: a **read-only** profile changes nothing, a **guarded** one asks once,
+`Apply these changes? [y/N]`, and an **autonomous** one applies straight away. Underneath, every change
+is a stored, digest-bound plan: the before-state is checked again just before writing, each operation
+is verified by re-reading, a rollback plan and an audit record are written, and a critical change is
+preceded by a configuration backup.
 
 :::toc[On this page]{depth="3" theme="compact"}
 :::
 
-## Writing a plan
-
-The convenience forms plan one operation:
+## Making a change
 
 ```text
-forti plan set <resource> [key] attr=value... [--clear attr]
-forti plan create <resource> attr=value... | --object JSON|@file
-forti plan delete <resource> <key>
-forti plan action <monitor/path> [--body JSON|@file]
+forti set <resource> [key] attr=value... [--clear attr]
+forti create <resource> attr=value... | --object JSON|@file
+forti delete <resource> <key>
 ```
 
+The resource is named as for [`forti get`](/guides/discovering-and-reading): the path and key
+(`firewall/address web`), the key in the path (`firewall/address/web`), FortiOS CLI words
+(`firewall address web`) or a last word only one resource has (`address web`). The plan records the
+full name, and the change shown before anything happens names it.
+
 ```sh
-forti plan set firewall/address LAN comment="office LAN" --clear color
-forti plan set system/global hostname=fw-lab                   # a singleton takes no key
-forti plan create firewall/address name=web subnet="192.0.2.10 255.255.255.255"
-forti plan create firewall/address --object '{"name":"web","subnet":"192.0.2.10 255.255.255.255"}'
-forti plan delete firewall/address web
-forti plan action monitor/system/external-resource/dynamic       # --body defaults to {}
+forti set firewall/address LAN comment="office LAN" --clear color
+forti set system global hostname=fw-lab                        # a singleton takes no key
+forti set firewall/policy 12 status=disable
+forti create address name=web subnet="192.0.2.10 255.255.255.255"
+forti create firewall/address --object '{"name":"web","subnet":"192.0.2.10 255.255.255.255"}'
+forti delete firewall/address/old-web
 ```
 
 `attr=value` is JSON when the value parses as JSON (a number, boolean, array, object, `null` or a
 `"quoted"` string), else literal text: `status=disable` and `subnet=192.0.2.0/24` are text,
 `color=3` is a number and `name='"123"'` is the string `123`. `--clear attr` (repeatable) resets an
-attribute to its default. `@file` reads JSON from a file, `@-` from standard input. `plan create`
-takes the new object as `attr=value` pairs, as `--object`, or both (the pairs win). A misspelt
-attribute is refused with a suggestion: `unknown attribute(s): colour (did you mean color?)`.
+attribute to its default. `@file` reads JSON from a file, `@-` from standard input. `create` takes
+the new object as `attr=value` pairs, as `--object`, or both (the pairs win). A misspelt attribute is
+refused with a suggestion: `unknown attribute(s): colour (did you mean color?)`.
 
-Add `--apply` to any of these (or to `--file`) to apply the plan in the same command, as the profile's
-mode allows: autonomous applies it, guarded asks for your approval at a terminal (and without one
-stops at the approval, as `forti apply` does), read-only refuses.
+What you see in guarded mode:
+
+```text
+$ forti set firewall/address/web comment="Web server"
+1 operation on fw01 (fw01.example.net): 1 update; risk low
+1. update firewall/address "web"  [low]
+     comment  "old" → "Web server"
+plan 20261015-142233-a1b2c3
+
+Apply these changes? [y/N] y
+1 change applied and verified.
+1. update firewall/address "web"  verified
+undo      forti rollback 20261015-142233-a1b2c3  (rollback plan 20261015-142240-d4e5f6)
+```
+
+| Mode | What `forti set`, `create` and `delete` do |
+|---|---|
+| `read-only` | show the change, change nothing, and print the command that allows changes (exit 7) |
+| `guarded`, at a terminal | show the change and ask once; yes approves this exact plan and applies it |
+| `guarded`, no terminal | show the change and stop: `approval_required` (exit 7) with `forti approve <id>`. A missing terminal is never taken as a yes |
+| `autonomous` | show the change and apply it |
+
+`--dry-run` shows the plan and changes nothing; `--verbose` adds the request lines and the plan
+digest; `--json` prints one envelope with the apply result and the plan (no questions: a guarded
+plan stops at the approval).
+
+## Changes made by an agent
+
+An agent (Claude Code, Codex) changes the device through forti-mcp, under the same modes. In
+autonomous mode it applies what it plans. In guarded mode it needs your approval of each plan, once:
+
+- **In the chat**, when the AI client supports MCP elicitation: the client shows the change and asks
+  you; your yes approves that exact plan and the agent applies it.
+- **In a terminal**, otherwise. The agent relays `forti approve <id>`; run it, check the change, and
+  answer. Or keep `forti approve --watch` open next to the agent: it shows each plan the agent makes
+  and asks.
+
+```sh
+forti approve                # the plan waiting for the profile (when only one is): shown, then asked
+forti approve 9f3a1c         # a plan by a unique prefix of its id or of its last part
+forti approve --watch        # ask about each plan as it arrives, until Ctrl-C (or q)
+```
+
+`forti approve` only approves: the agent then applies. To approve and apply a plan yourself, use
+`forti apply`. Without a terminal, `forti approve` approves only with `--yes`, your decision made in
+advance. The workspace that `forti mcp install` sets up denies agents' shell commands
+`forti approve`, `forti plan approve` and `forti profile mode`, so an agent in guarded mode cannot
+approve its own plans by accident (see
+[What a mode does and does not stop](/reference/security#what-a-mode-does-and-does-not-stop)).
+
+## Plans
+
+`forti plan` writes the same plans without applying them: to look at a change before deciding, to
+save it for later, or to make several operations one change.
+
+```text
+forti plan set|create|delete <resource> ...      as forti set, create and delete
+forti plan action <monitor/path> [--body JSON|@file]
+forti plan --file changes.json|-
+```
+
+```sh
+forti plan set firewall/address LAN comment="office LAN"
+forti plan action monitor/system/external-resource/dynamic       # --body defaults to {}
+```
+
+Add `--apply` to any of these to make the change in the same command, exactly as `forti set` does.
 
 ### Plan files
 
@@ -111,6 +188,8 @@ resulting list.
 
 ### The plan
 
+`forti plan` and `forti plan show` print the whole plan, request lines included:
+
 ```text
 Plan 20261015-142233-a1b2c3  risk low
 Device fw01  fw01.example.net:443  serial FGT60F...  v7.4.8
@@ -122,8 +201,8 @@ Device fw01  fw01.example.net:443  serial FGT60F...  v7.4.8
      PUT cmdb/firewall/address/LAN {"color":0,"comment":"office LAN"}
 
 mode   guarded
-next   forti apply 20261015-142233-a1b2c3  (shows the plan and asks for your approval)
-       without a terminal: forti plan approve 20261015-142233-a1b2c3, then the same apply
+next   forti apply 20261015-142233-a1b2c3  (asks once, then applies)
+       or let the agent that made it apply it: forti approve 20261015-142233-a1b2c3
 ```
 
 `--verbose` adds the plan's digest; `--json` always carries it. For a read-only profile, the last line
@@ -154,10 +233,10 @@ Wherever a command takes a plan id, it also takes:
 |---|---|
 | `20261015-142233-a1b2c3` | that plan |
 | `a1b2c3`, `a1b`, `20261015-1422` | the one plan whose id, or whose last part, starts with it. Several matches are listed, and nothing runs |
-| `latest` | the newest plan of the profile (rollback plans aside) |
-| nothing, at a terminal | the newest plan of the profile waiting to be applied. forti names it and shows it before acting |
+| `latest`, or nothing | `apply` and `approve`: the plan waiting to be applied for the profile, made in the last day, when it is the only one. With several, forti lists them and (at a terminal) asks which; it never guesses. `plan show latest` is the newest plan |
 
-Without a terminal (scripts, agents' shell tools), a plan must be named: the id, a prefix or `latest`.
+Without a terminal (scripts, agents' shell tools), `apply` and `approve` need the plan named: an
+agent acts only on the plan it made, never on another agent's.
 
 | `plan list` state | Meaning |
 |---|---|
@@ -180,30 +259,19 @@ cannot be changed through forti-mcp.
 | Mode | Plan | Apply |
 |---|---|---|
 | `read-only` (default) | yes: preview and validation are reads | refused: `policy_denied`. Allow changes with `forti profile mode NAME guarded` |
-| `guarded` | yes | only after a person approves that exact plan: inline at a terminal, or `forti plan approve <id>` |
+| `guarded` | yes | only after a person approves that exact plan: the one question at a terminal, `forti approve <id>`, or in the agent's chat |
 | `autonomous` | yes | without interactive approval; every safeguard below still applies |
 
-### Approving a plan (guarded)
+### Approvals (guarded)
 
-At a terminal, `forti apply` does it in one step: it shows the plan and asks
-`Approve and apply plan <id>? [y/N]`. A yes records the approval (exactly as `forti plan approve`
-does) and applies.
-
-```sh
-forti apply                  # the newest plan waiting to be applied: shown, approved, applied
-forti plan approve <id>      # approve only; at a terminal it then asks "Apply now? [Y/n]"
-```
-
-`approve` prints the plan and asks `[y/N]`; `--yes`, `--json`, or standard output that is not a
-terminal skip the question (and the offer to apply). The approval is written to
-`~/.forti/state/approvals/<id>.json`: it names the plan's digest, is recorded as `cli:$USER`, expires
+An approval is written to `~/.forti/state/approvals/<id>.json`: it names the plan's digest, records who
+approved (`cli:$USER`, or `mcp:<client>:elicitation` for a yes given in an agent's chat), expires
 after **24 hours**, and is used up by the apply it allows. Approving a plan of a read-only profile, or
 one already applied, is refused (`policy_denied`); for an autonomous profile nothing is written and
-forti says no approval is needed. Without a terminal, `forti apply` never approves: it stops with
-`approval_required` and the `forti plan approve <id>` command.
+forti says no approval is needed.
 
-Approval exists only in the CLI. forti-mcp never writes approvals: in guarded mode its apply tool
-answers `approval_required` with the `forti plan approve <id>` command for the person to run.
+forti-mcp records an approval only from your answer to the client's question (MCP elicitation), never
+from anything the agent sends.
 
 :::callout[An approval records intent]{variant="warning"}
 An approval records operator intent; it is not a cryptographic control. An agent that can run shell
@@ -214,11 +282,11 @@ commands as you can approve a plan too. See
 ## Applying a plan
 
 ```sh
-forti apply <id>
+forti apply <id>             # a saved plan: shown, then applied as the mode allows (guarded: one question)
 ```
 
 ```text
-Applied plan 20261015-142233-a1b2c3: 1 change applied and verified.
+1 change applied and verified.
 1. update firewall/address "LAN"  verified
 undo      forti rollback 20261015-142233-a1b2c3  (rollback plan 20261015-142240-d4e5f6)
 ```
@@ -280,9 +348,8 @@ forti rollback               # undo the profile's last apply
 forti rollback <plan id>     # undo that plan (or apply that rollback plan)
 ```
 
-It first says what it undoes (`Rolling back plan <id>: ...`), then applies under the same mode rules
-as `forti apply`: a guarded profile needs the approval (asked inline at a terminal), a read-only one
-refuses. The rollback is checked for drift like any plan, and it writes a rollback plan of its own,
+It shows what it undoes (`Undoes plan <id>`, and the operations), then applies under the same mode
+rules as `forti apply`: a guarded profile asks once at a terminal, a read-only one refuses. The rollback is checked for drift like any plan, and it writes a rollback plan of its own,
 so a second `forti rollback` re-does the change. `forti plan show <rollback id>` reviews it first;
 `forti apply <rollback id>` works too.
 
@@ -334,8 +401,10 @@ run is decided by the mode and the FortiOS account.
 
 ## Audit log
 
+`forti history` shows what was changed, when, on which device, and who approved it.
+
 Every apply attempt, refused or not, and every approval is appended to `~/.forti/state/audit.jsonl` (0600),
-one JSON object per line: the event, plan id and digest, profile, host, serial, mode, risk, each
-operation's resource, key, status and the *names* of the attributes it changed, the rollback plan, the
-backup status and the outcome. Values are not recorded. If the record cannot be written after the
+one JSON object per line: the event, plan id and digest, a summary, profile, host, serial, mode, risk,
+each operation's resource, key, status and the *names* of the attributes it changed, who acted
+(`cli:$USER`, `mcp:<client>`) and who approved, the rollback plan, the backup status and the outcome. Values are not recorded. If the record cannot be written after the
 changes were made, the result says so (`audit_error`) rather than dropping it.

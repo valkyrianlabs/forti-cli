@@ -24,7 +24,8 @@ cd ~/.forti && claude           # or: codex
 ```
 
 :::callout[What an agent cannot do through forti-mcp]{variant="info"}
-forti-mcp can never change a mode, approve a plan or reveal a device secret.
+forti-mcp can never change a mode or reveal a device secret. In guarded mode it applies a change only
+after you approve it, in the chat or in a terminal.
 :::
 
 :::toc[On this page]{depth="2" theme="compact"}
@@ -135,7 +136,8 @@ What they cover:
 The rules stop accidents, not a determined process. A script or program the agent runs that opens a
 file itself is not checked against Claude Code's deny rules, and commands Codex runs outside its
 sandbox (an escalation you approve, or full access) are not bound by the permission profile. Nor do
-the rules stop an agent with a shell from running `forti plan approve` or `forti configure`. The
+the rules stop a determined agent with a shell from approving its own plans (the workspace denies
+Claude Code's `forti approve` and `forti profile mode` commands, by prefix) or running `forti configure`. The
 generated `AGENTS.md` tells agents to stay away from these files and commands; the FortiOS account's
 privileges remain the boundary that holds in every case. See
 [What a mode does and does not stop](/reference/security#what-a-mode-does-and-does-not-stop).
@@ -179,6 +181,37 @@ Project or local scope with your home directory itself as the project would give
 to an agent started anywhere under your home directory. forti warns and asks "Are you sure?"
 (default no); declining changes nothing. Without a terminal, it refuses (`policy_denied`, exit 7)
 unless you pass `--force`. The forti workspace is the recommended alternative.
+
+## Changes through an agent
+
+Ask for the change; the agent makes it with one tool call (`forti_apply` with the operations), which
+plans, validates and applies it as the profile's
+[mode](/guides/planning-and-applying-changes#operating-modes) allows:
+
+| Mode | What you see |
+|---|---|
+| `read-only` | the proposed change, and the command that would allow it; nothing is applied |
+| `guarded` | one approval: the client shows the change (device, each attribute before and after, risk) and asks you. Accept with *Apply these changes* ticked, and it is applied and verified |
+| `autonomous` | the result: what changed, verified, with its rollback plan |
+
+The question in guarded mode is an MCP elicitation, asked by the client itself: the model cannot
+answer it. forti-mcp records the approval as `mcp:<client>:elicitation`, bound to the exact plan you
+were shown; declining, dismissing it or leaving it unanswered applies nothing.
+
+When the client cannot ask (or you prefer a terminal), the agent relays a command instead:
+
+```sh
+forti approve 20261016-150540-b75ef1   # shows the change and asks; then tell the agent to go ahead
+forti approve --watch                   # or keep this open: it asks about each plan as the agent makes it
+```
+
+:::details[Evidence: which clients ask in the chat]{theme="muted"}
+Checked 2026-10-16 with a stand-in MCP server that recorded what each client declared. Claude Code
+2.1.301 declares form elicitation and uses MCP 2026-07-28, where forti-mcp asks through a multi
+round-trip request. Codex 0.163.0 declares form elicitation over the 2025-06-18 handshake, where
+forti-mcp sends `elicitation/create`. How each client shows the question, and whether a setting or
+mode answers it automatically, is up to the client: check that yours shows it to you.
+:::
 
 ## Scopes and options
 

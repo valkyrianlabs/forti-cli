@@ -31,10 +31,14 @@ command's options, and `man forti` has a summary. A mistyped command gets sugges
 | [`devices`](#devices) | Read | list the configured profiles | never |
 | [`discover`](#discover) | Read | search the catalog, or show a resource's attributes | only with `--live` |
 | [`get`](#get) | Read | read configuration or monitor data | yes |
-| [`plan`](#plan) | Change | write, show, list and approve stored plans | when writing a plan (reads only) |
-| [`apply`](#apply) | Change | execute a stored plan once | yes |
-| [`rollback`](#rollback) | Change | undo the last applied plan with its rollback plan | yes |
+| [`set`, `create`, `delete`](#set-create-delete) | Change | make a change in one command, as the profile's mode allows | yes |
+| [`rollback`](#rollback) | Change | undo the last change (or a named one) | yes |
+| [`approve`](#approve) | Change | approve a plan an agent made (guarded mode), one at a time or `--watch` | never |
+| [`plan`](#plan) | Change | preview, save, show and list plans | when writing a plan (reads only) |
+| [`apply`](#apply) | Change | apply a saved plan | yes |
+| [`history`](#history) | Change | what was applied: when, on which profile, approved by whom, what changed | never |
 | [`mcp`](#mcp) | Integrations | register forti-mcp with AI clients (recommended: the `~/.forti` workspace); status, repair or uninstall the registrations | never |
+| [`completion`](#completion) | Integrations | print the bash, zsh or fish completion script | never |
 
 ## Global options
 
@@ -218,41 +222,26 @@ error; `--all` reads them all. See
 
 ## Change
 
-### plan
+### set, create, delete
 
 ```text
-forti plan --file changes.json|- [--apply]
-forti plan set <resource> [key] attr=value... [--clear attr] [--apply]
-forti plan create <resource> attr=value... | --object JSON|@file [--apply]
-forti plan delete <resource> <key> [--apply]
-forti plan action <monitor/path> [--body JSON|@file] [--apply]
-forti plan show [id]
-forti plan list
-forti plan approve [id] [--yes]
+forti set <resource> [key] attr=value... [--clear attr] [--dry-run] [--verbose]
+forti create <resource> attr=value... | --object JSON|@file [--dry-run] [--verbose]
+forti delete <resource> <key> [--dry-run] [--verbose]
 ```
 
-`-f` is short for `--file`, `-y` for `--yes`. Planning reads the device and never changes it.
-`approve` exists only in the CLI, for guarded profiles; at a terminal it then asks `Apply now? [Y/n]`.
-`--apply` applies the new plan in the same command, as the mode allows. `--verbose` adds the plan
-digest to the text output. A plan id can be shortened to a unique prefix (of the id or of its last
-part) or `latest`; at a terminal, `show` and `approve` without an id take the newest plan waiting to be
-applied. See [Planning and applying changes](/guides/planning-and-applying-changes).
+One command per change. The resource is named as for `get` (`firewall/address web`,
+`firewall/address/web`, `firewall address web`, `address web`). forti plans the change, shows it,
+and then:
 
-### apply
-
-```text
-forti apply [plan id]
-```
-
-Executes a stored plan once, under the profile's mode. At a terminal, without an id, it takes the
-newest plan waiting to be applied, shows it and asks first. See
-[Applying a plan](/guides/planning-and-applying-changes#applying-a-plan).
-
-| Profile mode | `forti apply` |
+| Profile mode | `set`, `create`, `delete` |
 |---|---|
-| `read-only` | refused (`policy_denied`); allow changes with `forti profile mode NAME guarded` |
-| `guarded` | at a terminal, shows the plan and asks for the approval; otherwise needs `forti plan approve <id>` first |
-| `autonomous` | runs without approval |
+| `read-only` | change nothing, and print the command that allows changes (exit 7) |
+| `guarded` | at a terminal, ask once: `Apply these changes? [y/N]`; without one, stop at the approval (exit 7) with `forti approve <id>` |
+| `autonomous` | apply without asking |
+
+`--dry-run` only plans; `--verbose` adds the request lines and the digest; `--json` prints the apply
+result with the plan (and never asks). See [Making changes](/guides/planning-and-applying-changes).
 
 ### rollback
 
@@ -260,9 +249,78 @@ newest plan waiting to be applied, shows it and asks first. See
 forti rollback [plan id]
 ```
 
-Applies the rollback plan of the profile's last apply, or of the named plan (or the named rollback
-plan), after saying what it undoes. The same mode rules as `apply`, including the inline approval at
-a terminal. See [Rollback plans](/guides/planning-and-applying-changes#rollback-plans).
+Applies the rollback plan of the profile's last change, or of the named plan (or the named rollback
+plan), showing what it undoes. The same mode rules as `set` (guarded: one question). See
+[Rollback plans](/guides/planning-and-applying-changes#rollback-plans).
+
+### approve
+
+```text
+forti approve [id] [--yes] [--verbose]
+forti approve --watch [-p PROFILE]
+```
+
+Approves a plan (guarded mode) so the agent or script that made it can apply it. At a terminal it
+shows the change and asks; without an id it takes the plan waiting for the profile when only one is.
+Without a terminal only `--yes` approves. `--watch` asks about each plan as agents make them (and
+those made in the last hour) until Ctrl-C or `q`. `forti plan approve` is the same command. See
+[Changes made by an agent](/guides/planning-and-applying-changes#changes-made-by-an-agent).
+
+### plan
+
+```text
+forti plan set|create|delete <resource> ... [--apply]
+forti plan action <monitor/path> [--body JSON|@file] [--apply]
+forti plan --file changes.json|- [--apply]
+forti plan show [id]
+forti plan list
+forti plan approve [id] [--yes]
+```
+
+`-f` is short for `--file`, `-y` for `--yes`. Planning reads the device and never changes it; the
+plan is saved for `forti apply` (or `forti approve`). `--apply` makes the change in the same command,
+exactly as `set` does. `--verbose` adds the plan digest to the text output. A plan id can be
+shortened to a unique prefix (of the id or of its last part); `show latest` is the newest plan. See
+[Plans](/guides/planning-and-applying-changes#plans).
+
+### apply
+
+```text
+forti apply [plan id]
+```
+
+Shows a saved plan and applies it once, as the profile's mode allows (guarded: one question at a
+terminal, none for a plan already approved). Without an id, at a terminal: the plan waiting for the
+profile; when several are, you pick one. Without a terminal the plan must be named. See
+[Applying a plan](/guides/planning-and-applying-changes#applying-a-plan).
+
+### history
+
+```text
+forti history [-p NAME] [-n N] [--all] [--verbose]
+```
+
+Reads the audit log (`~/.forti/state/audit.jsonl`) and shows the applies in it, newest last: the
+local time, the profile, the result (`applied`, `partial`, `failed`, `unknown`, `lost management`,
+`refused: ...`), the plan (the last part of its id, which `forti plan show` accepts), the approval
+(`approved by cli:alice`, or `autonomous` with the agent that applied it) and what changed.
+Rollbacks say which plan they undo. It needs no configuration and never contacts a device.
+
+| Option | Meaning |
+|---|---|
+| `-p, --profile NAME` | only this profile's entries (default: every profile) |
+| `-n, --limit N` | the last N entries (default 20; `0`: all) |
+| `--all` | also the attempts refused before anything changed: a read-only profile, a missing approval, a stale or already applied plan. They are hidden by default, and standard error says how many |
+| `--verbose` | every operation with its result, the approval, the error, the rollback plan and the `forti rollback` command that undoes the change; approve events too |
+
+`--json` prints the audit events as recorded, with `meta.hidden` (refusals left out), `meta.older`
+(entries beyond the limit) and `meta.malformed` (lines that could not be read, which are skipped).
+Text output escapes terminal control characters in everything taken from the log.
+
+```sh
+forti history
+forti history -p fw01 --verbose -n 5
+```
 
 ## Integrations
 
@@ -288,6 +346,48 @@ terminal. Without a terminal, or with `--yes`, `--client` and `--scope` are requ
 `status` includes the workspace and the health of its files. `uninstall --scope workspace` removes
 the registrations and the files forti wrote in the workspace, never `config.json`, credentials,
 certificates or state. `-y` is short for `--yes`. See [AI agent integration](/guides/ai-agent-integration).
+
+### completion
+
+```text
+forti completion bash|zsh|fish
+```
+
+Prints the shell completion script: commands, subcommands, options, profile names after `-p`,
+resource paths (one segment at a time: `firewall/` then `firewall/address`), modes after
+`profile mode`, and the ids of plans waiting to be applied after `apply`, `rollback` and
+`plan show|approve`. On each Tab the script runs `forti`, which reads only the profile names in
+`config.json` and the plans directory: never a device or a secret.
+
+The Homebrew formula and the Debian package install the scripts; nothing else is needed (bash needs
+the bash-completion package, zsh `compinit`). For a source build or a copy in your home directory:
+
+:::tabs{default="bash"}
+
+:::tab[bash]{value="bash"}
+```bash
+echo 'source <(forti completion bash)' >> ~/.bashrc
+```
+:::
+
+:::tab[zsh]{value="zsh"}
+```bash
+# in ~/.zshrc, after compinit
+source <(forti completion zsh)
+```
+:::
+
+:::tab[fish]{value="fish"}
+```bash
+forti completion fish > ~/.config/fish/completions/forti.fish
+```
+:::
+
+:::
+
+`meson install` puts them in `share/bash-completion/completions/forti`,
+`share/zsh/site-functions/_forti` and `share/fish/vendor_completions.d/forti.fish` under the prefix
+(`-Dcompletions=disabled` leaves them out).
 
 ## Environment
 

@@ -378,7 +378,7 @@ namespace forti::engine {
                                                 profile.name));
                     break;
                 case Mode::guarded:
-                    notes.push_back(std::format("guarded mode: a human must run `forti plan approve {}` before apply", id));
+                    notes.push_back(std::format("guarded mode: a human must run `forti approve {}` before apply", id));
                     break;
                 case Mode::autonomous:
                     notes.push_back("autonomous mode: apply executes this plan without a human approval");
@@ -462,7 +462,7 @@ namespace forti::engine {
                                                     "connectivity after each critical operation. {}", id,
                                                     recovery_limitation));
             data["apply"] = std::format("forti apply {}", id);
-            if (profile.mode == Mode::guarded) data["approve"] = std::format("forti plan approve {}", id);
+            if (profile.mode == Mode::guarded) data["approve"] = std::format("forti approve {}", id);
             return ok(std::move(data), {{"profile", profile.name}, {"vdom", vdom}});
         } catch (...) {
             throw redacted_failure(translate(std::current_exception()));
@@ -699,8 +699,10 @@ namespace forti::engine {
             if (id.empty()) throw Failure(Code::usage, "apply: \"plan_id\" is required");
             detail::validate_plan_id(id);
             event["plan_id"] = id;
+            if (!options_.actor.empty()) event["actor"] = options_.actor;
 
             json plan = detail::load_plan(paths, id);
+            event["summary"] = detail::summarize(plan);
             const json& device = plan["device"];
             Risk risk = detail::plan_risk(plan);
             event["digest"] = plan["digest"];
@@ -723,7 +725,13 @@ namespace forti::engine {
                               {{"plan_id", id}, {"reason", "read_only"}, {"profile", profile.name}, {"mode", "read-only"},
                                {"mode_command", std::format("forti profile mode {} guarded", profile.name)}});
             auto now = detail::Clock::now();
-            if (profile.mode == Mode::guarded) detail::verify_approval(paths, plan, now);
+            if (profile.mode == Mode::guarded) {
+                detail::verify_approval(paths, plan, now);
+                if (auto approval = detail::load_approval(paths, id); approval && approval->is_object()) {
+                    event["approved_by"] = approval->value("approved_by", "");
+                    event["approved_at"] = approval->value("approved_at", "");
+                }
+            }
             if (profile.host != device.value("host", "") || profile.port != device.value("port", 0u))
                 throw Failure(Code::stale_plan,
                               std::format("profile {} now points at {}:{}, not the planned {}:{}", profile.name, profile.host,

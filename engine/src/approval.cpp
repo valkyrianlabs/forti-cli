@@ -36,9 +36,10 @@ namespace forti::engine {
     }  // namespace
 
     json approve_plan(Engine& engine, std::string_view plan_id, std::string_view approved_by,
-                      std::chrono::seconds lifetime) {
+                      std::chrono::seconds lifetime, std::string_view shown_digest) {
         const Paths& paths = engine.options().paths;
         json event = {{"event", "approve"}, {"plan_id", plan_id}, {"approved_by", approved_by}};
+        if (!engine.options().actor.empty()) event["actor"] = engine.options().actor;
         try {
             detail::validate_plan_id(plan_id);
             if (approved_by.empty() || approved_by.size() > 128)
@@ -47,6 +48,10 @@ namespace forti::engine {
                 throw Failure(Code::usage, "approve: the lifetime must be between 1 second and 7 days");
             json plan = detail::load_plan(paths, plan_id);
             event["digest"] = plan["digest"];
+            if (!shown_digest.empty() && plan["digest"] != shown_digest)
+                throw Failure(Code::stale_plan,
+                              std::format("plan {} changed after it was shown; nothing was approved. Show it again", plan_id),
+                              {{"plan_id", plan_id}, {"reason", "plan_changed"}});
             if (detail::plan_applied(paths, plan_id))
                 throw Failure(Code::policy_denied, std::format("plan {} was already applied; plan again", plan_id),
                               {{"plan_id", plan_id}, {"reason", "already_applied"}});

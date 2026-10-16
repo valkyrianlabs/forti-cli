@@ -279,10 +279,15 @@ namespace forti::cli {
                 details["hint"] = nothing + advice.hint + " (or save without checking: --skip-check)";
                 details["transport_error"] = failure.what();
             } else if (failure.code() == Code::auth) {
-                message = std::format("{} rejected the API key (HTTP {})", profile.host, details.value("http_status", 401));
-                details["hint"] = nothing + "forti did not retry: FortiOS locks an API user out after repeated failures. "
-                                            "Check the key, that this machine is within the API user's trusted hosts, "
-                                            "and the user's admin profile";
+                int status = details.value("http_status", 401);
+                message = status == 403 ? std::format("{} refused the request (HTTP 403)", profile.host)
+                                        : std::format("{} did not accept the API key (HTTP {})", profile.host, status);
+                details["hint"] = nothing + (status == 403
+                        ? std::string("Usually the API user's admin profile: give its accprofile read access (sysgrp "
+                                      "read at least). Also check that its trusted hosts include this machine")
+                        : std::string("The key may be right: FortiOS also answers 401 when this machine is not in the API "
+                                      "user's trusted hosts (before 7.4.1, the admins' trusted hosts too). Check them, then "
+                                      "the key. forti did not retry: FortiOS locks the user out after repeated failures"));
             }
             return {failure.code(), message, details};
         }
@@ -635,16 +640,19 @@ namespace forti::cli {
             auto& store = context.engine.secrets();
             bool have = p.api_key.source == SecretRef::Source::env || p.api_key.source == SecretRef::Source::command ||
                         (draft.existed && p.api_key.source == SecretRef::Source::store && store.get(p.api_key_account()));
-            if (!have && offer_steps && !tty.confirm("\nDo you have a REST API key for this FortiGate?", true))
-                tty.say(std::format("\n{}\n", api_user_steps(draft.source_ip)));
+            // No separate "do you have a key?" question: Enter on an empty prompt asks for the steps.
             tty.say(std::format("\nThe API key is typed hidden and kept in the {}. To read it from elsewhere instead,\n"
-                                "type env:VARIABLE or cmd:COMMAND (a password manager, for example).\n",
-                                describe_source({SecretRef::Source::store, {}, {}, {}}, store.kind())));
+                                "type env:VARIABLE or cmd:COMMAND (a password manager, for example).{}\n",
+                                describe_source({SecretRef::Source::store, {}, {}, {}}, store.kind()),
+                                !have && offer_steps ? "\nNo key yet? Press Enter for the FortiGate commands that create one." : ""));
             std::string label = have ? std::format("API key (Enter keeps the {})", describe_source(p.api_key, store.kind())) : "API key";
+            bool shown = !offer_steps;
             for (;;) {
                 std::string key = tty.ask(label, "", true);
                 if (key.empty()) {
                     if (have) return;
+                    if (!shown) tty.say(std::format("\n{}\n", api_user_steps(draft.source_ip)));
+                    shown = true;
                     continue;
                 }
                 try {
@@ -1103,8 +1111,24 @@ namespace forti::cli {
                     secrets.bind(profile.secret_binding());
                 }
             }
+            // The device seen by this check; a profile saved unchecked keeps no serial.
+            profile.serial = capabilities.is_object() ? capabilities["device"].value("serial", "") : "";
             if (capabilities.is_object()) {
                 result["device"] = capabilities.value("device", json::object());
+                // Another profile for the same FortiGate works, but is usually a mistake (or a stale
+                // profile): say so before it is named.
+                std::vector<std::string> same;
+                for (const auto& [other_name, other]: set.profiles)
+                    if (other_name != profile.name && ((!profile.serial.empty() && other.serial == profile.serial) ||
+                                                       (other.host == profile.host && other.port == profile.port)))
+                        same.push_back(other_name);
+                if (!same.empty()) {
+                    result["same_device_as"] = same;
+                    if (tty)
+                        tty->say(std::format("\nNote: profile {} already points at this FortiGate{}. To change that profile "
+                                             "instead: forti configure -p {}\n", same.front(),
+                                             profile.serial.empty() ? "" : " (serial " + profile.serial + ")", same.front()));
+                }
                 if (!capabilities.value("schema_matches_device", true))
                     result["schema_note"] = std::format(
                             "the device runs {}; forti's models are generated from FortiOS {}. Reads work; some "
@@ -1688,7 +1712,7 @@ namespace forti::cli {
         std::string_view mode_meaning(Mode mode) {
             switch (mode) {
                 case Mode::read_only: return "read-only: reads only, every change is refused";
-                case Mode::guarded: return "guarded: changes apply after a human approves the plan (`forti plan approve`)";
+                case Mode::guarded: return "guarded: changes apply after a human approves the plan (`forti approve`)";
                 case Mode::autonomous: return "autonomous: changes apply without interactive approval; safeguards still apply";
             }
             return "";
@@ -1918,7 +1942,7 @@ namespace forti::cli {
              "\n"
              "modes:\n"
              "  read-only    reads only; plans can be previewed, every apply is refused (default)\n"
-             "  guarded      apply needs a human approval of the plan: `forti plan approve <id>`\n"
+             "  guarded      apply needs a human approval of the plan: `forti approve <id>`\n"
              "  autonomous   apply runs without interactive approval; validation, drift checks,\n"
              "               verification, audit and rollback plans still apply. The FortiOS account's\n"
              "               admin profile is the real limit on what an agent can change.\n",
