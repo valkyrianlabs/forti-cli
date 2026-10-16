@@ -176,7 +176,8 @@ TEST_F(PlanCli, RollbackUndoesTheLastApply) {
     EXPECT_NE(out.str().find("1 change applied and verified."), std::string::npos) << out.str();
     ASSERT_EQ(forti({"--json", "plan", "list"}), 0);
     std::size_t applied_rollbacks = 0;
-    for (const auto& plan: json_out()["data"])
+    json plans = json_out()["data"];   // json_out() returns a temporary: keep it alive for the loop
+    for (const auto& plan: plans)
         applied_rollbacks += plan["kind"] == "rollback" && plan["state"] == "applied";
     EXPECT_EQ(applied_rollbacks, 1u);
 
