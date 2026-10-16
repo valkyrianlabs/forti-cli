@@ -61,6 +61,8 @@ namespace forti::engine {
         explicit Engine(Options options = {});
 
         [[nodiscard]] const Options& options() const { return options_; }
+        // forti-mcp learns its client's name only from the first request.
+        void set_actor(std::string actor) { options_.actor = std::move(actor); }
         [[nodiscard]] SecretStore& secrets() { return *secrets_; }
         [[nodiscard]] const ProfileSet& profiles();   // loaded on first use
         [[nodiscard]] const Profile& profile(std::string_view name);
