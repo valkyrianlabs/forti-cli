@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Embeds skill/forti/SKILL.md in a C++ header, so `forti install mcp --skill` needs no data files.
+"""Embeds skill/forti/SKILL.md in a C++ header, so `forti mcp install --skill` needs no data files.
 
 Also checks the frontmatter (name, description length) so an invalid skill fails the build instead of
 being silently ignored by Claude Code or Codex.

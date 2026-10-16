@@ -33,8 +33,7 @@ command's options, and `man forti` has a summary. A mistyped command gets sugges
 | [`get`](#get) | Read | read configuration or monitor data | yes |
 | [`plan`](#plan) | Change | write, show, list and approve stored plans | when writing a plan (reads only) |
 | [`apply`](#apply) | Change | execute a stored plan once | yes |
-| [`install mcp`](#install-mcp) | Integrations | register forti-mcp with AI clients (recommended: the `~/.forti` workspace) | never |
-| [`mcp`](#mcp) | Integrations | status, repair or uninstall the registrations | never |
+| [`mcp`](#mcp) | Integrations | register forti-mcp with AI clients (recommended: the `~/.forti` workspace); status, repair or uninstall the registrations | never |
 
 ## Global options
 
@@ -246,27 +245,24 @@ Executes a stored plan once, under the profile's mode. See
 
 ## Integrations
 
-### install mcp
+### mcp
 
 ```text
-forti install mcp [--client claude|codex|all] [--scope workspace|project|user|local] [--project-dir DIR]
-                  [--profile NAME] [--skill|--no-skill] [--trust-codex-workspace]
-                  [--yes] [--dry-run] [--force]
+forti mcp install   [--client claude|codex|all] [--scope workspace|project|user|local] [--project-dir DIR]
+                    [--profile NAME] [--skill|--no-skill] [--trust-codex-workspace]
+                    [--yes] [--dry-run] [--force]
+forti mcp status
+forti mcp repair    [--client ...] [--scope ...] [--project-dir DIR] [--yes] [--dry-run]
+forti mcp uninstall [--client ...] [--scope ...] [--project-dir DIR] [--keep-skill] [--yes] [--dry-run] [--force]
 ```
 
+`forti install mcp` is the same as `forti mcp install`. In a terminal, `install` asks for what is
+missing, shows every change, and applies it on Enter (`repair` too; `uninstall` needs `y`).
 `workspace` (the recommended, first interactive choice) registers forti-mcp in the forti home, so only
 agents started there (`cd ~/.forti && claude`, or `codex`) get the tools, with the skill, `AGENTS.md`
 and deny rules for the credentials kept there. `--trust-codex-workspace` marks the home trusted in the
 global Codex config. `--force` also allows project or local scope in your home directory without a
 terminal. Without a terminal, or with `--yes`, `--client` and `--scope` are required.
-
-### mcp
-
-```text
-forti mcp status
-forti mcp repair    [--client ...] [--scope ...] [--project-dir DIR] [--yes] [--dry-run]
-forti mcp uninstall [--client ...] [--scope ...] [--project-dir DIR] [--keep-skill] [--yes] [--dry-run] [--force]
-```
 
 `status` includes the workspace and the health of its files. `uninstall --scope workspace` removes
 the registrations and the files forti wrote in the workspace, never `config.json`, credentials,

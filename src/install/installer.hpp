@@ -1,5 +1,5 @@
 //
-// What `forti install mcp` and `forti mcp status|repair|uninstall` decide, independent of the
+// What `forti mcp install|status|repair|uninstall` decide, independent of the
 // terminal: locate forti-mcp, compare each (client, scope) target with what it should hold, and
 // produce a plan of Actions that the CLI shows, confirms, and then executes and validates.
 //

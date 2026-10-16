@@ -9,7 +9,8 @@ tags:
 
 # AI agent integration
 
-`forti install mcp` registers the installed `forti-mcp` stdio server with AI clients. The clients
+`forti mcp install` registers the installed `forti-mcp` stdio server with AI clients
+(`forti install mcp` is the same command). The clients
 start `forti-mcp` themselves when they need it and stop it when they exit. There is no daemon.
 forti-mcp offers four tools (`forti_discover`, `forti_read`, `forti_plan`, `forti_apply`) over the same
 engine, profiles and [operating modes](/guides/planning-and-applying-changes#operating-modes) as `forti`.
@@ -18,7 +19,7 @@ The recommended setup is the **forti workspace**: the tools are registered in th
 `~/.forti`, and an agent gets them only when you start it there.
 
 ```sh
-forti install mcp               # pick "~/.forti workspace (recommended)"
+forti mcp install               # pick "~/.forti workspace (recommended)"
 cd ~/.forti && claude           # or: codex
 ```
 
@@ -38,14 +39,15 @@ itself.
 
 ### Set it up
 
-In a terminal, `forti install mcp` asks which clients to set up, then "Where should agents get the
+In a terminal, `forti mcp install` asks which clients to set up, then "Where should agents get the
 forti tools?". The workspace is the first choice and preselected. It then shows every file it will
-write and changes nothing until you confirm.
+write and asks "Apply these changes?": Enter applies them, `n` changes nothing. With the defaults,
+the whole setup is Enter at every prompt.
 
 Without prompts (scripts, `--yes`, `--json`), name the clients and the scope:
 
 ```sh
-forti install mcp --client all --scope workspace --trust-codex-workspace --yes
+forti mcp install --client all --scope workspace --trust-codex-workspace --yes
 ```
 
 Then start your agent in the workspace:
@@ -77,7 +79,7 @@ The same directory holds `config.json`, `credentials/`, `certs/` and `state/`
 ([the forti home](/reference/configuration-files#the-forti-home)). A workspace install never touches them.
 
 The generated files are created and updated idempotently. A file you edited is never overwritten:
-forti reports it as a conflict and leaves it alone (delete it and run `forti install mcp` again to get
+forti reports it as a conflict and leaves it alone (delete it and run `forti mcp install` again to get
 the generated one). Your own entries in `.claude/settings.json` and `.codex/config.toml` are kept;
 forti adds only what is missing.
 
@@ -152,7 +154,8 @@ projects marked trusted in its global configuration. Trusting the forti home is 
 global file, so forti asks first:
 
 - **Interactively**, when Codex has no entry for the home at all, forti shows the exact entry and asks
-  "Trust ~/.forti in Codex?" (default no).
+  "Trust ~/.forti in Codex?". Enter means yes, since you chose the Codex workspace; `n` leaves the
+  workspace inert for Codex (no forti tools there) until you trust it yourself.
 - **`--trust-codex-workspace`** gives that consent without a prompt.
 
 With consent, forti adds exactly this to `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`),
@@ -187,17 +190,18 @@ unless you pass `--force`. The forti workspace is the recommended alternative.
 | `local` | you, in `--project-dir` (Claude Code only) | `~/.claude.json` |
 
 ```sh
-forti install mcp                                    # interactive: clients, scope; confirm
-forti install mcp --client all --scope workspace --trust-codex-workspace --yes
-forti install mcp --client claude --scope user --skill --yes
-forti install mcp --client all --scope project --project-dir ~/src/netops --dry-run
+forti mcp install                                    # interactive: clients, scope; confirm
+forti mcp install --client all --scope workspace --trust-codex-workspace --yes
+forti mcp install --client claude --scope user --skill --yes
+forti mcp install --client all --scope project --project-dir ~/src/netops --dry-run
 forti mcp status                                     # where it is registered, and is it still right?
 forti mcp repair                                     # fix entries whose forti-mcp moved or vanished
 forti mcp uninstall --client codex --scope user --yes
 ```
 
 In a terminal without `--yes`, forti asks for whatever you did not pass, prints every command it will
-run and every file it will write, and changes nothing until you confirm. Without a terminal, or with
+run and every file it will write, and asks before changing anything (Enter applies an install or a
+repair; an uninstall needs `y`). Without a terminal, or with
 `--yes` or `--json`, it never prompts: `--client` and `--scope` are then required (for
 `mcp uninstall` too). `--dry-run` prints the plan and stops.
 
@@ -206,9 +210,9 @@ run and every file it will write, and changes nothing until you confirm. Without
 | `--client NAME` | `claude`, `codex` or `all`; for install, `all` is every supported client found on `PATH` |
 | `--scope SCOPE` | `workspace`, `project`, `user` or `local` (see above) |
 | `--project-dir DIR` | the project for `project` and `local` scope (default: the current directory) |
-| `--profile NAME` | start forti-mcp with this profile (the only argument forti adds; never a secret) |
-| `--skill` / `--no-skill` | also install the forti agent skill (workspace: yes; other scopes: no, asked interactively) |
-| `--trust-codex-workspace` | workspace with Codex: mark the forti home trusted in the global Codex config |
+| `--profile NAME` | install: start forti-mcp with this profile (the only argument forti adds; never a secret) |
+| `--skill` / `--no-skill` | install: also install the forti agent skill (workspace: yes; other scopes: no, asked interactively) |
+| `--trust-codex-workspace` | install, workspace with Codex: mark the forti home trusted in the global Codex config |
 | `--yes` | never prompt |
 | `--dry-run` | show what would change, change nothing |
 | `--force` | replace an existing `forti` entry that points elsewhere; allow project or local scope in your home directory without a terminal. For `mcp uninstall`, also remove a `forti` entry that is not forti-mcp |
@@ -276,21 +280,21 @@ forti mcp status
 ```
 
 `status` shows the forti-mcp it would register, every client and scope with its state, and the
-workspace with the health of each of its files:
+workspace with the health of each of its files (paths in your home directory are shown with `~`):
 
 ```text
-workspace  /Users/me/.forti
+workspace  ~/.forti
   AGENTS.md                  ok
   CLAUDE.md                  ok
   Claude Code deny rules     ok
   Codex permission profile   ok
-  Codex trust                ok (added by forti install mcp)
+  Codex trust                ok (added by forti mcp install)
 ```
 
 | State | Meaning |
 |---|---|
 | `ok` | as forti writes it |
-| `missing` | not there; run `forti install mcp --scope workspace` |
+| `missing` | not there; run `forti mcp install --scope workspace` |
 | `outdated` | written by an older forti and unedited; the next install updates it |
 | `modified` | edited since forti wrote it; left alone |
 | `incomplete` | some of forti's deny rules, or half of the Codex profile, are missing |
@@ -307,8 +311,9 @@ resolving symlinks: Homebrew's `/opt/homebrew/bin/forti-mcp` link survives upgra
 versioned `Cellar` path behind it does not (a forti running from a Cellar path registers the
 prefix's `bin/forti-mcp` link).
 
-If forti-mcp is missing, forti prints the command to install it and exits with status 5
-(`not_found`). It never runs a package manager or `sudo`:
+forti-mcp is its own package, so it can be missing (removed, or forti built from source). forti then
+prints the command to install it and exits with status 5 (`not_found`). It never runs a package
+manager or `sudo`:
 
 :::tabs{
   default="homebrew"
@@ -374,7 +379,7 @@ forti skill. Entries that point at another working forti-mcp are reported, not c
   only the `claude` CLI changes it.
 - **Project files are shared.** `.mcp.json` and `.codex/config.toml` in a project are meant to be
   committed. They then contain the absolute path of your forti-mcp, which may differ on a teammate's
-  machine (they can run `forti install mcp --scope project --force`, or prefer `user` scope). The
+  machine (they can run `forti mcp install --scope project --force`, or prefer `user` scope). The
   workspace is yours alone: the forti home is private (0700) and is not a repository to commit.
 
 :::callout[The skill is guidance, not a control]{variant="warning"}

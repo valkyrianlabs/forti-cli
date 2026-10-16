@@ -1,4 +1,4 @@
-# AI client adapters for `forti install mcp` and `forti mcp status|repair|uninstall`. CLI-only code:
+# AI client adapters for `forti mcp install|status|repair|uninstall`. CLI-only code:
 # it uses the engine's Failure type and Paths (the forti home, the workspace scope's directory).
 
 python = import('python').find_installation()

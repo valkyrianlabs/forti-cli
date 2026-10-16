@@ -59,6 +59,8 @@ namespace forti::install {
         Detection detection;
         auto path = find_executable(executable());
         if (!path) return detection;
+        if (context.detections)
+            if (auto known = context.detections->find(path->string()); known != context.detections->end()) return known->second;
         detection.found = true;
         detection.path = path->string();
         try {
@@ -70,6 +72,7 @@ namespace forti::install {
         } catch (const Failure&) {
             // Found but not runnable: reported as found without a version.
         }
+        if (context.detections) context.detections->insert_or_assign(detection.path, detection);
         return detection;
     }
 

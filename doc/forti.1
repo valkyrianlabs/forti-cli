@@ -286,11 +286,22 @@ shows them on a terminal, or with
 .Cm plan ,
 .Cm apply
 and
-.Cm install
+.Cm mcp
 are described by
 .Nm
 .Ar command
 .Fl -help .
+.Cm mcp install
+registers
+.Nm forti-mcp
+with AI clients (asking on a terminal; Enter applies);
+.Cm mcp status , mcp repair
+and
+.Cm mcp uninstall
+check, fix and remove the registrations.
+.Cm install mcp
+is the same as
+.Cm mcp install .
 .Sh OPERATING MODES
 The FortiOS account's privileges are the primary authorization boundary.
 A profile's mode is the operator's policy on top of it:
