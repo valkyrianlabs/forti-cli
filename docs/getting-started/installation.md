@@ -45,7 +45,7 @@ sudo apt update
 sudo apt install -y forti-cli
 ```
 
-The packages depend on `valkyrianlabs-archive-keyring`, which installs the repository key at
+The packages recommend `valkyrianlabs-archive-keyring` (APT installs it by default), which puts the repository key at
 `/usr/share/keyrings/valkyrianlabs.gpg` and keeps it current through normal upgrades (for example when its
 expiry changes). When the key downloaded above is unmodified, the package replaces it with a symlink to the
 packaged key, so the source line above keeps working and you never need to download the key again. Removing
@@ -53,7 +53,7 @@ the package turns the symlink back into a plain copy. Signing key fingerprint:
 `494D 71A1 EEDD F87B D48E  5048 6D64 CB7B DFC3 0EC6`.
 
 The executable is `/usr/bin/forti`. APT also installs the `forti-mcp` package, which `forti-cli`
-recommends (unless recommends are turned off).
+recommends (unless recommends are turned off). The `.deb` from a GitHub release installs on its own too.
 :::
 
 :::tab[Homebrew (macOS, Linux)]{value="homebrew"}
@@ -61,7 +61,7 @@ recommends (unless recommends are turned off).
 brew install valkyrianlabs/tap/forti-cli
 ```
 
-Homebrew pours a prebuilt bottle on Apple silicon Macs running macOS 26 or later, and installs
+Homebrew pours a prebuilt bottle on macOS 15 or later (Apple silicon and Intel), and installs
 forti-mcp with it. Elsewhere it builds from source against the `forti-api` formula, which it needs
 only at build time.
 

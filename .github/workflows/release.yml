@@ -3,7 +3,8 @@
 #   vlr cut patch|minor|major|X.Y.Z --push      (locally) -> pushes vX.Y.Z -> this workflow
 #
 # build ─▶ homebrew-check ─▶ publish-apt ─▶ github-release ─▶ homebrew-tap ─▶ finalize
-# (homebrew-check also makes the macOS bottle: github-release attaches it, homebrew-tap names it)
+# (homebrew-check also makes the macOS bottles, arm64 and Intel: github-release attaches them,
+# homebrew-tap names them)
 #                              └─▶ docs (pmdocs push of docs/ over GitHub OIDC)
 #
 # build: prepare, build the .deb against libforti-api-dev, source archive, formula, validate, then a
@@ -48,7 +49,7 @@ concurrency:
 
 env:
   RELEASE_REF: ${{ github.event.inputs.ref || github.ref }}
-  VL_RELEASE_TAG: v0.5.0
+  VL_RELEASE_TAG: v0.5.1
   # Stock image for clean-install smoke tests (same digest as ci/Containerfile's base).
   UBUNTU_IMAGE: docker.io/library/ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
@@ -120,16 +121,8 @@ jobs:
         run: |
           # shellcheck disable=SC2016  # expanded inside the container
           ./ci/run-ci --image "$UBUNTU_IMAGE" --root bash -euo pipefail -c '
-            # The ValkyrianLabs repository, as the installation guide adds it (valkyrianlabs-archive-keyring).
-            apt-get update
-            apt-get install -y --no-install-recommends ca-certificates curl
-            install -d -m 0755 /etc/apt/keyrings
-            curl -fsSL https://apt.valkyrianlabs.com/pubkey.gpg -o /etc/apt/keyrings/valkyrianlabs.gpg
-            echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/valkyrianlabs.gpg] https://apt.valkyrianlabs.com stable main" \
-              > /etc/apt/sources.list.d/valkyrianlabs.list
             apt-get update
             apt-get install -y --no-install-recommends ./release/forti-cli_*_amd64.deb
-            test "$(readlink -f /etc/apt/keyrings/valkyrianlabs.gpg)" = /usr/share/keyrings/valkyrianlabs.gpg
             ci/smoke-test.sh /usr/bin/forti
           '
 
@@ -144,10 +137,8 @@ jobs:
           path: release
           if-no-files-found: error
 
-  # The bottle is built on the newest macOS runner. Older SDKs cannot build forti-api 1.1's runtime
-  # schema (floating-point std::from_chars arrived in Xcode 26's libc++), so macOS 15 and Intel bottles
-  # wait for forti-api to parse numbers portably (forti-api-gaps G16). Homebrew pours a bottle on the
-  # macOS it was built for and every later one.
+  # One bottle per architecture, built on macOS 15: Homebrew pours a bottle on that macOS and every
+  # later one (arm64_sequoia serves 15, 26 and 27). forti-api 1.1.1 and later build there.
   homebrew-check:
     name: Homebrew formula install and bottle (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -155,7 +146,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [macos-latest]
+        os: [macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
