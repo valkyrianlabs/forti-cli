@@ -121,8 +121,16 @@ jobs:
         run: |
           # shellcheck disable=SC2016  # expanded inside the container
           ./ci/run-ci --image "$UBUNTU_IMAGE" --root bash -euo pipefail -c '
+            # The ValkyrianLabs repository, as the installation guide adds it (valkyrianlabs-archive-keyring).
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates curl
+            install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL https://apt.valkyrianlabs.com/pubkey.gpg -o /etc/apt/keyrings/valkyrianlabs.gpg
+            echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/valkyrianlabs.gpg] https://apt.valkyrianlabs.com stable main" \
+              > /etc/apt/sources.list.d/valkyrianlabs.list
             apt-get update
             apt-get install -y --no-install-recommends ./release/forti-cli_*_amd64.deb
+            test "$(readlink -f /etc/apt/keyrings/valkyrianlabs.gpg)" = /usr/share/keyrings/valkyrianlabs.gpg
             ci/smoke-test.sh /usr/bin/forti
           '
 
