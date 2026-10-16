@@ -568,12 +568,13 @@ namespace forti::cli {
         // The one question of guarded mode, asked of a person at a terminal about the change just
         // shown. Yes records the approval (the same record as `forti approve`, bound to the plan's
         // digest) and returns true.
-        bool approve_here(Context& context, const std::string& id) {
+        bool approve_here(Context& context, const std::string& id, const std::string& digest) {
             if (!ask(context, "Apply these changes?", false)) {
                 *context.output.err << "Nothing was changed.\n";
                 return false;
             }
-            json approved = engine::Engine::envelope([&] { return engine::approve_plan(context.engine, id, approver()); });
+            json approved = engine::Engine::envelope(
+                    [&] { return engine::approve_plan(context.engine, id, approver(), std::chrono::hours(24), digest); });
             if (!approved.value("ok", false)) {
                 emit(context.output, approved);
                 return false;
@@ -612,7 +613,7 @@ namespace forti::cli {
             }
             if (mode == "guarded" && !approved) {
                 if (!at_terminal(context)) return needs_approval(context, id);
-                if (!approve_here(context, id)) return engine::exit_code(Code::approval_required);
+                if (!approve_here(context, id, data.value("digest", ""))) return engine::exit_code(Code::approval_required);
             }
             return execute(context, id);
         }
@@ -661,6 +662,7 @@ namespace forti::cli {
             });
             if (!resolved.value("ok", false)) return emit(context.output, resolved);
             const std::string& id = named.id;
+            std::string digest;   // the plan the person was shown
             if (interactive) {
                 json shown = engine::Engine::envelope([&] { return engine::show_plan(context.engine, id); });
                 if (!shown.value("ok", false)) return emit(context.output, shown);
@@ -670,8 +672,10 @@ namespace forti::cli {
                     *context.output.err << "Not approved.\n";
                     return engine::exit_code(Code::approval_required);
                 }
+                digest = shown["data"].value("digest", "");
             }
-            json approved = engine::Engine::envelope([&] { return engine::approve_plan(context.engine, id, approver()); });
+            json approved = engine::Engine::envelope(
+                    [&] { return engine::approve_plan(context.engine, id, approver(), std::chrono::hours(24), digest); });
             return emit(context.output, approved, [&](std::ostream& out, const json& data, const json&) {
                 if (data.contains("note")) out << data["note"].get<std::string>() << "\n";
                 else out << std::format("Approved plan {} until {}. The agent can apply it now (or: forti apply {}).\n",
@@ -718,7 +722,10 @@ namespace forti::cli {
                             *context.output.out << "Not approved.\n\n";
                             continue;
                         }
-                        json approved = engine::Engine::envelope([&] { return engine::approve_plan(context.engine, id, approver()); });
+                        std::string digest = shown["data"].value("digest", "");
+                        json approved = engine::Engine::envelope([&] {
+                            return engine::approve_plan(context.engine, id, approver(), std::chrono::hours(24), digest);
+                        });
                         if (!approved.value("ok", false)) emit(context.output, approved);
                         else *context.output.out << style.green("Approved") << ": the agent can apply it now.\n\n";
                     }
