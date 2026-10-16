@@ -11,8 +11,9 @@ tags:
 
 `forti` is a single executable. Its only runtime library dependency is libcurl; the forti-api SDK is
 header-only and compiled in. Client certificates (`forti configure`, `forti cert`) also use the `openssl` command, which macOS ships
-(`/usr/bin/openssl`, LibreSSL) and the Debian package depends on. The package installs `forti` and its
-man page (`man forti`).
+(`/usr/bin/openssl`, LibreSSL) and the Debian package depends on. The packages install `forti`, its
+man page (`man forti`), shell completions (bash, zsh, fish), and forti-mcp, the MCP server AI agents
+use.
 
 :::toc[On this page]{depth="2" theme="compact"}
 :::
@@ -44,7 +45,8 @@ sudo apt update
 sudo apt install -y forti-cli
 ```
 
-The executable is `/usr/bin/forti`.
+The executable is `/usr/bin/forti`. APT also installs the `forti-mcp` package, which `forti-cli`
+recommends (unless recommends are turned off).
 :::
 
 :::tab[Homebrew (macOS, Linux)]{value="homebrew"}
@@ -52,7 +54,9 @@ The executable is `/usr/bin/forti`.
 brew install valkyrianlabs/tap/forti-cli
 ```
 
-The formula builds from source against the `forti-api` formula, which it needs only at build time.
+Homebrew pours a prebuilt bottle on macOS 15 or later (Apple silicon and Intel), and installs
+forti-mcp with it. Elsewhere it builds from source against the `forti-api` formula, which it needs
+only at build time.
 
 :::callout[Trust the tap first]{variant="note"}
 Recent Homebrew versions ask you to trust a third-party tap first: `brew trust valkyrianlabs/tap`.
@@ -80,11 +84,12 @@ the details.
 
 :::
 
-## forti-mcp (optional)
+## forti-mcp
 
-forti-mcp, the MCP server for AI clients, is a separate package with no dependency on forti-cli:
-`brew install valkyrianlabs/tap/forti-mcp` or `sudo apt install forti-mcp`. With both installed,
-`forti mcp install` registers it with your AI clients in the `~/.forti` workspace
+forti-mcp, the MCP server for AI clients, comes with forti-cli (a Homebrew dependency, an APT
+recommendation). It is also a package of its own, with no dependency on forti-cli:
+`brew install valkyrianlabs/tap/forti-mcp` or `sudo apt install forti-mcp`. `forti mcp install`
+registers it with your AI clients in the `~/.forti` workspace
 ([AI agent integration](/guides/ai-agent-integration)).
 
 ## Check the installation

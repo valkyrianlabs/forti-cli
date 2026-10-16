@@ -104,12 +104,13 @@ forti-mcp is installed. Each failure comes with the command that fixes it.
 
 :::callout[Authentication failures are never retried]{variant="warning"}
 FortiOS locks an API user out after repeated failures, so forti stops after one rejected attempt.
-Check the key, the API user's trusted hosts and its admin profile before trying again.
+A 401 does not prove the key wrong: FortiOS answers the same when this machine is not in the API
+user's trusted hosts. Check those first, then the key and the admin profile.
 :::
 
 ### Set up the agent workspace
 
-With [forti-mcp](/getting-started/installation#forti-mcp-optional) installed:
+[forti-mcp](/getting-started/installation#forti-mcp) comes with forti:
 
 ```sh
 forti mcp install
@@ -140,21 +141,21 @@ The same engine works directly from the shell:
 forti discover addr                                  # resources whose path contains "addr"
 forti get firewall/address --fields name,subnet,comment
 forti get firewall/policy --filter action==accept --fields policyid,name,srcaddr,dstaddr
-forti plan set firewall/address LAN comment="office LAN"
 ```
 
-A change starts as a plan: planning reads the device and never changes it. What happens next depends
-on the profile's mode:
+A change is one command. forti shows what will change, then does what the profile's mode allows:
 
 ```sh
-forti profile mode fw01 guarded      # read-only profiles refuse every apply
-forti plan approve <id>              # guarded: a person approves the exact plan
-forti apply <id>                     # runs once: drift check, execute, verify, rollback plan, audit
+forti profile mode fw01 guarded                       # read-only profiles change nothing
+forti set firewall/address/LAN comment="office LAN"   # guarded: shown, then "Apply these changes? [y/N]"
+forti rollback                                        # undo it
+forti history                                         # what was changed, when, and who approved it
 ```
 
 :::callout[Choose the mode deliberately]{variant="warning"}
-`read-only` profiles refuse every apply, `guarded` profiles apply only a plan a person approved,
-and `autonomous` profiles apply without approval. forti-mcp cannot change a mode. Read
+`read-only` profiles change nothing, `guarded` profiles apply only a change a person approved (once,
+at the terminal or in the agent's chat), and `autonomous` profiles apply without asking. forti-mcp
+cannot change a mode. Read
 [Operating modes](/guides/planning-and-applying-changes#operating-modes) before you pick one.
 :::
 
@@ -180,8 +181,8 @@ See [Pre-0.2 setups](/reference/configuration-files#pre-0-2-setups).
 Several FortiGates, credential sources, TLS and every `forti doctor` check.
 :::
 
-:::card[Planning and applying changes]{href="/guides/planning-and-applying-changes"}
-Plan files, approvals, verification, rollback plans and their limits.
+:::card[Making changes]{href="/guides/planning-and-applying-changes"}
+One-command changes, approvals for agents, plans, verification and rollback.
 :::
 
 :::card[Security notes]{href="/reference/security"}

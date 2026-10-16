@@ -146,7 +146,7 @@ Made or reused by `forti configure`, the forti CA, the FortiGate commands, renew
 Resources, `discover`, `get`, filters, fields, paging and secret redaction.
 :::
 
-:::card[Planning and applying changes]{href="/guides/planning-and-applying-changes"}
+:::card[Making changes]{href="/guides/planning-and-applying-changes"}
 Stored plans, operating modes, approvals, apply, rollback plans, backups and risk tiers.
 :::
 
