@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 using namespace forti::engine;
 
 TEST(Catalog, ReflectsEveryGeneratedEndpoint) {
@@ -71,6 +73,92 @@ TEST(Catalog, UnknownResourcesSuggestAlternatives) {
         auto suggestions = failure.details()["suggestions"];
         EXPECT_NE(std::ranges::find(suggestions, "firewall/address"), suggestions.end()) << suggestions.dump();
     }
+}
+
+TEST(Catalog, LookupTakesTheSpellingsPeopleUse) {
+    const auto& catalog = Catalog::instance();
+    auto name = [&](std::string_view spelling) { return std::string(catalog.lookup(spelling).name()); };
+    // Paths, as before.
+    EXPECT_EQ(name("firewall/address"), "firewall/address");
+    EXPECT_EQ(name("monitor/system/status"), "monitor/system/status");
+    EXPECT_EQ(name("monitor/router/ipv4"), "monitor/router/ipv4");   // untyped monitors too
+    // FortiOS CLI words, one string or one word each.
+    EXPECT_EQ(name("firewall address"), "firewall/address");
+    EXPECT_EQ(name("firewall service custom"), "firewall.service/custom");
+    EXPECT_EQ(name("system interface"), "system/interface");
+    EXPECT_EQ(name("  system   global "), "system/global");
+    EXPECT_EQ(name("monitor system status"), "monitor/system/status");
+    EXPECT_EQ(std::string(catalog.match({"vpn", "certificate", "ca"}).resource->name()), "vpn.certificate/ca");
+    // An unambiguous tail: the last word, or the last words.
+    EXPECT_EQ(name("address"), "firewall/address");
+    EXPECT_EQ(name("firewall policy"), "firewall/policy");
+    EXPECT_EQ(catalog.match({"policy"}).candidates,
+              (std::vector<std::string>{"firewall/policy", "router/policy", "switch-controller.dsl/policy"}));
+    EXPECT_EQ(name("service custom"), "firewall.service/custom");
+    EXPECT_EQ(name("ADDRESS"), "firewall/address");
+    // Configuration wins over a monitor with the same tail.
+    auto interface = catalog.match({"interface"});
+    ASSERT_TRUE(interface.resource || !interface.candidates.empty());
+
+    // Ambiguous: every candidate, as suggestions.
+    auto custom = catalog.match({"custom"});
+    EXPECT_FALSE(custom.resource);
+    EXPECT_GT(custom.candidates.size(), 1u);
+    EXPECT_NE(std::ranges::find(custom.candidates, "firewall.service/custom"), custom.candidates.end());
+    try {
+        (void) catalog.lookup("custom");
+        ADD_FAILURE() << "an ambiguous name resolved";
+    } catch (const Failure& failure) {
+        EXPECT_EQ(failure.code(), Code::unknown_resource);
+        EXPECT_NE(std::string(failure.what()).find("firewall.service/custom"), std::string::npos) << failure.what();
+        EXPECT_GT(failure.details()["candidates"].size(), 1u);
+    }
+    // Unknown: resolve's error with suggestions, as before.
+    try {
+        (void) catalog.lookup("firewall/adress");
+        ADD_FAILURE();
+    } catch (const Failure& failure) {
+        EXPECT_EQ(failure.code(), Code::unknown_resource);
+        EXPECT_EQ(failure.details()["suggestions"].front(), "firewall/address");
+    }
+    EXPECT_THROW((void) catalog.lookup("no such thing"), Failure);
+    EXPECT_THROW((void) catalog.lookup(""), Failure);
+    // A word with '/' is never part of CLI words: it is a path or a key.
+    EXPECT_FALSE(catalog.match({"firewall/address", "web"}).resource);
+    EXPECT_TRUE(catalog.match({"firewall", "address", "LAN 10.0.0.0/24"}).candidates.empty());
+    // Plans keep exact names.
+    EXPECT_THROW((void) catalog.resolve("address"), Failure);
+    EXPECT_THROW((void) catalog.resolve("firewall address"), Failure);
+}
+
+TEST(Catalog, KeyedPathsNameATableAndAKey) {
+    const auto& catalog = Catalog::instance();
+    auto keyed = catalog.keyed("firewall/address/web");
+    ASSERT_TRUE(keyed);
+    EXPECT_EQ(keyed->resource->name(), "firewall/address");
+    EXPECT_EQ(keyed->key, "web");
+    keyed = catalog.keyed("firewall/address/LAN 10.0.0.0/24");   // a key with '/'
+    ASSERT_TRUE(keyed);
+    EXPECT_EQ(keyed->key, "LAN 10.0.0.0/24");
+    keyed = catalog.keyed("/api/v2/cmdb/firewall.service/custom/HTTPS");
+    ASSERT_TRUE(keyed);
+    EXPECT_EQ(keyed->resource->name(), "firewall.service/custom");
+    EXPECT_EQ(keyed->key, "HTTPS");
+    EXPECT_EQ(catalog.keyed("firewall/policy/7")->key, "7");
+    EXPECT_FALSE(catalog.keyed("firewall/address"));        // a resource itself
+    EXPECT_FALSE(catalog.keyed("firewall/address/"));       // no key
+    EXPECT_FALSE(catalog.keyed("system/global/x"));         // singletons have no keyed objects
+    EXPECT_FALSE(catalog.keyed("monitor/system/status/x")); // monitor paths are never split
+    EXPECT_FALSE(catalog.keyed("nothing/here/x"));
+}
+
+TEST(Catalog, ClosestNamesFindTypos) {
+    std::vector<std::string> fields = {"name", "color", "comment", "subnet", "type", "uuid"};
+    EXPECT_EQ(closest_names("colour", fields), std::vector<std::string>{"color"});
+    EXPECT_EQ(closest_names("subnett", fields).front(), "subnet");
+    EXPECT_EQ(closest_names("comments", fields).front(), "comment");
+    EXPECT_TRUE(closest_names("zzzzzz", fields).empty());
+    EXPECT_LE(closest_names("e", fields, 2).size(), 2u);
 }
 
 TEST(Catalog, FieldsComeFromTheSdkModels) {

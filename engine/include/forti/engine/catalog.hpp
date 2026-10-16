@@ -82,12 +82,43 @@ namespace forti::engine {
         // (unknown_resource with suggestions, or usage for a malformed path).
         [[nodiscard]] Resource resolve(std::string_view name) const;
 
+        // The spellings people use for a resource, beyond resolve()'s: FortiOS CLI words, as one
+        // string or one word each ("firewall address", "firewall service custom" for
+        // firewall.service/custom, "monitor system status"), and an unambiguous tail of them ("address"
+        // for firewall/address, "service custom"). A configuration resource wins over monitors with
+        // the same tail. `candidates` lists the resources an ambiguous spelling could mean; both are
+        // empty when nothing matches. Throws only for a malformed monitor path.
+        struct Match {
+            std::optional<Resource> resource;
+            std::vector<std::string> candidates;
+        };
+        [[nodiscard]] Match match(const std::vector<std::string>& words) const;
+
+        // match() on one name (split at blanks), else resolve()'s error; an ambiguous name throws
+        // unknown_resource with the candidates as suggestions. Reads and discovery use it; plans keep
+        // to resolve(), which takes exact names only.
+        [[nodiscard]] Resource lookup(std::string_view name) const;
+
+        // A table object addressed by its path: "firewall/address/web" is firewall/address, key "web".
+        // The shortest table prefix wins, so a key may contain '/' ("firewall/address/LAN 10.0.0.0/24").
+        // nullopt when `name` is a resource itself, a monitor path, or names no table.
+        struct Keyed {
+            const Resource* resource = nullptr;
+            std::string key;
+        };
+        [[nodiscard]] std::optional<Keyed> keyed(std::string_view name) const;
+
         // Case-insensitive substring search over names, optionally restricted to one kind.
         [[nodiscard]] std::vector<const Resource*> search(std::string_view query, std::optional<Kind> kind = {}) const;
 
         // Up to `limit` names close to an unknown one (shared path segments, substrings).
         [[nodiscard]] std::vector<std::string> suggest(std::string_view name, std::size_t limit = 5) const;
     };
+
+    // Up to `limit` of `candidates` close to `wanted` (a typo: small edit distance, or one contains
+    // the other), closest first. For attribute names ("colour" → "color").
+    std::vector<std::string> closest_names(std::string_view wanted, const std::vector<std::string>& candidates,
+                                           std::size_t limit = 3);
 
 }  // namespace forti::engine
 

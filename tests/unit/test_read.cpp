@@ -56,6 +56,39 @@ TEST_F(ReadTest, UnknownAttributesAreRejectedBeforeAnyRequest) {
     EXPECT_TRUE(transport->requests.empty());
 }
 
+TEST_F(ReadTest, ResourcesTakeCliWordsTailsAndKeyedPaths) {
+    // What an MCP agent may send as "resource": CLI words, a unique tail, a table object's path.
+    for (const char* spelling: {"firewall address", "address", "firewall/address/LAN 10.0.0.0/24"}) {
+        SCOPED_TRACE(spelling);
+        transport->requests.clear();
+        transport->reply(200, fake::envelope(json::array({{{"name", "LAN 10.0.0.0/24"}}})));
+        json request = {{"resource", spelling}};
+        if (std::string_view(spelling).find('/') == std::string_view::npos) request["key"] = "LAN 10.0.0.0/24";
+        json result = run(request);
+        ASSERT_TRUE(result["ok"]) << result.dump();
+        EXPECT_EQ(result["meta"]["resource"], "firewall/address");
+        EXPECT_EQ(result["meta"]["key"], "LAN 10.0.0.0/24");
+        ASSERT_EQ(transport->requests.size(), 1u);
+        EXPECT_EQ(transport->requests[0].url, "https://fortigate.test:8443/api/v2/cmdb/firewall/address/LAN%2010.0.0.0%2F24");
+    }
+    transport->requests.clear();
+    json twice = run({{"resource", "firewall/address/a"}, {"key", "b"}});
+    EXPECT_EQ(twice["error"]["code"], "usage");
+    json ambiguous = run({{"resource", "policy"}});
+    EXPECT_EQ(ambiguous["error"]["code"], "unknown_resource");
+    EXPECT_GT(ambiguous["error"]["details"]["candidates"].size(), 1u);
+    EXPECT_TRUE(transport->requests.empty());
+}
+
+TEST_F(ReadTest, UnknownAttributesSuggestTheClosestOnes) {
+    json result = run({{"resource", "firewall/address"}, {"fields", {"name", "colour"}}});
+    EXPECT_EQ(result["error"]["code"], "validation");
+    EXPECT_NE(result["error"]["message"].get<std::string>().find("did you mean color?"), std::string::npos) << result.dump();
+    EXPECT_EQ(result["error"]["details"]["suggestions"].front(), "color");
+    EXPECT_EQ(result["error"]["details"]["unknown"], json::array({"colour"}));
+    EXPECT_TRUE(transport->requests.empty());
+}
+
 TEST_F(ReadTest, ErrorsMapToStableCodes) {
     transport->reply(404, json{{"status", "error"}, {"http_status", 404}});
     EXPECT_EQ(run({{"resource", "firewall/address"}, {"key", "missing"}})["error"]["code"], "not_found");

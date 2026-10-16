@@ -271,11 +271,23 @@ Exits 0 when nothing failed, otherwise with the status of the first failure.
 .It Cm devices
 List profiles.
 .It Cm discover Op Ar search | resource
-Search the resource catalog, or show a resource's attributes
+Search the resource catalog, or show a resource's attributes (its path or CLI words)
 .Pq Fl -kind , Fl -fields , Fl -live , Fl -start , Fl -count .
 .It Cm get Ar resource Op Ar key
 Read configuration or monitor data
-.Pq Fl -filter , Fl -fields , Fl -start , Fl -count , Fl -param .
+.Pq Fl -filter , Fl -fields , Fl -all , Fl -start , Fl -count , Fl -param .
+The resource is its path
+.Pq Li firewall/address ,
+its FortiOS CLI words
+.Pq Li firewall address ,
+or a last word only one resource has
+.Pq Li address ;
+a table object may be named by its path
+.Pq Li firewall/address/web .
+A listing returns one page; when there are more, a note on standard error says so, and
+.Fl -all
+reads every page.
+Unknown attribute names are refused with the closest real ones.
 Device secrets are shown as
 .Dq <redacted> ;
 .Fl -reveal
