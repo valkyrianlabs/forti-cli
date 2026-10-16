@@ -34,7 +34,7 @@ same home, so both see the same profiles.
 └── cache/                              reserved
 ```
 
-After `forti install mcp --scope workspace`, the home is also the
+After `forti mcp install --scope workspace`, the home is also the
 [MCP workspace](/guides/ai-agent-integration#the-forti-workspace): it then holds `AGENTS.md`,
 `CLAUDE.md`, `.mcp.json`, `.claude/`, `.codex/`, `.agents/` and `.forti-workspace.json` as well.
 

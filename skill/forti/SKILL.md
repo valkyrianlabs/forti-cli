@@ -48,7 +48,7 @@ Gather with reads, analyse yourself, and report concrete objects (policy id, nam
 
 What happens next depends on the profile **mode** from `capabilities`:
 - **read-only** (default): planning works for preview and validation; apply is refused. Show the diff; do not look for a way around it.
-- **guarded**: `forti_apply` returns `approval_required`. Give the human the exact command it prints, `forti plan approve <id>`, to run in their own terminal, then apply once they say it is approved.
+- **guarded**: `forti_apply` returns `approval_required`. Give the human the exact command it prints, `forti plan approve <id>`, to run in their own terminal. It shows them the plan and offers to apply it right away: ask whether they applied it there. If they did, do not apply it again (a plan runs at most once); if they only approved it, call `forti_apply` once they say so.
 - **autonomous**: you apply directly. Plan, review the diff yourself (right objects? nothing extra? matches what the user asked?), then `forti_apply {"plan_id":"..."}`.
 
 After every apply, read the execution record: each operation is `verified`, `applied_unverified`, `failed`, `outcome_unknown` or `not_attempted`. Report what changed. On `failed`/`outcome_unknown`, re-read the objects; if the change must be undone, the record includes a generated rollback plan to apply. `stale_plan` means the device changed since planning: re-plan from fresh reads.

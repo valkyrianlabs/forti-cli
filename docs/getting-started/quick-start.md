@@ -15,9 +15,9 @@ home `~/.forti`, and that is also where the agent works.
 
 :::callout[Before you start]{variant="info"}
 You need `forti` installed ([Installation](/getting-started/installation)) and, on the FortiGate, a
-REST API administrator for forti (System, Administrators, Create New, REST API Admin). Give it an admin
-profile with only the permissions you need, restrict its trusted hosts to this machine, and copy its
-API key. The FortiOS account is the real boundary on what forti can do; see
+REST API administrator for forti with its API key. No administrator yet? The first step shows the
+FortiOS commands, and `forti configure` prints them too when you answer **n** to *Do you have a REST
+API key?*. The FortiOS account is the real boundary on what forti can do; see
 [Security notes](/reference/security#choosing-autonomous-mode).
 :::
 
@@ -28,20 +28,58 @@ API key. The FortiOS account is the real boundary on what forti can do; see
   stepTheme="muted"
 }
 
+### Create the REST API admin (if you have none)
+
+In the FortiOS CLI. Use `read-write` instead of `read` for what forti should change (guarded or
+autonomous mode), and put this machine's address in the trusted host:
+
+```text
+config system accprofile
+    edit "forti"
+        set secfabgrp read
+        set ftviewgrp read
+        set authgrp read
+        set sysgrp read
+        set netgrp read
+        set loggrp read
+        set fwgrp read
+        set vpngrp read
+        set utmgrp read
+        set wifi read
+    next
+end
+config system api-user
+    edit "forti"
+        set accprofile "forti"
+        set vdom "root"
+        config trusthost
+            edit 1
+                set ipv4-trusthost 192.0.2.5 255.255.255.255
+            next
+        end
+    next
+end
+execute api-user generate-key forti
+```
+
+The last command shows the API key once: copy it. In the GUI: System, Administrators, Create New,
+REST API Admin.
+
 ### Configure the FortiGate
 
 ```sh
 forti configure
 ```
 
-forti asks for a profile name, the host, the port, a CA bundle if the device's certificate is
-self-signed or from a private CA (TLS is always verified), where the API key comes from (typed with
-echo off, it goes to the macOS Keychain or a 0600 file), and the operating mode. It checks the
-profile with one read of the device and saves nothing if that fails. Profiles are `read-only` unless
-you choose otherwise.
+forti asks for the address (`fw.example.net`, `192.0.2.1:8443` or an https URL), the API key (typed
+with echo off; it goes to the macOS Keychain or a 0600 file), whether to use a client certificate,
+and the operating mode. It then checks the connection with one read of the device. If the check
+fails, forti keeps your answers and offers fixes: type the key again, change the address, or give the
+CA bundle of a self-signed device (TLS is always verified). Last, it names the profile after the
+device. Profiles are `read-only` unless you choose otherwise.
 
-More devices later: `forti profile copy fw01 fw02`, then `forti configure --profile fw02`. See
-[Profiles and credentials](/guides/profiles-and-credentials).
+More devices later: `forti configure --like fw01` starts from fw01's settings and asks only for the
+address and the key. See [Profiles and credentials](/guides/profiles-and-credentials).
 
 ### Add a client certificate (optional)
 
@@ -51,15 +89,16 @@ issued by its own CA, prints the FortiGate commands to paste, and checks the con
 Enter. For more devices, choose the same certificate again from the list. Its password stays in a
 private file and is never printed. See [Client certificates](/guides/client-certificates).
 
-### Check everything
+### Check everything (any time)
 
 ```sh
 forti doctor
 ```
 
-`doctor` checks the forti home, file modes, the profile, that the key resolves, the TLS files, the
-connection, authentication, the FortiOS version, the operating mode, and whether forti-mcp is
-installed. Each failure comes with a hint.
+`configure` has just checked the connection; `doctor` is for later, or when something fails. It checks
+the forti home, file modes, the profile, that the key resolves, the TLS files (and certificates about
+to expire), the connection, authentication, the FortiOS version, the operating mode, and whether
+forti-mcp is installed. Each failure comes with the command that fixes it.
 
 :::callout[Authentication failures are never retried]{variant="warning"}
 FortiOS locks an API user out after repeated failures, so forti stops after one rejected attempt.
@@ -71,7 +110,7 @@ Check the key, the API user's trusted hosts and its admin profile before trying 
 With [forti-mcp](/getting-started/installation#forti-mcp-optional) installed:
 
 ```sh
-forti install mcp
+forti mcp install
 ```
 
 Choose your clients (Claude Code, Codex) and the first scope, "~/.forti workspace (recommended)".

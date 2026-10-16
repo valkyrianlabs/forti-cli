@@ -46,9 +46,9 @@ AI clients get the same bounded surface as you do at the terminal.
 :::
 
 ```sh
-forti configure                       # host, CA bundle, API key (hidden), client certificate, mode
-forti doctor                          # home, credentials, TLS, auth, FortiOS version
-forti install mcp                     # the FortiGate tools for Claude Code and Codex, in ~/.forti
+forti configure                       # address, API key (hidden), client certificate, mode; checked
+forti get firewall/policy             # or: forti get firewall policy
+forti mcp install                     # the FortiGate tools for Claude Code and Codex, in ~/.forti
 cd ~/.forti && claude                 # or: codex
 ```
 
@@ -102,7 +102,7 @@ device, or is referenced as an environment variable or a command. TLS verificati
 
 :::card[Scripts and AI clients]{eyebrow="Integrations"}
 Every command takes `--json` for one stable envelope, and the exit status follows the error code.
-`forti install mcp` gives Claude Code and Codex the FortiGate tools in the `~/.forti` workspace, with
+`forti mcp install` gives Claude Code and Codex the FortiGate tools in the `~/.forti` workspace, with
 the agent skill and rules that keep the stored credentials out of the agent's reach.
 :::
 

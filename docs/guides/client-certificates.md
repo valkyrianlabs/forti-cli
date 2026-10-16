@@ -133,7 +133,7 @@ All in the [forti home](/reference/configuration-files#the-forti-home):
 
 The client's private key exists only inside `client.p12`. The bundle is encrypted with
 PBE-SHA1-3DES and a SHA-1 MAC, which OpenSSL 3 (without the legacy provider), LibreSSL, libcurl and
-FortiOS all read. `forti install mcp` denies AI agents in the forti home every one of these private
+FortiOS all read. `forti mcp install` denies AI agents in the forti home every one of these private
 files.
 
 ### The password

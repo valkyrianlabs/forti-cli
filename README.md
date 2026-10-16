@@ -10,9 +10,9 @@ so AI clients get the same, bounded surface.
 ```sh
 brew install valkyrianlabs/tap/forti-cli    # or: sudo apt install forti-cli (apt.valkyrianlabs.com)
 
-forti configure                 # prompts for host, CA bundle, API key (hidden), client certificate, mode
-forti doctor                    # checks the home, credentials, TLS, auth and the FortiOS version
-forti install mcp               # pick "~/.forti workspace (recommended)"; needs forti-mcp
+forti configure                 # address, API key (hidden), client certificate, mode; checks the connection
+forti get firewall policy       # FortiOS CLI words work; `forti doctor` when something fails
+forti mcp install               # Enter through it: the ~/.forti workspace for Claude Code and Codex
 cd ~/.forti && claude           # or: codex. The agent gets the FortiGate tools here, nowhere else
 ```
 
@@ -30,7 +30,7 @@ Everything lives in one directory, the forti home: `~/.forti` (or `$FORTI_HOME`,
 └── cache/
 ```
 
-After `forti install mcp`, it is also the agent workspace: `AGENTS.md`, the forti skill, the MCP
+After `forti mcp install`, it is also the agent workspace: `AGENTS.md`, the forti skill, the MCP
 registration, and deny rules that keep the agent's file tools away from `credentials/`, certificate
 keys and `config.json`. Coming from 0.1? `~/.config/forti` keeps working; `forti home migrate` moves it.
 

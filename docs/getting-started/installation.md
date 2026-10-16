@@ -88,7 +88,7 @@ needing about 2 GB of RAM to compile, so limit the jobs (`-j`) on a small machin
 
 forti-mcp, the MCP server for AI clients, is a separate package with no dependency on forti-cli:
 `brew install valkyrianlabs/tap/forti-mcp` or `sudo apt install forti-mcp`. With both installed,
-`forti install mcp` registers it with your AI clients in the `~/.forti` workspace
+`forti mcp install` registers it with your AI clients in the `~/.forti` workspace
 ([AI agent integration](/guides/ai-agent-integration)).
 
 ## Check the installation

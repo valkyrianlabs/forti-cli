@@ -74,7 +74,7 @@ wrap are not installed with forti.
 |---|---|
 | `engine/` | forti-engine, the command engine shared with forti-mcp: catalog, profiles and secrets, discover/read/plan/apply, approvals, audit. Its contract is `engine/include/forti/engine/engine.hpp` (JSON request in, JSON result out) |
 | `src/cli/` | the `forti` executable: argument parsing, the command table, text and `--json` output |
-| `src/install/` | the AI client adapters behind `forti install mcp` and `forti mcp` |
+| `src/install/` | the AI client adapters behind `forti mcp` |
 | `skill/forti/SKILL.md` | the agent skill, compiled into `forti` |
 | `doc/forti.1` | the man page |
 | `tests/` | unit tests, the mock FortiOS and the integration tests ([Testing](/development/testing)) |

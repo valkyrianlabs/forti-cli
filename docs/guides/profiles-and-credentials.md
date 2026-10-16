@@ -23,21 +23,33 @@ so managing ten firewalls is the same as managing one.
 forti configure
 ```
 
-forti asks for a profile name (Enter takes `default`), the host, the admin HTTPS port, an optional
-VDOM, CA bundle and connect-to address, where the API key comes from (it is typed with echo off),
-whether to use a [client certificate](/guides/client-certificates) (it reuses one or makes one, and
-prints the FortiGate commands), and the [operating mode](/guides/planning-and-applying-changes#operating-modes).
-Before saving, it checks the profile with one read of `monitor/system/status`. If the check fails,
-nothing is written; when it fails at the terminal for a network reason, forti offers to save the
-profile anyway, so a typed key is not lost. The first profile becomes the default.
+forti asks for:
+
+1. **The address**: `fw.example.net`, `192.0.2.1:8443`, `[2001:db8::1]:8443` or an https URL.
+2. **The API key**, typed with echo off and kept in the secret store. Type `env:VARIABLE` or
+   `cmd:COMMAND` instead to read it from a variable or a password manager on every use. No key yet?
+   Answer **n** to *Do you have a REST API key?* and forti prints the FortiOS commands that create a
+   REST API admin and its key.
+3. **A [client certificate](/guides/client-certificates)**, optional: it reuses one or makes one, and
+   prints the FortiGate commands.
+4. **The [operating mode](/guides/planning-and-applying-changes#operating-modes)**.
+
+It then checks the connection with one read of `monitor/system/status`. When the device has several
+VDOMs, it asks which one the profile uses. Last, it asks for the profile's name, offering the device's
+host name. The first profile becomes the default.
+
+If the check fails, forti says why once, keeps every answer, and offers what fits: type the key again,
+change the address, give a CA bundle (a self-signed device), connect to an IP address while checking
+the certificate for the name, save without checking, or quit. Nothing is saved until the check passes
+or you choose to save. `--advanced` also asks for the VDOM, CA bundle and connect-to address up front.
 
 :::callout[Authentication failures are never retried]{variant="warning"}
 FortiOS locks an API user out after a few failed attempts, so `forti configure` makes one attempt and
 stops on a rejected key. Check the key, the API user's trusted hosts and its admin profile first.
 :::
 
-Non-interactively (scripts, provisioning), pass `--profile` and the settings. Pick where the API key
-comes from:
+Non-interactively (scripts, provisioning), pass `--host` and the settings, and `--profile` once a
+profile exists (the first one is named `default` without it). Pick where the API key comes from:
 
 :::tabs{
   default="stdin"
@@ -88,8 +100,18 @@ forti profile default fw02                     # change which one commands use b
 
 ### Add another device
 
-Most FortiGates in a fleet share settings: port, VDOM, CA bundle, timeouts, mode. Start the new profile
-from an existing one, change what differs, then give it its own key:
+Most FortiGates in a fleet share settings: mode, VDOM, timeouts, a client certificate. Start the new
+profile from an existing one: forti then asks only for the address and the key.
+
+```sh
+forti configure --like fw01
+```
+
+At the terminal, `forti configure` offers the same: *Start from fw01's settings?* (from the default
+profile). The client certificate comes along when it is one of forti's; the API key and the device's
+address never do. Scripts use `--like` with `--host` and a key option.
+
+To copy settings without contacting any device, use `profile copy`, then give the copy its key:
 
 ```sh
 forti profile copy fw01 fw02                   # settings only: no API key, no client certificate
@@ -166,7 +188,7 @@ does not delete its certificate, which other profiles may use (`forti cert remov
 
 forti-mcp reads the same profiles. An agent lists them with `forti_discover {"what": "devices"}` and
 names one in each call, so one registration covers every FortiGate, each under its own mode. To pin
-forti-mcp to one profile, register it with `forti install mcp --profile NAME`; see
+forti-mcp to one profile, register it with `forti mcp install --profile NAME`; see
 [AI agent integration](/guides/ai-agent-integration).
 
 ## Profile commands
@@ -192,9 +214,11 @@ forti profile remove NAME
 
 | Option | Meaning |
 |---|---|
-| `--profile NAME` | profile name: 1 to 64 letters, digits, `-` and `_` (required with other options) |
-| `--host HOST` | host name or address. No scheme and no port: `fw.example.net`, `192.0.2.1`, `[2001:db8::1]` |
+| `--profile NAME` | profile name: 1 to 64 letters, digits, `-` and `_` (scripts: required once a profile exists; the first is `default`) |
+| `--host ADDRESS` | host name or address, optionally with the port or as an https URL: `fw.example.net`, `192.0.2.1:8443`, `[2001:db8::1]:8443` |
 | `--port N` | admin HTTPS port, 1 to 65535 (default 443) |
+| `--like PROFILE` | start a new profile from `PROFILE`'s mode, VDOM, timeouts and client certificate |
+| `--advanced` | at the terminal, also ask for the VDOM, CA bundle and connect-to address |
 | `--vdom NAME` | VDOM for every request (default: the device's default VDOM) |
 | `--ca-bundle PATH` | PEM file of CA certificates that verify the device's certificate |
 | `--resolve-ip IP` | connect to this IPv4 or IPv6 address, while still verifying the certificate for `--host` |
