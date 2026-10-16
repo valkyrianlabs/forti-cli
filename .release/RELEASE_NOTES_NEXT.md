@@ -9,7 +9,9 @@ for users and operators; keep it representative of what actually ships.
 -->
 # Setup in one pass, changes in one step, certificates built in
 
-forti 0.3 is about getting started quickly and doing common things in fewer steps.
+forti 0.3 is about getting started quickly and doing common things in fewer steps. (0.3.1 is the
+first published 0.3 release: 0.3.0 was tagged, but its release stopped at a test that caught plans
+made within the same second being ordered wrongly. That is fixed.)
 
 ## forti configure
 

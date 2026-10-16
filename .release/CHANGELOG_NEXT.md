@@ -31,3 +31,5 @@ One level of nested "  - " detail bullets is allowed. Consolidate; don't paste c
   certificate files are caught before any request.
 - Packaging: Homebrew bottle built and published with each release; the
   formula depends on forti-mcp and the .deb recommends it.
+- plans: created_ns orders plans made within one second (`latest`, plan list);
+  0.3.0 was tagged but not published.
