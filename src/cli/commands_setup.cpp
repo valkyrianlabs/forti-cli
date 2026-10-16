@@ -640,16 +640,19 @@ namespace forti::cli {
             auto& store = context.engine.secrets();
             bool have = p.api_key.source == SecretRef::Source::env || p.api_key.source == SecretRef::Source::command ||
                         (draft.existed && p.api_key.source == SecretRef::Source::store && store.get(p.api_key_account()));
-            if (!have && offer_steps && !tty.confirm("\nDo you have a REST API key for this FortiGate?", true))
-                tty.say(std::format("\n{}\n", api_user_steps(draft.source_ip)));
+            // No separate "do you have a key?" question: Enter on an empty prompt asks for the steps.
             tty.say(std::format("\nThe API key is typed hidden and kept in the {}. To read it from elsewhere instead,\n"
-                                "type env:VARIABLE or cmd:COMMAND (a password manager, for example).\n",
-                                describe_source({SecretRef::Source::store, {}, {}, {}}, store.kind())));
+                                "type env:VARIABLE or cmd:COMMAND (a password manager, for example).{}\n",
+                                describe_source({SecretRef::Source::store, {}, {}, {}}, store.kind()),
+                                !have && offer_steps ? "\nNo key yet? Press Enter for the FortiGate commands that create one." : ""));
             std::string label = have ? std::format("API key (Enter keeps the {})", describe_source(p.api_key, store.kind())) : "API key";
+            bool shown = !offer_steps;
             for (;;) {
                 std::string key = tty.ask(label, "", true);
                 if (key.empty()) {
                     if (have) return;
+                    if (!shown) tty.say(std::format("\n{}\n", api_user_steps(draft.source_ip)));
+                    shown = true;
                     continue;
                 }
                 try {

@@ -202,9 +202,9 @@ class InteractiveConfigure(CliTest):
 
     def address_and_key(self, term: Terminal, have_key: bool = True) -> str:
         self.address(term)
-        steps = term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "" if have_key else "n")
-        term.answer_hidden("API key: ", f"env:{KEY_VAR}")
-        return steps
+        if not have_key:   # Enter on the empty prompt shows the FortiGate steps, then asks again
+            term.answer_hidden("API key: ", "")
+        return term.answer_hidden("API key: ", f"env:{KEY_VAR}")
 
     def name_it(self, term: Terminal, name: str) -> None:
         term.answer("Profile name [fw-mock]: ", name)
@@ -269,8 +269,8 @@ class InteractiveConfigure(CliTest):
         term.answer("VDOM", "")
         term.answer("CA bundle, PEM", str(self.mock.ca_path))
         term.answer("Connect to this IP instead", "")
-        steps = term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "n")
-        term.answer_hidden("API key: ", f"env:{KEY_VAR}")
+        term.answer_hidden("API key: ", "")
+        steps = term.answer_hidden("API key: ", f"env:{KEY_VAR}")
         term.answer("Use a client certificate? (y/N): ", "y")
         term.answer("Reuse a certificate you already have? (Y/n): ", "")
         listing = term.answer("Certificate [1]: ", "")
@@ -296,7 +296,6 @@ class InteractiveConfigure(CliTest):
         term = self.start()
         term.answer("Start from lab's settings (mode read-only)? (Y/n): ", "n")
         self.address(term, trust=False)   # declined: the check fails on TLS, and the menu offers fixes
-        term.answer("Do you have a REST API key for this FortiGate? (Y/n): ", "")
         term.answer_hidden("API key: ", "wrong-key")
         term.answer("Use a client certificate? (y/N): ", "")
         term.answer("Mode [1]: ", "")

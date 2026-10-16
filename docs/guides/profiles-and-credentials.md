@@ -25,11 +25,15 @@ forti configure
 
 forti asks for:
 
-1. **The address**: `fw.example.net`, `192.0.2.1:8443`, `[2001:db8::1]:8443` or an https URL.
+1. **The address**: `fw.example.net`, `192.0.2.1:8443`, `[2001:db8::1]:8443` or an https URL. forti
+   connects right away (a TLS handshake, no key needed). A certificate your system does not trust,
+   such as a FortiGate's factory certificate, is shown with its SHA-256 fingerprint; answer **y** to
+   trust it, and forti pins it for this device. A certificate that names the serial number rather than
+   the address is handled too. Verification stays on.
 2. **The API key**, typed with echo off and kept in the secret store. Type `env:VARIABLE` or
    `cmd:COMMAND` instead to read it from a variable or a password manager on every use. No key yet?
-   Answer **n** to *Do you have a REST API key?* and forti prints the FortiOS commands that create a
-   REST API admin and its key.
+   Press Enter at the empty prompt and forti prints the FortiOS commands that create a REST API admin
+   (admin profile, trusted hosts) and its key.
 3. **A [client certificate](/guides/client-certificates)**, optional: it reuses one or makes one, and
    prints the FortiGate commands.
 4. **The [operating mode](/guides/planning-and-applying-changes#operating-modes)**.
