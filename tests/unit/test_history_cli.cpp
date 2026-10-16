@@ -237,12 +237,12 @@ TEST_F(HistoryCli, DeviceTextCannotDriveTheTerminal) {
     event["operations"] = json::array();
     event["outcome"] = "partial_failure";
     event["summary"] = "1 operation \x1b[2J\x1b]0;owned\x07 on lab";
-    event["error"] = {{"code", "partial_failure"}, {"message", "FortiOS: \x1b[31mred‮"}};
+    event["error"] = {{"code", "partial_failure"}, {"message", "FortiOS: \x1b[31mred\u202e"}};
     write_log({dump(event)});
     for (const char* flag: {"--all", "--verbose"}) {
         ASSERT_EQ(run({"history", flag}), 0) << err.str();
         EXPECT_EQ(out.str().find('\x1b'), std::string::npos) << out.str();
-        EXPECT_EQ(out.str().find("‮"), std::string::npos) << out.str();
+        EXPECT_EQ(out.str().find("\u202e"), std::string::npos) << out.str();
         EXPECT_NE(out.str().find("\\x1b[2J"), std::string::npos) << out.str();
     }
     // --json keeps the text as recorded (JSON escapes it).
