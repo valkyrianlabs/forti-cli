@@ -5,10 +5,17 @@ and `forti-mcp` binaries through libcurl and TLS. Python 3 standard library only
 * HTTPS only, on 127.0.0.1 and an ephemeral port. `make_pki()` creates a throwaway CA and a server
   certificate for "localhost" / 127.0.0.1 with `openssl`; clients verify it through a `ca_bundle`.
 * `Authorization: Bearer <api key>` is required (401 otherwise).
-* cmdb: `firewall/address` (string keys), `firewall/policy` (integer keys assigned on create) and
-  the singleton `system/global`: GET (list with start/count/format/filter, keyed, 404), POST, PUT,
-  DELETE, `?action=schema`. Monitor: `system/status`, `system/config/backup` (plain text) and an
-  untyped list (`firewall/session-count-list`, not in the SDK registry).
+* cmdb: `firewall/address` (string keys), `firewall/policy` (integer keys assigned on create),
+  `system.dhcp/server` (integer keys) and the singleton `system/global`: GET (list with
+  start/count/format/filter, keyed, 404), POST, PUT, DELETE, `?action=schema`. The DHCP servers'
+  `reserved-address` is also served on FortiOS's child paths (`.../server/<id>/reserved-address[/<id>]`:
+  GET, POST with a device-assigned id, PUT, DELETE, 404s) with the reply shapes FortiOS 7.4.8 sends
+  (observed live by forti-api): POST `mkey` = the new entry's key and no `child_mkey`; PUT `mkey` = the
+  parent's key, `child_mkey` = the entry's key as text; DELETE `mkey` = the entry's key, `child_mkey`
+  as text; GET `mkey` = the parent's key; a missing entry is 404 with `child_path`, a missing parent
+  404 without it. Writes carry revision, old_revision and revision_changed. Monitor: `system/status`,
+  `system/config/backup` (plain text), `system/dhcp` (leases) with the action `system/dhcp/revoke`
+  ({"ip": [...]}), and an untyped list (`firewall/session-count-list`, not in the SDK registry).
 * Faults the test controls (`MockFortiOS.drop_after_write()`, `.error_after_create()`,
   `.fail_status_after_write()`, `.normalize`), and a record of every request (`.requests`).
 
@@ -125,6 +132,34 @@ def _global_children() -> dict[str, Any]:
     }
 
 
+def _dhcp_children() -> dict[str, Any]:
+    def unitary(name: str, kind: str, help_: str, **extra: Any) -> dict[str, Any]:
+        return {"name": name, "category": "unitary", "type": kind, "help": help_, **extra}
+    return {
+        "id": unitary("id", "integer", "ID.", **{"min-value": 0, "max-value": 4294967295}),
+        "interface": unitary("interface", "string", "DHCP server can assign IP configurations to clients connected to this interface."),
+        "lease-time": unitary("lease-time", "integer", "Lease time in seconds, 0 means unlimited."),
+        "reserved-address": {"name": "reserved-address", "category": "table", "mkey": "id", "mkey_type": "integer",
+                             "help": "Options for the DHCP server to assign IP settings to specific MAC addresses.",
+                             "children": {"id": unitary("id", "integer", "ID."), "ip": unitary("ip", "ipv4-address", "IP address."),
+                                          "mac": unitary("mac", "mac-address", "MAC address."),
+                                          "description": unitary("description", "var-string", "Description.")}},
+    }
+
+
+def _reservation_defaults() -> dict[str, Any]:
+    return {"id": 0, "type": "mac", "ip": "0.0.0.0", "mac": "00:00:00:00:00:00", "action": "reserved",
+            "circuit-id-type": "string", "circuit-id": "", "remote-id-type": "string", "remote-id": "", "description": ""}
+
+
+@dataclass
+class ChildSpec:
+    """A table attribute FortiOS serves on child paths: cmdb/<path>/<parent key>/<attribute>[/<entry key>]."""
+    mkey: str                      # the entry key ("id")
+    numeric: bool
+    defaults: Callable[[], dict[str, Any]]
+
+
 @dataclass
 class TableSpec:
     path: str                      # "firewall/address"
@@ -133,6 +168,7 @@ class TableSpec:
     help: str
     children: dict[str, Any]
     defaults: Callable[[], dict[str, Any]]
+    child_tables: dict[str, ChildSpec] = field(default_factory=dict)
 
 
 TABLES: dict[str, TableSpec] = {
@@ -145,6 +181,11 @@ TABLES: dict[str, TableSpec] = {
         lambda: {"uuid": str(uuidlib.uuid4()), "name": "", "status": "enable", "srcintf": [], "dstintf": [],
                  "srcaddr": [], "dstaddr": [], "service": [], "action": "deny", "schedule": "always",
                  "comments": "", "logtraffic": "utm"}),
+    "system.dhcp/server": TableSpec(
+        "system.dhcp/server", "id", True, "Configure DHCP servers.", _dhcp_children(),
+        lambda: {"status": "enable", "lease-time": 604800, "interface": "", "default-gateway": "0.0.0.0",
+                 "netmask": "0.0.0.0", "dns-service": "default", "ip-range": [], "reserved-address": []},
+        {"reserved-address": ChildSpec("id", True, _reservation_defaults)}),
 }
 SINGLETONS = {"system/global": ("Configure global attributes.", _global_children())}
 
@@ -244,6 +285,7 @@ class Device:
                               "gui-theme": "jade"}}
         self.revision = 1
         self.next_policy_id = 1
+        self.leases: list[dict[str, Any]] = []   # monitor/system/dhcp
 
     def bump(self) -> None:
         self.revision += 1
@@ -272,6 +314,7 @@ class MockFortiOS:
             # Not in the SDK's typed monitor registry: read untyped.
             "firewall/session-count-list": lambda: [
                 {"vdom": "root", "count": 100 + i, "id": i} for i in range(5)],
+            "system/dhcp": lambda: copy.deepcopy(self.device.leases),
         }
 
     # ---- lifecycle ----
@@ -343,6 +386,36 @@ class MockFortiOS:
             self.device.tables["firewall/policy"][str(pid)] = obj
             self.device.bump()
             return obj
+
+    def add_dhcp_server(self, server_id: int, **attrs: Any) -> dict[str, Any]:
+        with self.lock:
+            obj = TABLES["system.dhcp/server"].defaults()
+            obj.update(attrs)
+            obj.update({"id": server_id, "q_origin_key": server_id})
+            obj["reserved-address"] = [dict(_reservation_defaults(), **entry, **{"q_origin_key": entry["id"]})
+                                       for entry in obj["reserved-address"]]
+            self.device.tables["system.dhcp/server"][str(server_id)] = obj
+            self.device.bump()
+            return copy.deepcopy(obj)
+
+    def reservations(self, server_id: int) -> dict[int, dict[str, Any]]:
+        """The server's reserved-address entries by id (a copy)."""
+        with self.lock:
+            server = self.device.tables["system.dhcp/server"][str(server_id)]
+            return {entry["id"]: copy.deepcopy(entry) for entry in server["reserved-address"]}
+
+    def set_reservation_attr(self, server_id: int, entry_id: int, attr: str, value: Any) -> None:
+        """Change one reservation behind the client's back (drift of a child table entry)."""
+        with self.lock:
+            server = self.device.tables["system.dhcp/server"][str(server_id)]
+            next(e for e in server["reserved-address"] if e["id"] == entry_id)[attr] = value
+            self.device.bump()
+
+    def add_lease(self, ip: str, mac: str, server_mkey: int = 1, **attrs: Any) -> None:
+        with self.lock:
+            self.device.leases.append({"ip": ip, "mac": mac, "hostname": "", "expire_time": 1924992000, "status": "leased",
+                                       "reserved": False, "interface": "internal", "type": "ipv4",
+                                       "server_mkey": server_mkey, **attrs})
 
     def table(self, path: str) -> dict[str, dict[str, Any]]:
         with self.lock:
@@ -530,7 +603,7 @@ class _Handler(BaseHTTPRequestHandler):
         mock = self.owner
         params = dict(query)
         if api.startswith("monitor/"):
-            return self._monitor(method, api.removeprefix("monitor/"), params)
+            return self._monitor(method, api.removeprefix("monitor/"), params, body)
         if not api.startswith("cmdb/"):
             return 404, mock.envelope(method, api, 404), "application/json"
         rest = api.removeprefix("cmdb/")
@@ -539,8 +612,17 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._singleton(method, path, params, body)
         for path in TABLES:
             if rest == path or rest.startswith(path + "/"):
-                key = unquote(rest[len(path) + 1:]) if rest != path else None
-                return self._table(method, TABLES[path], key, query, body)
+                # Each key is one encoded segment: a raw '/' separates the parent key, a child table
+                # attribute and an entry key (an encoded %2F stays inside its key).
+                segments = rest[len(path) + 1:].split("/") if rest != path else []
+                spec = TABLES[path]
+                if len(segments) in (2, 3) and segments[1] in spec.child_tables:
+                    entry = unquote(segments[2]) if len(segments) == 3 else None
+                    return self._child(method, spec, unquote(segments[0]), segments[1], entry, query, body)
+                if len(segments) > 1:
+                    return 404, mock.envelope(method, api, 404, error=-3), "application/json"
+                key = unquote(segments[0]) if segments else None
+                return self._table(method, spec, key, query, body)
         return 404, mock.envelope(method, api, 404, error=-3), "application/json"
 
     def _schema(self, method: str, api: str, name: str, help_: str, children: dict[str, Any],
@@ -660,9 +742,103 @@ class _Handler(BaseHTTPRequestHandler):
                                           mkey=mkey), "application/json"
         return 405, mock.envelope(method, api, 405, error=-1), "application/json"
 
-    def _monitor(self, method: str, path: str, params: dict[str, str]) -> tuple[int, Any, str]:
+    def _child(self, method: str, spec: TableSpec, parent: str, attribute: str, entry_key: str | None,
+               query: list[tuple[str, str]], body: str) -> tuple[int, Any, str]:
+        """One child table: the entries of `attribute` of object `parent`, kept inside the parent (so a
+        read of the parent shows them). Reply shapes as FortiOS 7.4.8 sends them (module docstring)."""
+        mock = self.owner
+        child = spec.child_tables[attribute]
+        api = "cmdb/" + spec.path
+        params = dict(query)
+        parent_mkey: Any = int(parent) if spec.numeric and parent.isdigit() else parent
+
+        def reply(status: int, **extra: Any) -> tuple[int, Any, str]:
+            fields: dict[str, Any] = {"mkey": parent_mkey, "child_path": attribute}
+            fields.update(extra)
+            return status, mock.envelope(method, api, status, **fields), "application/json"
+
+        def written(**extra: Any) -> tuple[int, Any, str]:
+            mock.device.bump()
+            return reply(200, revision=str(mock.device.revision), old_revision=str(mock.device.revision - 1),
+                         revision_changed=True, **extra)
+
+        with mock.lock:
+            owner = mock.device.tables[spec.path].get(parent)
+            if owner is None:   # a missing parent: 404 without child_path; nothing is ever created
+                return 404, mock.envelope(method, api, 404, mkey=parent_mkey), "application/json"
+            entries: list[dict[str, Any]] = owner.setdefault(attribute, [])
+
+            def find(key: str) -> dict[str, Any] | None:
+                return next((e for e in entries if str(e.get(child.mkey)) == key), None)
+
+            if method == "GET":
+                fields = params["format"].split("|") if params.get("format") else None
+                if entry_key is not None:
+                    found = find(entry_key)
+                    if found is None:
+                        return reply(404)
+                    return reply(200, revision=str(mock.device.revision), child_mkey=found[child.mkey],
+                                 results=[_project(copy.deepcopy(found), fields)])
+                items = list(entries)
+                for expression in (v for k, v in query if k == "filter"):
+                    clauses = expression.split(",")
+                    items = [o for o in items if any(_matches(o, c) for c in clauses)]
+                return reply(200, revision=str(mock.device.revision), size=len(items),
+                             results=[_project(copy.deepcopy(o), fields) for o in items])
+
+            if method == "POST":
+                if entry_key is not None:
+                    return reply(405, error=-1)
+                obj = json.loads(body or "{}")
+                if not isinstance(obj, dict):
+                    return reply(400, error=-651)
+                if child.numeric:
+                    wanted = int(obj.get(child.mkey) or 0)
+                    key: Any = wanted or max((int(e[child.mkey]) for e in entries), default=0) + 1   # 0: highest + 1
+                else:
+                    key = obj.get(child.mkey)
+                    if not key:
+                        return reply(500, error=-651, cli_error=[f"{child.mkey}: required"])
+                if find(str(key)) is not None:   # a POST never overwrites
+                    return reply(500, revision=str(mock.device.revision), error=-5)
+                stored = child.defaults()
+                stored.update(obj)
+                stored[child.mkey] = key
+                stored["q_origin_key"] = key
+                entries.append(stored)
+                return written(mkey=key)          # the NEW ENTRY's key, and no child_mkey
+
+            if entry_key is None:
+                return reply(405, error=-1)
+            found = find(entry_key)
+            if found is None:                     # never created by a PUT or DELETE
+                return reply(404)
+            if method == "PUT":
+                change = json.loads(body or "{}")
+                if not isinstance(change, dict):
+                    return reply(400, error=-651)
+                if child.mkey in change and str(change[child.mkey]) != entry_key:
+                    return reply(500, error=-1, cli_error=["mock: rename unsupported"])
+                found.update(change)
+                return written(child_mkey=str(found[child.mkey]))
+            if method == "DELETE":
+                entries.remove(found)
+                return written(mkey=found[child.mkey], child_mkey=str(found[child.mkey]))
+        return reply(405, error=-1)
+
+    def _monitor(self, method: str, path: str, params: dict[str, str], body: str = "") -> tuple[int, Any, str]:
         mock = self.owner
         api = "monitor/" + path
+        if method == "POST" and path == "system/dhcp/revoke":
+            # {"ip": ["192.0.2.50", ...]} (fortinet.fortios fortios_monitor, selector revoke.system.dhcp).
+            # What FortiOS does without "ip" is not documented: the mock refuses it rather than guess.
+            request = json.loads(body or "{}")
+            ips = request.get("ip") if isinstance(request, dict) else None
+            if not isinstance(ips, list) or not all(isinstance(ip, str) for ip in ips):
+                return 400, mock.envelope(method, api, 400, error=-651), "application/json"
+            with mock.lock:
+                mock.device.leases = [lease for lease in mock.device.leases if lease["ip"] not in ips]
+            return 200, mock.envelope(method, api, results={}), "application/json"
         if method == "GET" and path == "system/status":
             return 200, mock.envelope(method, api, results={
                 "model_name": "FortiGate", "model_number": "60F", "model": "FGT60F", "hostname": "fw-mock",

@@ -72,9 +72,10 @@ namespace forti::engine::detail {
         }
 
         // forti-api's ValidationError, in the engine's words (the same messages and details the typed
-        // operations produced). `input` is the object (create) or `set` (update).
-        [[noreturn]] void rethrow(const fs::ValidationError& error, const fs::Endpoint& ep, const json& input, bool update) {
-            std::string path(ep.path);
+        // operations produced). `input` is the object (create) or `set` (update); `path` names what is
+        // written in messages (the endpoint's path, or a child table's label).
+        [[noreturn]] void rethrow(const fs::ValidationError& error, const fs::Type& type, const std::string& path,
+                                  const json& input, bool update) {
             using Reason = fs::ValidationError::Reason;
             switch (error.reason()) {
                 case Reason::not_object:
@@ -86,7 +87,7 @@ namespace forti::engine::detail {
                 }
                 case Reason::unknown: {
                     std::set<std::string, std::less<>> known;
-                    for (const fs::Field& field: ep.type->fields) known.emplace(field.name);
+                    for (const fs::Field& field: type.fields) known.emplace(field.name);
                     std::vector<std::string> suggestions;
                     for (const auto& name: error.attributes())
                         if (auto close = closest_name(name, known); !close.empty()) suggestions.push_back(close);
@@ -105,6 +106,10 @@ namespace forti::engine::detail {
             throw Failure(Code::validation, std::format("{}: {}", path, error.what()));
         }
 
+        [[noreturn]] void rethrow(const fs::ValidationError& error, const fs::Endpoint& ep, const json& input, bool update) {
+            rethrow(error, *ep.type, std::string(ep.path), input, update);
+        }
+
         // The current object as the typed model reads it; the SDK refuses to update what it cannot read.
         json decode_current(const fs::Endpoint& ep, const json& current) {
             try {
@@ -114,10 +119,11 @@ namespace forti::engine::detail {
             }
         }
 
-        void check_key(const fs::Endpoint& ep, const std::string& text) {
-            if (ep.key_kind == fs::Kind::string) return;
+        // A numeric key must be a number: the engine's message, before the SDK would throw its own.
+        void check_number(fs::Kind kind, const std::string& text, std::string_view what) {
+            if (kind != fs::Kind::uint32 && kind != fs::Kind::int64) return;
             bool valid = !text.empty();
-            if (ep.key_kind == fs::Kind::uint32) {
+            if (kind == fs::Kind::uint32) {
                 std::uint32_t value{};
                 auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
                 valid = valid && ec == std::errc() && end == text.data() + text.size();
@@ -126,8 +132,12 @@ namespace forti::engine::detail {
                 auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
                 valid = valid && ec == std::errc() && end == text.data() + text.size();
             }
-            if (!valid) throw Failure(Code::validation, std::format("{}: key \"{}\" is not a number", ep.path, text));
+            if (!valid) throw Failure(Code::validation, std::format("{}: key \"{}\" is not a number", what, text));
         }
+
+        void check_key(const fs::Endpoint& ep, const std::string& text) { check_number(ep.key_kind, text, ep.path); }
+
+        const fs::Field& entry_key_field(const Child& child) { return *child.type->field(child.key); }
 
     }  // namespace
 
@@ -212,6 +222,111 @@ namespace forti::engine::detail {
         if (ep.kind != fs::EndpointKind::table) throw Failure(Code::validation, std::string(ep.path) + ": a singleton cannot be deleted");
         check_key(ep, key);
         return fortiapi::Reply::from(client.del(fs::object_path(ep, json(key)), query));
+    }
+
+    // ---- child tables ----
+
+    Child child_of(const Resource& resource, std::string_view attribute) {
+        if (resource.kind != Kind::table || !resource.schema || !resource.schema->type)
+            throw Failure(Code::usage, std::format("{}: only a table's objects have child tables", resource.name()),
+                          {{"resource", resource.name()}, {"kind", to_string(resource.kind)}});
+        const fs::Type& type = *resource.schema->type;
+        std::vector<std::string> tables;
+        for (const fs::Field& field: type.fields)
+            if (field.is_table() && field.item->type && !field.item->type->key.empty() &&
+                field.item->type->field(field.item->type->key))
+                tables.emplace_back(field.name);
+        const fs::Field* field = type.field(attribute);
+        if (!field || std::ranges::find(tables, std::string_view(attribute)) == tables.end()) {
+            std::string message = field ? std::format("{}: {} is not a table attribute with keyed entries", resource.name(), attribute)
+                                        : std::format("{}: unknown table attribute {}", resource.name(), attribute);
+            auto close = closest_names(attribute, tables);
+            if (!close.empty()) message += std::format(" (did you mean {}?)", close.front());
+            json details = {{"resource", resource.name()}, {"child", attribute}, {"tables", tables}};
+            if (!close.empty()) details["suggestions"] = close;
+            throw Failure(Code::validation, message, std::move(details));
+        }
+        Child child;
+        child.attribute = field->name;
+        child.type = field->item->type;
+        child.key = child.type->key;
+        fs::Kind kind = child.type->field(child.key)->kind;
+        child.numeric_key = kind == fs::Kind::uint32 || kind == fs::Kind::int64;
+        return child;
+    }
+
+    std::vector<FieldInfo> fields(const Child& child) { return fields_of(*child.type); }
+
+    std::string child_label(const Resource& resource, const Child& child) {
+        return std::format("{} {}", resource.path, child.attribute);
+    }
+
+    std::string child_path(const Resource& resource, const Child& child, const std::string& parent, const std::string& key) {
+        const fs::Endpoint& ep = endpoint(resource);
+        check_key(ep, parent);
+        if (key.empty()) return fortiapi::path(ep.path, parent, child.attribute);
+        check_number(entry_key_field(child).kind, key, child_label(resource, child));
+        return fortiapi::path(ep.path, parent, child.attribute, key);
+    }
+
+    json create_body(const Resource& resource, const Child& child, const json& object) {
+        try {
+            return fs::create_body(*child.type, object);
+        } catch (const fs::ValidationError& error) {
+            rethrow(error, *child.type, child_label(resource, child), object, false);
+        }
+    }
+
+    json update_body(const Resource& resource, const Child& child, const json& current, const Changes& changes) {
+        std::string label = child_label(resource, child);
+        if (!changes.set.is_object()) throw Failure(Code::validation, label + ": `set` must be an object");
+        try {
+            (void) fs::decode(*child.type, current);
+        } catch (const std::exception& error) {
+            throw Failure(Code::api, std::format("{}: the current entry does not decode: {}", label, error.what()));
+        }
+        try {
+            return fs::update_body(*child.type, changes.set, changes.clear);
+        } catch (const fs::ValidationError& error) {
+            rethrow(error, *child.type, label, changes.set, true);
+        }
+    }
+
+    fortiapi::Reply create(const Resource& resource, const Child& child, fortiapi::Client& client, const std::string& parent,
+                           const json& object, const fortiapi::Query& query) {
+        json body = create_body(resource, child, object);
+        return fortiapi::Reply::from(client.post(child_path(resource, child, parent), body, query));
+    }
+
+    std::optional<fortiapi::Reply> update(const Resource& resource, const Child& child, fortiapi::Client& client,
+                                          const std::string& parent, const std::string& key, const json& current,
+                                          const Changes& changes, const fortiapi::Query& query) {
+        json body = update_body(resource, child, current, changes);
+        // ChildTable::update: an entry with no changes sends nothing.
+        if (body.empty()) return std::nullopt;
+        return fortiapi::Reply::from(client.put(child_path(resource, child, parent, key), body, query));
+    }
+
+    fortiapi::Reply remove(const Resource& resource, const Child& child, fortiapi::Client& client, const std::string& parent,
+                           const std::string& key, const fortiapi::Query& query) {
+        return fortiapi::Reply::from(client.del(child_path(resource, child, parent, key), query));
+    }
+
+    std::string created_entry_key(const Child& child, const fortiapi::Reply& reply) {
+        auto text = [&](const json& value) -> std::string {
+            std::string out;
+            if (value.is_string()) out = value.get<std::string>();
+            else if (value.is_number_integer()) out = value.dump();
+            else return {};
+            if (child.numeric_key) {
+                bool digits = !out.empty() && std::ranges::all_of(out, [](char c) { return c >= '0' && c <= '9'; });
+                if (!digits) return {};
+            }
+            return out;
+        };
+        if (std::string key = text(reply.child_mkey); !key.empty()) return key;
+        if (reply.http_method == "POST" && reply.child_path == child.attribute) return text(reply.mkey);
+        return {};
     }
 
 }  // namespace forti::engine::detail

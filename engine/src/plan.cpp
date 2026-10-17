@@ -50,6 +50,9 @@ namespace forti::engine {
         // One requested operation, validated for shape (attribute validation is the SDK's, in ops.hpp).
         struct OpRequest {
             std::string op, resource_name, key;
+            // A child table operation: the parent object's key and the table attribute; `key` is then
+            // the entry's key. Both empty otherwise.
+            std::string parent, child;
             json set = json::object(), object = json::object(), body = json::object();
             std::vector<std::string> clear;
         };
@@ -59,15 +62,21 @@ namespace forti::engine {
             if (!item.is_object()) throw Failure(Code::usage, where + ": expected an object");
             OpRequest request;
             request.op = text(item, "op", where);
-            if (request.op == "create") allow_keys(item, {"op", "resource", "object"}, where);
-            else if (request.op == "update") allow_keys(item, {"op", "resource", "key", "set", "clear"}, where);
-            else if (request.op == "delete") allow_keys(item, {"op", "resource", "key"}, where);
+            if (request.op == "create") allow_keys(item, {"op", "resource", "object", "parent", "child"}, where);
+            else if (request.op == "update") allow_keys(item, {"op", "resource", "key", "set", "clear", "parent", "child"}, where);
+            else if (request.op == "delete") allow_keys(item, {"op", "resource", "key", "parent", "child"}, where);
             else if (request.op == "action") allow_keys(item, {"op", "resource", "body"}, where);
             else throw Failure(Code::usage, std::format("{}: \"op\" must be create, update, delete or action", where));
             request.resource_name = text(item, "resource", where);
             if (request.resource_name.empty()) throw Failure(Code::usage, where + ": \"resource\" is required");
             request.key = text(item, "key", where);
             if (!request.key.empty()) detail::validate_key(request.key, where);
+            request.parent = text(item, "parent", where);
+            request.child = text(item, "child", where);
+            if (request.parent.empty() != request.child.empty())
+                throw Failure(Code::usage, std::format("{}: a child table operation needs both \"parent\" (the object's key) and "
+                                                       "\"child\" (its table attribute)", where));
+            if (!request.parent.empty()) detail::validate_key(request.parent, where);
             if (auto it = item.find("set"); it != item.end() && !it->is_null()) {
                 if (!it->is_object()) throw Failure(Code::usage, where + ": \"set\" must be an object");
                 request.set = *it;
@@ -132,10 +141,30 @@ namespace forti::engine {
             return key.empty() ? resource.path : fortiapi::path(resource.path, key);
         }
 
-        // The current object, or nullopt when it does not exist (404 or no results).
-        std::optional<json> read_current(fortiapi::Client& client, const Resource& resource, const std::string& key,
-                                         const fortiapi::Query& query, Identity& identity) {
-            std::string path = object_path(resource, key);
+        // The child table an operation addresses (nullopt for an ordinary one). `child` is checked
+        // against the resource's schema: a table attribute with keyed entries.
+        std::optional<detail::Child> child_for(const Resource& resource, const std::string& child) {
+            if (child.empty()) return std::nullopt;
+            return detail::child_of(resource, child);
+        }
+
+        // What an operation reads and writes: the object (or singleton), or one child table entry
+        // (the child table itself when `key` is empty).
+        std::string target_path(const Resource& resource, const std::optional<detail::Child>& child, const std::string& parent,
+                                const std::string& key) {
+            return child ? detail::child_path(resource, *child, parent, key) : object_path(resource, key);
+        }
+
+        // "system.dhcp/server 1 reserved-address 7" / "firewall/address web", for messages.
+        std::string target_name(const Resource& resource, const std::optional<detail::Child>& child, const std::string& parent,
+                                const std::string& key) {
+            if (!child) return std::format("{} {}", resource.name(), key);
+            return std::format("{} {} {} {}", resource.name(), parent, child->attribute, key);
+        }
+
+        // The current object at `path`, or nullopt when it does not exist (404 or no results).
+        std::optional<json> read_current(fortiapi::Client& client, const std::string& path, const fortiapi::Query& query,
+                                         Identity& identity) {
             fortiapi::Result result = client.exchange(fortiapi::Method::Get, path, query);
             detail::check_reply_depth(result.body, path);
             identity.take(result.body);
@@ -219,9 +248,11 @@ namespace forti::engine {
 
         // ---- building operation records ----
 
-        std::string key_of_object(const Resource& resource, const json& object) {
-            if (resource.kind != Kind::table || resource.key.empty()) return {};
-            auto it = object.find(resource.key);
+        // `child`: the entry's key attribute instead of the resource's.
+        std::string key_of_object(const Resource& resource, const json& object, const detail::Child* child = nullptr) {
+            const std::string& key = child ? child->key : resource.key;
+            if (resource.kind != Kind::table || key.empty()) return {};
+            auto it = object.find(key);
             if (it == object.end() || it->is_null()) return {};
             if (it->is_string()) return it->get<std::string>();
             if (it->is_number_integer() && it->get<long long>() != 0) return it->dump();   // 0: device assigns
@@ -236,14 +267,26 @@ namespace forti::engine {
                            {"path", resource.path}, {"kind", to_string(resource.kind)},
                            {"risk", detail::to_string(detail::risk_of(resource))}};
             if (!request.key.empty()) record["key"] = request.key;
-            auto fields = resource.fields();
+            // A child table entry: the parent's tier (risk_of(resource)), the entry's attributes, paths
+            // and before-state. Ordinary records carry neither field, so they stay as they were.
+            auto child = child_for(resource, request.child);
+            if (child) {
+                record["parent"] = request.parent;
+                record["child"] = child->attribute;
+            }
+            auto fields = child ? detail::fields(*child) : resource.fields();
+            const std::string& key_name = child ? child->key : resource.key;
+            std::string name = target_name(resource, child, request.parent, request.key);
+            json details = {{"resource", resource.name()}, {"key", request.key}};
+            if (child) {
+                details["parent"] = request.parent;
+                details["child"] = child->attribute;
+            }
             json diff = json::array();
 
             if (request.op == "create") {
-                if (current) throw Failure(Code::validation, std::format("{} {} already exists (use update)", resource.name(),
-                                                                         request.key),
-                                           {{"resource", resource.name()}, {"key", request.key}});
-                json body = detail::create_body(resource, request.object);
+                if (current) throw Failure(Code::validation, std::format("{} already exists (use update)", name), details);
+                json body = child ? detail::create_body(resource, *child, request.object) : detail::create_body(resource, request.object);
                 record["object"] = request.object;
                 record["before"] = nullptr;
                 record["before_digest"] = known ? json(detail::digest_of(nullptr)) : json(nullptr);
@@ -253,20 +296,22 @@ namespace forti::engine {
                     if (is_table_type(resource.field(it.key(), fields))) entry["table"] = table_change(json::array(), it.value());
                     diff.push_back(std::move(entry));
                 }
-                record["wire"] = {{"method", "POST"}, {"path", resource.path}, {"body", std::move(body)}};
+                record["wire"] = {{"method", "POST"}, {"path", target_path(resource, child, request.parent, "")},
+                                  {"body", std::move(body)}};
             } else if (request.op == "update") {
-                if (!current) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), request.key),
-                                            {{"resource", resource.name()}, {"key", request.key}});
+                if (!current) throw Failure(Code::not_found, std::format("{} not found", name), details);
                 if (request.set.empty() && request.clear.empty())
                     throw Failure(Code::usage, std::format("{}: an update needs \"set\" or \"clear\"", resource.name()));
                 // The SDK addresses the PUT by the object's key member, so renaming through set would
                 // write to the new name's path: refuse it instead.
-                if (!resource.key.empty() &&
-                    (request.set.contains(resource.key) || std::ranges::find(request.clear, resource.key) != request.clear.end()))
+                if (!key_name.empty() &&
+                    (request.set.contains(key_name) || std::ranges::find(request.clear, key_name) != request.clear.end()))
                     throw Failure(Code::validation, std::format("{}: the key attribute {} cannot be changed by an update",
-                                                                resource.name(), resource.key));
+                                                                child ? detail::child_label(resource, *child)
+                                                                      : std::string(resource.name()), key_name));
                 detail::Changes changes{request.set, request.clear};
-                json body = detail::update_body(resource, *current, changes);
+                json body = child ? detail::update_body(resource, *child, *current, changes)
+                                  : detail::update_body(resource, *current, changes);
                 json after = *current;
                 for (auto it = request.set.begin(); it != request.set.end(); ++it) {
                     json before = current->contains(it.key()) ? (*current)[it.key()] : json(nullptr);
@@ -276,13 +321,13 @@ namespace forti::engine {
                     after[it.key()] = it.value();
                     diff.push_back(std::move(entry));
                 }
-                for (const auto& name: request.clear) {
-                    const FieldInfo* field = resource.field(name, fields);
+                for (const auto& cleared: request.clear) {
+                    const FieldInfo* field = resource.field(cleared, fields);
                     json reset = field ? reset_value(*field) : json(nullptr);
-                    json before = current->contains(name) ? (*current)[name] : json(nullptr);
-                    json entry = {{"attribute", name}, {"change", "clear"}, {"before", before}, {"after", reset}};
+                    json before = current->contains(cleared) ? (*current)[cleared] : json(nullptr);
+                    json entry = {{"attribute", cleared}, {"change", "clear"}, {"before", before}, {"after", reset}};
                     if (is_table_type(field)) entry["table"] = table_change(before, reset);
-                    after[name] = reset;
+                    after[cleared] = reset;
                     diff.push_back(std::move(entry));
                 }
                 record["set"] = request.set;
@@ -290,15 +335,17 @@ namespace forti::engine {
                 record["before"] = *current;
                 record["before_digest"] = detail::digest_of(*current);
                 record["after"] = std::move(after);
-                record["wire"] = {{"method", "PUT"}, {"path", object_path(resource, request.key)}, {"body", std::move(body)}};
+                record["wire"] = {{"method", "PUT"}, {"path", target_path(resource, child, request.parent, request.key)},
+                                  {"body", std::move(body)}};
             } else if (request.op == "delete") {
-                if (!current) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), request.key),
-                                            {{"resource", resource.name()}, {"key", request.key}});
+                if (!current) throw Failure(Code::not_found, std::format("{} not found", name), details);
                 record["before"] = *current;
                 record["before_digest"] = detail::digest_of(*current);
                 record["after"] = nullptr;
-                record["note"] = "deletes the object";
-                record["wire"] = {{"method", "DELETE"}, {"path", object_path(resource, request.key)}, {"body", nullptr}};
+                record["note"] = child ? std::format("deletes this {} entry; the object's other entries are left alone", child->attribute)
+                                       : "deletes the object";
+                record["wire"] = {{"method", "DELETE"}, {"path", target_path(resource, child, request.parent, request.key)},
+                                  {"body", nullptr}};
             } else {   // action
                 record["body"] = request.body;
                 record["before"] = nullptr;
@@ -324,8 +371,18 @@ namespace forti::engine {
             if (resource.kind == Kind::monitor || !resource.typed())
                 throw Failure(Code::usage, std::format("{}: {} is a monitor endpoint: only \"action\" applies", where,
                                                        resource.name()));
+            if (!request.child.empty() && resource.kind != Kind::table)
+                throw Failure(Code::usage, std::format("{}: {} is a {}: only a table's objects have child tables", where,
+                                                       resource.name(), to_string(resource.kind)));
             if (resource.kind == Kind::singleton && request.op != "update")
                 throw Failure(Code::usage, std::format("{}: {} is a singleton: only update applies", where, resource.name()));
+            if (!request.child.empty()) {
+                detail::Child child = detail::child_of(resource, request.child);
+                if (request.op != "create" && request.key.empty())
+                    throw Failure(Code::usage, std::format("{}: {} needs \"key\": the {} entry's {}", where, request.op,
+                                                           child.attribute, child.key));
+                return resource;
+            }
             if (resource.kind == Kind::table && request.op != "create" && request.key.empty())
                 throw Failure(Code::usage, std::format("{}: {} needs \"key\" ({})", where, request.op, resource.key));
             if (resource.kind == Kind::singleton && !request.key.empty())
@@ -415,16 +472,20 @@ namespace forti::engine {
             for (std::size_t i = 0; i < operations_it->size(); ++i) {
                 OpRequest op = parse_operation((*operations_it)[i], i);
                 Resource resource = resolve_for(op, i);
+                auto child = child_for(resource, op.child);
                 if (op.op == "create") {
-                    op.key = key_of_object(resource, op.object);
+                    // A new entry is checked before its parent is read (an ordinary create's check
+                    // needs no read at all).
+                    if (child) (void) detail::create_body(resource, *child, op.object);
+                    op.key = key_of_object(resource, op.object, child ? &*child : nullptr);
                     // The key is used for the existence check now and for a rollback delete later.
                     if (!op.key.empty()) detail::validate_key(op.key, std::format("operations[{}]", i));
                 }
                 // One operation per object: each before-state is read once, before anything runs.
                 if (op.op != "action" && !(op.op == "create" && op.key.empty()) &&
-                    !targets.insert(object_path(resource, op.key)).second)
-                    throw Failure(Code::usage, std::format("operations[{}]: {} {} appears more than once in the plan",
-                                                           i, resource.name(), op.key));
+                    !targets.insert(target_path(resource, child, op.parent, op.key)).second)
+                    throw Failure(Code::usage, std::format("operations[{}]: {} appears more than once in the plan",
+                                                           i, target_name(resource, child, op.parent, op.key)));
                 parsed.emplace_back(std::move(op), std::move(resource));
             }
 
@@ -437,9 +498,24 @@ namespace forti::engine {
                 std::optional<json> current;
                 bool known = false;
                 bool needs_read = op.op == "update" || op.op == "delete" || (op.op == "create" && !op.key.empty());
+                auto child = child_for(resource, op.child);
                 if (needs_read) {
-                    current = read_current(client, resource, resource.kind == Kind::table ? op.key : "", query, identity);
+                    std::string path = child ? detail::child_path(resource, *child, op.parent, op.key)
+                                             : object_path(resource, resource.kind == Kind::table ? op.key : "");
+                    current = read_current(client, path, query, identity);
                     known = true;
+                } else if (child && op.op == "create") {
+                    // A new entry with a device-assigned key has no before-state of its own, but its
+                    // parent must exist. Read once here, never digested: other entries may change.
+                    std::string path = detail::child_path(resource, *child, op.parent);
+                    fortiapi::Result result = client.exchange(fortiapi::Method::Get, path, query);
+                    detail::check_reply_depth(result.body, path);
+                    identity.take(result.body);
+                    if (result.http_status == 404)
+                        throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), op.parent),
+                                      {{"resource", resource.name()}, {"key", op.parent}, {"child", child->attribute}});
+                    if (!result.ok())
+                        throw fortiapi::ApiError(fortiapi::Method::Get, path, result.http_status, std::move(result.body));
                 }
                 records.push_back(build_record(i, op, resource, current, known));
             }
@@ -461,6 +537,28 @@ namespace forti::engine {
                                                     "(state/backups/{}.conf, owner-only) and probes management "
                                                     "connectivity after each critical operation. {}", id,
                                                     recovery_limitation));
+            // Writing a child table through its parent replaces the whole list. The plan's drift check
+            // covers the whole object until apply re-reads it, but a list written from an old copy
+            // reverts other writers' entry changes: say how to change one entry instead.
+            for (std::size_t i = 0; i < parsed.size(); ++i) {
+                const auto& [op, resource] = parsed[i];
+                if (op.op != "update" || !op.child.empty() || resource.kind != Kind::table) continue;
+                std::vector<std::string> touched;
+                for (auto it = op.set.begin(); it != op.set.end(); ++it) touched.push_back(it.key());
+                touched.insert(touched.end(), op.clear.begin(), op.clear.end());
+                for (const auto& attribute: touched) {
+                    try {
+                        (void) detail::child_of(resource, attribute);
+                    } catch (const Failure&) {
+                        continue;
+                    }
+                    data["notes"].push_back(std::format(
+                            "operations[{0}] replaces the whole {1} table of {2} {3}: entries changed by others after "
+                            "apply re-reads it are reverted. To change one entry, use a child table operation "
+                            "(\"parent\": \"{3}\", \"child\": \"{1}\"; forti set {2} <entry> --parent {3} --child {1})",
+                            i, attribute, resource.name(), op.key));
+                }
+            }
             data["apply"] = std::format("forti apply {}", id);
             if (profile.mode == Mode::guarded) data["approve"] = std::format("forti approve {}", id);
             return ok(std::move(data), {{"profile", profile.name}, {"vdom", vdom}});
@@ -582,6 +680,10 @@ namespace forti::engine {
             const json& before = op["before"];
             OpRequest undo;
             undo.resource_name = std::string(resource.name());
+            // A child table operation is undone on the same entry of the same parent.
+            undo.parent = op.value("parent", "");
+            undo.child = op.value("child", "");
+            auto child = child_for(resource, undo.child);
             if (kind == "create") {
                 if (done.post_known && !done.post) return std::nullopt;   // nothing was created
                 if (done.key.empty()) throw Failure(Code::validation, "the created object's key is unknown");
@@ -603,7 +705,7 @@ namespace forti::engine {
                 if (done.post_known && done.post) return std::nullopt;   // still there
                 undo.op = "create";
                 undo.key = op.value("key", "");
-                for (const auto& field: resource.fields())
+                for (const auto& field: child ? detail::fields(*child) : resource.fields())
                     if (!field.read_only && before.contains(field.name) && !before[field.name].is_null())
                         undo.object[field.name] = before[field.name];
             }
@@ -753,14 +855,27 @@ namespace forti::engine {
                 const Resource& resource = resources.back();
                 std::string kind = op["op"];
                 std::string key = op.value("key", "");
+                std::string parent = op.value("parent", "");
+                auto child = child_for(resource, op.value("child", ""));
                 bool read = kind == "update" || kind == "delete" || (kind == "create" && op["before_digest"].is_string());
                 if (!read) continue;
-                currents[i] = read_current(client, resource, resource.kind == Kind::table ? key : "", query, identity);
+                // A child table operation re-reads only its entry: changes to the parent's other
+                // entries do not make it stale.
+                currents[i] = read_current(client,
+                                           child ? detail::child_path(resource, *child, parent, key)
+                                                 : object_path(resource, resource.kind == Kind::table ? key : ""),
+                                           query, identity);
                 auto stale = [&](std::string_view reason, std::string_view what) {
+                    json details = {{"plan_id", id}, {"reason", reason}, {"index", i}, {"resource", resource.name()},
+                                    {"key", key}};
+                    if (child) {
+                        details["parent"] = parent;
+                        details["child"] = child->attribute;
+                    }
                     throw Failure(Code::stale_plan,
-                                  std::format("{} {} {} since plan {} was made; plan again", resource.name(), key, what, id),
-                                  {{"plan_id", id}, {"reason", reason}, {"index", i}, {"resource", resource.name()},
-                                   {"key", key}});
+                                  std::format("{} {} since plan {} was made; plan again", target_name(resource, child, parent, key),
+                                              what, id),
+                                  std::move(details));
                 };
                 if ((kind == "update" || kind == "delete") && !currents[i]) stale("before_changed", "no longer exists");
                 if (op["before_digest"].is_string() && detail::digest_of(currents[i] ? *currents[i] : json(nullptr)) !=
@@ -768,9 +883,11 @@ namespace forti::engine {
                     stale("before_changed", "changed");
                 if (kind == "update") {
                     detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};
-                    if (detail::update_body(resource, *currents[i], changes) != op["wire"]["body"])
-                        stale("wire_changed", "would now be written differently");
-                } else if (kind == "create" && detail::create_body(resource, op["object"]) != op["wire"]["body"]) {
+                    json body = child ? detail::update_body(resource, *child, *currents[i], changes)
+                                      : detail::update_body(resource, *currents[i], changes);
+                    if (body != op["wire"]["body"]) stale("wire_changed", "would now be written differently");
+                } else if (kind == "create" && (child ? detail::create_body(resource, *child, op["object"])
+                                                      : detail::create_body(resource, op["object"])) != op["wire"]["body"]) {
                     stale("wire_changed", "would now be written differently");
                 }
             }
@@ -819,8 +936,14 @@ namespace forti::engine {
                 const Resource& resource = resources[i];
                 std::string kind = op["op"];
                 done.key = op.value("key", "");
+                std::string parent = op.value("parent", "");
+                auto child = child_for(resource, op.value("child", ""));
                 done.record = {{"index", i}, {"op", kind}, {"resource", resource.name()}};
                 if (!done.key.empty()) done.record["key"] = done.key;
+                if (child) {
+                    done.record["parent"] = parent;
+                    done.record["child"] = child->attribute;
+                }
                 if (stop) {
                     done.status = "not_attempted";
                     done.record["status"] = done.status;
@@ -830,8 +953,12 @@ namespace forti::engine {
                 try {
                     if (kind == "create") {
                         done.sent = true;
-                        fortiapi::Reply reply = detail::create(resource, client, op["object"], query);
-                        if (done.key.empty() && !reply.mkey.is_null())
+                        fortiapi::Reply reply = child ? detail::create(resource, *child, client, parent, op["object"], query)
+                                                      : detail::create(resource, client, op["object"], query);
+                        // A child POST reports the new entry's key by its own rule (created_entry_key):
+                        // recorded, so verification and the rollback delete address exactly that entry.
+                        if (done.key.empty() && child) done.key = detail::created_entry_key(*child, reply);
+                        else if (done.key.empty() && !reply.mkey.is_null())
                             done.key = reply.mkey.is_string() ? reply.mkey.get<std::string>() : reply.mkey.dump();
                         // A device-reported key is used for verification and the rollback delete.
                         if (!detail::addressable_key(done.key)) done.key.clear();
@@ -839,10 +966,12 @@ namespace forti::engine {
                     } else if (kind == "update") {
                         detail::Changes changes{op["set"], op["clear"].get<std::vector<std::string>>()};
                         done.sent = true;
-                        detail::update(resource, client, *currents[i], changes, query);
+                        if (child) detail::update(resource, *child, client, parent, done.key, *currents[i], changes, query);
+                        else detail::update(resource, client, *currents[i], changes, query);
                     } else if (kind == "delete") {
                         done.sent = true;
-                        detail::remove(resource, client, done.key, query);
+                        if (child) detail::remove(resource, *child, client, parent, done.key, query);
+                        else detail::remove(resource, client, done.key, query);
                     } else {
                         done.sent = true;
                         fortiapi::Monitor::post(std::string_view(resource.path).substr(8), op["body"], query, client);
@@ -884,11 +1013,15 @@ namespace forti::engine {
                         done.record["verification"] = "monitor actions cannot be verified by re-reading";
                     } else if (resource.kind == Kind::table && object_key.empty()) {
                         if (done.status == "verified") done.status = "applied_unverified";
-                        done.record["verification"] = "the created object's key was not reported";
+                        done.record["verification"] = child ? "the created entry's key was not reported (child_mkey)"
+                                                            : "the created object's key was not reported";
                     } else {
                         try {
                             Identity ignored;
-                            done.post = read_current(client, resource, object_key, query, ignored);
+                            done.post = read_current(client,
+                                                     child ? detail::child_path(resource, *child, parent, object_key)
+                                                           : object_path(resource, object_key),
+                                                     query, ignored);
                             done.post_known = true;
                         } catch (...) {
                             done.record["verification"] = std::string("re-read failed: ") +
@@ -919,12 +1052,17 @@ namespace forti::engine {
                         };
                         if (kind == "create") {
                             if (!done.post) done.record["verification"] = "the object was not found after the create";
-                            else for (auto it = op["object"].begin(); it != op["object"].end(); ++it) expect(it.key(), it.value());
+                            else
+                                for (auto it = op["object"].begin(); it != op["object"].end(); ++it) {
+                                    // A device-assigned entry key (0 or absent in the request) is the reported one.
+                                    if (child && it.key() == child->key && !op.contains("key")) continue;
+                                    expect(it.key(), it.value());
+                                }
                         } else if (kind == "update") {
                             if (!done.post) done.record["verification"] = "the object was not found after the update";
                             else {
                                 for (auto it = op["set"].begin(); it != op["set"].end(); ++it) expect(it.key(), it.value());
-                                auto fields = resource.fields();
+                                auto fields = child ? detail::fields(*child) : resource.fields();
                                 for (const auto& name: op["clear"]) {
                                     const FieldInfo* field = resource.field(name.get<std::string>(), fields);
                                     expect(name, field ? reset_value(*field) : json(nullptr));
@@ -968,6 +1106,8 @@ namespace forti::engine {
                 json entry = {{"index", i}, {"op", ops[i]["op"]}, {"resource", ops[i]["resource"]},
                               {"status", executed[i].status}, {"attributes", attribute_names(ops[i])}};
                 if (!executed[i].key.empty()) entry["key"] = executed[i].key;
+                for (const char* field: {"parent", "child"})
+                    if (auto it = ops[i].find(field); it != ops[i].end()) entry[field] = *it;
                 audit_ops.push_back(std::move(entry));
                 verified += executed[i].status == "verified";
                 unverified += executed[i].status == "applied_unverified";

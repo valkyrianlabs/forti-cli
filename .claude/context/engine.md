@@ -104,6 +104,15 @@ public:
   `..` are never keys: the SDK leaves '.' unescaped and libcurl removes dot segments, so
   `DELETE …/address/.` would address the whole table (gap G13). The engine rejects them in requests,
   created object names, stored plans and device-reported mkeys.
+- **Child tables**: one table attribute of a table object (`reserved-address` of `system.dhcp/server`),
+  entry by entry on FortiOS's child paths, `cmdb/<path>/<parent key>/<attribute>[/<entry key>]`
+  (forti-api `ChildTable`). Requests name it with `child` plus the parent's key (`key` in reads,
+  `parent` in operations); the attribute must be a table attribute of the resource whose entries
+  have a key (schema-checked). Both keys follow the dot-key rule. The before-state, digest, diff,
+  wire path, drift check, verification and rollback are the one entry's; the risk tier is the
+  resource's. A child POST reply reports the new entry's key as `mkey` (FortiOS 7.4.8; on other child
+  replies `mkey` can be the parent's): the engine takes `child_mkey`, else `mkey` only from a reply
+  echoing the POST and this `child_path`, and records it for the rollback delete.
 
 ### Requests
 
@@ -119,13 +128,22 @@ public:
 {"resource": "firewall/address", "key": "LAN", "filter": ["type==ipmask"], "fields": ["name","subnet"],
  "start": 0, "count": 50, "vdom": "root", "profile": "home", "params": {"datasource": "1"}}
  // filter/fields field names are validated against the catalog; count is capped (default 50, max 1000)
+{"resource": "system.dhcp/server", "key": "1", "child": "reserved-address", "child_key": "21"}
+ // a child table's entries (or one): key = the parent; fields/filter name the entry's attributes;
+ // meta adds "child" (and "child_key"); lists are windowed by the engine (meta.total)
 
 // plan
 {"profile": "home", "vdom": "root", "operations": [
   {"op": "create", "resource": "firewall/address", "object": {"name": "x", "subnet": "192.0.2.0 255.255.255.0"}},
   {"op": "update", "resource": "firewall/address", "key": "x", "set": {"comment": "c"}, "clear": ["color"]},
   {"op": "delete", "resource": "firewall/address", "key": "x"},
+  {"op": "create", "resource": "system.dhcp/server", "parent": "1", "child": "reserved-address",
+   "object": {"ip": "192.0.2.50", "mac": "00:00:5e:00:53:32"}},          // id omitted/0: device-assigned
+  {"op": "update", "resource": "system.dhcp/server", "parent": "1", "child": "reserved-address",
+   "key": "21", "set": {"description": "printer"}},                       // key = the entry's
+  {"op": "delete", "resource": "system.dhcp/server", "parent": "1", "child": "reserved-address", "key": "21"},
   {"op": "action", "resource": "monitor/system/external-resource/dynamic", "body": {}}]}
+ // plan records and views of child operations carry "parent" and "child"; other records are unchanged
 
 // apply
 {"plan_id": "…"}            // nothing else is accepted: operations come from the stored plan

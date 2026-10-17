@@ -39,9 +39,11 @@ namespace forti::engine {
             return std::string(clause.substr(0, at));
         }
 
-        void check_attributes(const Resource& resource, const std::vector<std::string>& names, std::string_view what) {
+        // `child`: the names are a child table's entry attributes, not the resource's.
+        void check_attributes(const Resource& resource, const std::vector<std::string>& names, std::string_view what,
+                              const detail::Child* child = nullptr) {
             if (!resource.typed() || resource.kind == Kind::monitor || names.empty()) return;
-            auto fields = resource.fields();
+            auto fields = child ? detail::fields(*child) : resource.fields();
             std::vector<std::string> unknown;
             for (const auto& name: names)
                 if (!resource.field(name, fields)) unknown.push_back(name);
@@ -56,6 +58,13 @@ namespace forti::engine {
                 if (!close.empty()) list += std::format(" (did you mean {}?)", close.front());
                 for (auto& candidate: close) suggestions.push_back(std::move(candidate));
             }
+            if (child)
+                throw Failure(Code::validation,
+                              std::format("{} {}: unknown attribute(s) in {}: {}", resource.name(), child->attribute, what, list),
+                              {{"unknown", unknown}, {"resource", resource.name()}, {"child", child->attribute},
+                               {"suggestions", suggestions},
+                               {"hint", std::format("`forti discover {} --fields {}` lists the entry attributes",
+                                                    resource.name(), child->attribute)}});
             throw Failure(Code::validation, std::format("{}: unknown attribute(s) in {}: {}", resource.name(), what, list),
                           {{"unknown", unknown}, {"resource", resource.name()}, {"suggestions", suggestions},
                            {"hint", std::format("`forti discover {}` lists the attributes", resource.name())}});
@@ -270,7 +279,8 @@ namespace forti::engine {
     // ---- read ----
 
     json Engine::read(const json& request, Secrets secrets) {
-        allow_keys(request, {"resource", "key", "filter", "fields", "start", "count", "vdom", "profile", "params"}, "read");
+        allow_keys(request, {"resource", "key", "child", "child_key", "filter", "fields", "start", "count", "vdom", "profile",
+                             "params"}, "read");
         // The resource as people spell it (catalog lookup), or a table object by its path
         // ("firewall/address/web"), which carries the key.
         std::string key = text(request, "key");
@@ -295,8 +305,26 @@ namespace forti::engine {
         if (!key.empty() && resource.kind != Kind::table)
             throw Failure(Code::usage, std::format("{} is a {}: it has no keyed objects", resource.name(), to_string(resource.kind)));
 
+        // A child table: the entries of one table attribute of the object `key` (the parent), read on
+        // FortiOS's child path; `child_key` picks one entry.
+        std::string child_name = text(request, "child"), child_key = text(request, "child_key");
+        std::optional<detail::Child> child;
+        if (!child_key.empty() && child_name.empty())
+            throw Failure(Code::usage, "\"child_key\" needs \"child\" (the table attribute)");
+        if (!child_name.empty()) {
+            if (resource.kind != Kind::table)
+                throw Failure(Code::usage, std::format("{} is a {}: only a table's objects have child tables", resource.name(),
+                                                       to_string(resource.kind)));
+            if (key.empty())
+                throw Failure(Code::usage, std::format("\"child\" needs \"key\": the {} of the {} object whose {} to read",
+                                                       resource.key, resource.name(), child_name));
+            child = detail::child_of(resource, child_name);
+            if (!child_key.empty()) detail::validate_key(child_key, std::format("{} {}", resource.name(), child->attribute));
+        }
+        const detail::Child* entries = child ? &*child : nullptr;
+
         auto fields = strings(request, "fields");
-        check_attributes(resource, fields, "fields");
+        check_attributes(resource, fields, "fields", entries);
         if (!fields.empty()) {
             std::string joined;
             for (const auto& field: fields) joined += (joined.empty() ? "" : "|") + field;
@@ -311,30 +339,43 @@ namespace forti::engine {
                 attributes.push_back(filter_attribute(rest.substr(0, comma)));
                 rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
             }
-            check_attributes(resource, attributes, "filter");
+            check_attributes(resource, attributes, "filter", entries);
             query.filter(expression);
         }
 
-        bool listing = key.empty() && resource.kind != Kind::singleton;
+        bool listing = child ? child_key.empty() : key.empty() && resource.kind != Kind::singleton;
         std::size_t start = number(request, "start", 0);
         std::size_t count = std::min(number(request, "count", default_page), max_page);
         if (count == 0) throw Failure(Code::usage, "\"count\" must be at least 1");
         // cmdb tables page on the device. Monitor endpoints do not page consistently (some ignore
-        // start/count), so the engine windows their results itself: deterministic next_start.
-        bool server_paging = listing && resource.kind == Kind::table;
+        // start/count), so the engine windows their results itself: deterministic next_start. So it
+        // does for child tables, whose paging FortiOS does not document (and whose lists are small).
+        bool server_paging = listing && resource.kind == Kind::table && !child;
         if (server_paging) {
             query.start(start);
             query.count(count);
         }
         add_params(query, request);
 
-        std::string api_path = key.empty() ? resource.path : fortiapi::path(resource.path, key);
+        std::string api_path = child ? detail::child_path(resource, *child, key, child_key)
+                             : key.empty() ? resource.path : fortiapi::path(resource.path, key);
         json body;
         try {
             body = client(profile).get(api_path, query);
             detail::check_reply_depth(body, api_path);
         } catch (const fortiapi::ApiError& error) {
             if (key.empty() || !error.not_found()) throw;
+            if (child) {
+                // FortiOS answers 404 for a missing parent and for a missing entry alike.
+                std::string what = child_key.empty()
+                                   ? std::format("{} \"{}\" not found", resource.name(), key)
+                                   : std::format("{} \"{}\" {} \"{}\" not found (no such entry, or no such {})", resource.name(),
+                                                 key, child->attribute, child_key, resource.name());
+                json details = {{"resource", resource.name()}, {"key", key}, {"child", child->attribute}, {"method", "GET"},
+                                {"path", error.path()}, {"http_status", error.http_status()}};
+                if (!child_key.empty()) details["child_key"] = child_key;
+                throw Failure(Code::not_found, what, std::move(details));
+            }
             throw Failure(Code::not_found, std::format("{} \"{}\" not found", resource.name(), key),
                           {{"resource", resource.name()}, {"key", key}, {"method", "GET"}, {"path", error.path()},
                            {"http_status", error.http_status()}});
@@ -343,8 +384,14 @@ namespace forti::engine {
 
         json meta = {{"resource", resource.name()}, {"profile", profile.name}, {"device", device_meta(body)}};
         if (!key.empty()) meta["key"] = key;
+        if (child) meta["child"] = child->attribute;
+        if (!child_key.empty()) meta["child_key"] = child_key;
         if (auto it = body.find("vdom"); it != body.end()) meta["vdom"] = *it;
-        if (!key.empty() && results.is_array()) {
+        if (child && !child_key.empty() && results.is_array()) {
+            if (results.empty())
+                throw Failure(Code::not_found, std::format("{} {} {} {} not found", resource.name(), key, child->attribute, child_key));
+            results = std::move(results.front());
+        } else if (!child && !key.empty() && results.is_array()) {
             if (results.empty()) throw Failure(Code::not_found, std::format("{} {} not found", resource.name(), key));
             results = std::move(results.front());
         } else if (listing && results.is_array()) {

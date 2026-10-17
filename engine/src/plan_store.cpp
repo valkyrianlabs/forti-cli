@@ -1,3 +1,4 @@
+#include "ops.hpp"
 #include "plan_store.hpp"
 #include "sha256.hpp"
 
@@ -178,7 +179,43 @@ namespace forti::engine::detail {
             std::string method, path;
             std::string key = is("key", json::value_t::string) ? op["key"].get<std::string>() : std::string();
             if (op.contains("key") && (!op["key"].is_string() || !addressable_key(key))) tampered(id, "operation");
-            if (name == "action") {
+            // A child table operation names its parent object and table attribute; the attribute must
+            // still be one of the resource's tables with keyed entries.
+            std::optional<Child> child;
+            std::string parent;
+            if (op.contains("child") || op.contains("parent")) {
+                if (!is("child", json::value_t::string) || !is("parent", json::value_t::string)) tampered(id, "operation");
+                parent = op["parent"].get<std::string>();
+                if (!addressable_key(parent) || name == "action") tampered(id, "operation");
+                try {
+                    child = child_of(resource, op["child"].get<std::string>());
+                } catch (const Failure&) {
+                    tampered(id, "operation");
+                }
+            }
+            auto at = [&](const std::string& entry) {
+                try {
+                    return child_path(resource, *child, parent, entry);
+                } catch (const Failure&) {
+                    tampered(id, "operation");
+                }
+            };
+            if (child) {
+                if (name == "create") {
+                    shape = is("object", json::value_t::object);
+                    method = "POST";
+                    path = at("");
+                } else if (name == "update") {
+                    shape = !key.empty() && is("set", json::value_t::object) && is("clear", json::value_t::array) &&
+                            std::ranges::all_of(op["clear"], [](const json& item) { return item.is_string(); });
+                    method = "PUT";
+                    if (!key.empty()) path = at(key);
+                } else if (name == "delete") {
+                    shape = !key.empty();
+                    method = "DELETE";
+                    if (!key.empty()) path = at(key);
+                }
+            } else if (name == "action") {
                 shape = resource.kind == Kind::monitor && is("body", json::value_t::object);
                 method = "POST";
                 path = resource.path;
@@ -417,7 +454,7 @@ namespace forti::engine::detail {
             // Only attribute-bearing subtrees are redacted: the operation's own "key" is an object
             // name, not the attribute "key" (an NTP or OSPF authentication key).
             json entry = json::object();
-            for (const char* key: {"index", "op", "resource", "key", "risk", "note"})
+            for (const char* key: {"index", "op", "resource", "parent", "child", "key", "risk", "note"})
                 if (auto it = op.find(key); it != op.end()) entry[key] = *it;
             if (auto it = op.find("diff"); it != op.end()) entry["diff"] = redact(*it);
             if (auto it = op.find("wire"); it != op.end() && it->is_object()) {

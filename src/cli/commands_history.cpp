@@ -133,6 +133,8 @@ namespace forti::cli {
 
         std::string describe(const json& op) {
             std::string out = text(op, "op") + " " + text(op, "resource");
+            // A child table entry: "update system.dhcp/server 1 reserved-address 7".
+            if (auto parent = text(op, "parent"); !parent.empty()) out += " " + parent + " " + text(op, "child");
             if (auto key = text(op, "key"); !key.empty()) out += " " + key;
             std::string attributes;
             if (const json& names = member(op, "attributes"); names.is_array())

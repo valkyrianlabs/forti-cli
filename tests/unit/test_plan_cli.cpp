@@ -334,3 +334,88 @@ TEST_F(PlanCli, AuditRecordsTheChangeAndItsApproval) {
     EXPECT_TRUE(apply["approved_by"].get<std::string>().starts_with("cli:")) << apply.dump();
     EXPECT_NE(apply["summary"].get<std::string>().find("1 update"), std::string::npos) << apply.dump();
 }
+
+// ---- child tables: --parent / --child, forti get --child ----
+
+namespace {
+
+    json reservation(unsigned id, const std::string& ip, const std::string& description = "") {
+        return {{"id", id}, {"q_origin_key", id}, {"type", "mac"}, {"ip", ip}, {"mac", "00:00:5e:00:53:07"},
+                {"action", "reserved"}, {"description", description}};
+    }
+
+    // FortiOS 7.4.8 child write replies: POST mkey = the new entry's key (no child_mkey); PUT mkey = the
+    // parent's key, child_mkey = the entry's as text.
+    json child_written(const std::string& method, unsigned entry) {
+        json body = {{"http_method", method}, {"status", "success"}, {"http_status", 200}, {"serial", serial},
+                     {"version", "v7.4.8"}, {"vdom", "root"}, {"child_path", "reserved-address"}};
+        if (method == "POST") body["mkey"] = entry;
+        else {
+            body["mkey"] = 1;
+            body["child_mkey"] = std::to_string(entry);
+        }
+        return body;
+    }
+
+    const std::string reservations = "https://fortigate.test:8443/api/v2/cmdb/system.dhcp/server/1/reserved-address";
+
+}  // namespace
+
+TEST_F(PlanCli, GetReadsAChildTable) {
+    transport->reply(200, fake::envelope(json::array({reservation(7, "192.0.2.7", "nas"), reservation(21, "192.0.2.21")})));
+    ASSERT_EQ(forti({"--json", "get", "system.dhcp/server", "1", "--child", "reserved-address", "--fields", "id,ip"}), 0) << err.str();
+    EXPECT_EQ(transport->requests.back().url, reservations + "?format=id%7Cip");
+    EXPECT_EQ(json_out()["data"].size(), 2u);
+    EXPECT_EQ(json_out()["meta"]["child"], "reserved-address");
+
+    transport->reply(200, fake::envelope(json::array({reservation(21, "192.0.2.21")})));
+    ASSERT_EQ(forti({"--json", "get", "system.dhcp/server/1", "--child", "reserved-address", "--child-key", "21"}), 0) << err.str();
+    EXPECT_EQ(transport->requests.back().url, reservations + "/21");
+    EXPECT_EQ(json_out()["data"]["ip"], "192.0.2.21");
+
+    // --all pages a child listing; it is the entry key (--child-key) that makes a read single.
+    transport->reply(200, fake::envelope(json::array({reservation(7, "192.0.2.7")})));
+    ASSERT_EQ(forti({"--json", "get", "system.dhcp/server", "1", "--child", "reserved-address", "--all"}), 0) << err.str();
+    EXPECT_EQ(forti({"get", "system.dhcp/server", "1", "--child", "reserved-address", "--child-key", "7", "--all"}), 2);
+    EXPECT_EQ(forti({"get", "system.dhcp/server", "1", "--child-key", "7"}), 2);
+}
+
+TEST_F(PlanCli, SetCreateAndDeleteTakeParentAndChild) {
+    // set: the key is the entry's.
+    transport->reply(200, fake::envelope(json::array({reservation(7, "192.0.2.7", "old")})));   // plan
+    transport->reply(200, fake::envelope(json::array({reservation(7, "192.0.2.7", "old")})));   // apply: re-read
+    transport->reply(200, child_written("PUT", 7));
+    transport->reply(200, fake::envelope(json::array({reservation(7, "192.0.2.7", "nas")})));   // verify
+    ASSERT_EQ(forti({"set", "system.dhcp/server", "7", "--parent", "1", "--child", "reserved-address", "description=nas"}), 0)
+            << err.str() << out.str();
+    EXPECT_NE(out.str().find("update system.dhcp/server \"1\" reserved-address \"7\""), std::string::npos) << out.str();
+    EXPECT_EQ(transport->requests[2].method, fortiapi::Method::Put);
+    EXPECT_EQ(transport->requests[2].url, reservations + "/7");
+    EXPECT_EQ(transport->requests[2].body, R"({"description":"nas"})");
+
+    // create: the device assigns the id; the record names it.
+    transport->requests.clear();
+    transport->reply(200, fake::envelope(json::array()));                                        // plan: the parent exists
+    transport->reply(200, fake::envelope({{"hostname", "fw"}}));                                 // apply: serial
+    transport->reply(200, child_written("POST", 21));
+    transport->reply(200, fake::envelope(json::array({reservation(21, "192.0.2.50", "printer")})));
+    ASSERT_EQ(forti({"--json", "create", "system.dhcp/server", "--parent", "1", "--child", "reserved-address", "ip=192.0.2.50",
+                     "mac=00:00:5e:00:53:07", "description=printer"}), 0) << err.str() << out.str();
+    EXPECT_EQ(json_out()["data"]["operations"][0]["key"], "21");
+    EXPECT_EQ(json_out()["data"]["plan"]["operations"][0]["wire"]["path"], "cmdb/system.dhcp/server/1/reserved-address");
+    EXPECT_EQ(transport->requests[2].method, fortiapi::Method::Post);
+    EXPECT_EQ(transport->requests[2].url, reservations);
+
+    // delete, as a plan for later.
+    transport->requests.clear();
+    transport->reply(200, fake::envelope(json::array({reservation(21, "192.0.2.50", "printer")})));
+    ASSERT_EQ(forti({"--json", "plan", "delete", "system.dhcp/server", "21", "--parent", "1", "--child", "reserved-address"}), 0)
+            << err.str();
+    EXPECT_EQ(json_out()["data"]["operations"][0]["wire"]["path"], "cmdb/system.dhcp/server/1/reserved-address/21");
+    EXPECT_EQ(writes(), 0u);
+
+    // Both options or neither.
+    EXPECT_EQ(forti({"delete", "system.dhcp/server", "21", "--parent", "1"}), 2);
+    EXPECT_EQ(forti({"delete", "system.dhcp/server", "21", "--child", "reserved-address"}), 2);
+    EXPECT_EQ(forti({"plan", "action", "monitor/system/dhcp/revoke", "--parent", "1", "--child", "reserved-address"}), 2);
+}

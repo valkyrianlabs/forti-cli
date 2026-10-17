@@ -1,4 +1,4 @@
-.Dd October 16, 2026
+.Dd October 17, 2026
 .Dt FORTI 1
 .Os
 .Sh NAME
@@ -311,6 +311,19 @@ Device secrets are shown as
 .Fl -reveal
 shows them on a terminal, or with
 .Fl -json .
+.It Cm get Ar resource Ar key Fl -child Ar attr Op Fl -child-key Ar entry
+Read the entries of the table attribute
+.Ar attr
+of the object
+.Ar key
+(a child table, such as a DHCP server's
+.Li reserved-address ) ,
+or the one entry
+.Ar entry .
+.Fl -fields
+and
+.Fl -filter
+then name the entry's attributes.
 .El
 .Ss Changes
 .Bl -tag -width Ds
@@ -329,6 +342,17 @@ at a terminal (without one it stops at the approval); autonomous applies.
 only plans;
 .Fl -verbose
 adds the request lines.
+.Fl -parent Ar key Fl -child Ar attr
+changes one entry of the object's table attribute
+.Ar attr
+instead of the object: the key given to
+.Cm set
+and
+.Cm delete
+is the entry's, and a numeric id left out of
+.Cm create
+is assigned by the device.
+Only that entry is read, written, verified and rolled back.
 .It Cm rollback Op Ar id
 Undo the profile's last change (or that of
 .Ar id ) ,
