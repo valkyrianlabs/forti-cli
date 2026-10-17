@@ -20,4 +20,10 @@ One level of nested "  - " detail bullets is allowed. Consolidate; don't paste c
     plan and apply output name the parent and child; help, man page and completions updated.
   - Mock FortiOS: `system.dhcp/server` with stateful child paths using the FortiOS 7.4.8 reply shapes,
     `monitor/system/dhcp` and `monitor/system/dhcp/revoke`; unit and integration tests.
+- Redaction: the value of http-headers entries whose key is a credential header (Authorization,
+  Proxy-Authorization, Cookie, Set-Cookie, X-API-Key, X-Auth-Token, names containing token, secret,
+  password, api-key) in reads (meta.redacted /*/http-headers/*/value), plan views, mismatches and
+  error details; every value of an http-headers child table read or operation. FortiOS 7.4.8 types
+  the value var-string (cleartext on GET).
+- Require forti-api >= 1.2.0 (meson.build, debian/control).
 

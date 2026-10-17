@@ -63,7 +63,10 @@ Deeper replies fail with `api`.
 
 `Engine::read` replaces, at any depth, every string value starting with `ENC ` (FortiOS's reversible
 secret form) and every non-empty value of an attribute that `detail::sensitive_name` marks as secret
-with `"<redacted>"`. `meta.redacted` lists the locations as JSON pointers relative to `data`, with `*`
+with `"<redacted>"`, and the `value` of every header entry (`{"key", "value"}`, e.g.
+`system/automation-action` `http-headers`) whose `key` is a credential header
+(`detail::sensitive_header`: Authorization, Cookie, X-API-Key, names containing token/secret/password/api-key);
+FortiOS returns those in cleartext. A child table read or operation on `http-headers` redacts every `value`. `meta.redacted` lists the locations as JSON pointers relative to `data`, with `*`
 for array items (`["/*/psksecret"]`). This is the default for every caller. No request field turns it
 off, so MCP cannot. Only the C++ argument `Engine::Secrets::reveal` disables it, and only the CLI's
 `forti get --reveal` passes it (a terminal, or explicit `--json`, plus a stderr warning). Plan and apply

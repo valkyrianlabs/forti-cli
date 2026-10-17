@@ -37,5 +37,15 @@ forti delete system.dhcp/server 21 --parent 1 --child reserved-address
 - Documented: revoking DHCP leases is the monitor action `monitor/system/dhcp/revoke` with
   `{"ip": ["192.0.2.50"]}` (risk elevated).
 
+## Webhook header secrets are redacted
+
+Automation actions keep webhook headers as `http-headers` entries (`{"id", "key", "value"}`), and
+FortiOS returns the value in cleartext. forti now redacts the value of every entry whose key names a
+credential header (`Authorization`, `Proxy-Authorization`, `Cookie`, `X-API-Key`, `X-Auth-Token`, or
+any name containing `token`, `secret`, `password` or `api-key`) in reads, plan diffs, request
+previews, verification mismatches and error details, as it does for other secrets. Stored plan files
+keep the real value (owner-only) so apply can write it, and a plan still refuses `"<redacted>"` as a
+value.
+
 Requires forti-api 1.2.0 (child tables).
 

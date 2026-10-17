@@ -413,7 +413,11 @@ namespace forti::engine {
         }
         if (secrets == Secrets::redact) {
             std::set<std::string, std::less<>> redacted;
-            detail::redact_read(results, redacted);
+            // A child table of header entries may be read without their "key" (fields=value): every
+            // value counts as a secret there.
+            std::set<std::string, std::less<>> extra;
+            if (child && child->attribute == detail::header_table) extra.insert("value");
+            detail::redact_read(results, redacted, extra);
             if (!redacted.empty()) meta["redacted"] = redacted;
         } else {
             meta["revealed"] = true;

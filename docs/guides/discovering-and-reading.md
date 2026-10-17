@@ -223,7 +223,10 @@ replace, at any depth:
 
 - every string value starting with `ENC `, and
 - the value of every attribute whose name marks it as a secret (`password`, `psk`, `secret`,
-  `private-key`, `key-string`, `api-key`, names ending in `-key`, and others)
+  `private-key`, `key-string`, `api-key`, names ending in `-key`, and others), and
+- the `value` of a webhook header entry (`http-headers`) whose `key` names a credential header
+  (`Authorization`, `Cookie`, `X-API-Key`, names containing `token`, ...): FortiOS returns those in
+  cleartext
 
 with `"<redacted>"`. An unset secret stays visibly unset (`""` or `null`). `meta.redacted` lists the
 locations as JSON pointers, with `*` for list items (`["/*/psksecret"]`), and text output ends with a

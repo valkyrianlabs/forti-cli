@@ -3,6 +3,8 @@
 
 #include <fake_transport.hpp>
 
+#include <forti/engine/approval.hpp>
+
 #include "plan_store.hpp"
 
 #include <gtest/gtest.h>
@@ -535,4 +537,111 @@ TEST_F(ChildTest, RevokingLeasesIsAnElevatedMonitorAction) {
     ASSERT_EQ(writes().size(), 1u);
     EXPECT_EQ(writes()[0].url, base + "monitor/system/dhcp/revoke");
     EXPECT_EQ(writes()[0].body, R"({"ip":["192.0.2.50"]})");
+}
+
+// ---- webhook header secrets (system/automation-action http-headers) ----
+//
+// FortiOS keeps a webhook's headers as {"id", "key": <name>, "value": <value>} entries and returns the
+// value in cleartext (var-string in the 7.4.8 schema, not a password type, so never ENC).
+
+namespace {
+
+    const std::string token = "Bearer s3cr3t-t0ken";
+
+    json webhook(json headers) {
+        return {{"name", "pihole-hook"}, {"q_origin_key", "pihole-hook"}, {"action-type", "webhook"},
+                {"protocol", "https"}, {"uri", "pihole.example/api"}, {"method", "post"}, {"http-headers", std::move(headers)}};
+    }
+
+    json headers() {
+        return json::array({{{"id", 1}, {"q_origin_key", 1}, {"key", "Authorization"}, {"value", token}},
+                            {{"id", 2}, {"q_origin_key", 2}, {"key", "Content-Type"}, {"value", "application/json"}}});
+    }
+
+}  // namespace
+
+TEST(HeaderRedaction, CredentialHeadersCaseInsensitively) {
+    using engine::detail::sensitive_header;
+    for (auto name: {"Authorization", "authorization", "Proxy-Authorization", "X-API-Key", "x-auth-token", "Cookie",
+                     "Set-Cookie", "X-Gitlab-Token", "X-Webhook-Secret", "X-Password", "Api-Key", " Authorization "})
+        EXPECT_TRUE(sensitive_header(name)) << name;
+    for (auto name: {"Content-Type", "Accept", "User-Agent", "X-Request-Id"}) EXPECT_FALSE(sensitive_header(name)) << name;
+}
+
+TEST_F(ChildTest, ReadsRedactCredentialHeaderValues) {
+    transport->reply(200, fake::envelope(json::array({webhook(headers())})));
+    json result = read({{"resource", "system/automation-action"}});
+    ASSERT_TRUE(result["ok"]) << result.dump();
+    EXPECT_EQ(result.dump().find("s3cr3t"), std::string::npos) << result.dump();
+    const json& entries = result["data"][0]["http-headers"];
+    EXPECT_EQ(entries[0]["value"], "<redacted>");
+    EXPECT_EQ(entries[1]["value"], "application/json");   // not a credential
+    const json& redacted = result["meta"]["redacted"];
+    EXPECT_NE(std::ranges::find(redacted, json("/*/http-headers/*/value")), redacted.end()) << redacted.dump();
+
+    // One entry through the child path, even without its "key" (fields=value): every value counts.
+    transport->reply(200, fake::envelope(json::array({{{"id", 1}, {"value", token}}})));
+    result = read({{"resource", "system/automation-action"}, {"key", "pihole-hook"}, {"child", "http-headers"},
+                   {"child_key", "1"}, {"fields", {"value"}}});
+    ASSERT_TRUE(result["ok"]) << result.dump();
+    EXPECT_EQ(result["data"]["value"], "<redacted>");
+    EXPECT_EQ(result["meta"]["redacted"], json::array({"/value"}));
+
+    // --reveal (the CLI's C++ argument) shows it.
+    transport->reply(200, fake::envelope(json::array({webhook(headers())})));
+    json revealed = engine::Engine::envelope([&] { return sut->read({{"resource", "system/automation-action"}}, engine::Engine::Secrets::reveal); });
+    EXPECT_EQ(revealed["data"][0]["http-headers"][0]["value"], token);
+}
+
+TEST_F(ChildTest, PlansAuditAndErrorsRedactHeaderValuesButApplyTheRealOne) {
+    // The whole table through the object, and one entry through its child path.
+    transport->reply(200, fake::envelope(json::array({webhook(json::array())})));
+    transport->reply(404, missing());
+    json headers_set = json::array({{{"id", 1}, {"key", "Authorization"}, {"value", token}}});
+    json planned = plan({{"operations", {{{"op", "update"}, {"resource", "system/automation-action"}, {"key", "pihole-hook"},
+                                          {"set", {{"http-headers", headers_set}}}},
+                                         {{"op", "create"}, {"resource", "system/automation-action"}, {"parent", "other-hook"},
+                                          {"child", "http-headers"}, {"object", {{"id", 3}, {"key", "X-Auth-Token"}, {"value", token}}}}}}});
+    ASSERT_TRUE(planned["ok"]) << planned.dump();
+    EXPECT_EQ(planned.dump().find("s3cr3t"), std::string::npos) << planned.dump();
+    std::string id = planned["data"]["id"];
+    json shown = engine::show_plan(*sut, id);
+    EXPECT_EQ(shown.dump().find("s3cr3t"), std::string::npos);
+
+    // The stored plan keeps the real value (0600), and apply sends it.
+    std::ifstream file(paths.state / "plans" / (id + ".json"));
+    std::stringstream stored;
+    stored << file.rdbuf();
+    EXPECT_NE(stored.str().find("s3cr3t"), std::string::npos);
+    EXPECT_EQ(fs::status(paths.state / "plans" / (id + ".json")).permissions() & fs::perms::all,
+              fs::perms::owner_read | fs::perms::owner_write);
+
+    transport->requests.clear();
+    transport->reply(200, fake::envelope(json::array({webhook(json::array())})));   // re-read
+    transport->reply(404, missing());                                               // entry 3 still absent
+    transport->reply(200, {{"status", "success"}, {"http_status", 200}, {"serial", serial}, {"mkey", "pihole-hook"}});
+    transport->reply(200, fake::envelope(json::array({webhook(json::array({{{"id", 1}, {"key", "Authorization"}, {"value", "Bearer other"}}}))})));
+    transport->reply(200, {{"http_method", "POST"}, {"status", "success"}, {"http_status", 200}, {"serial", serial},
+                           {"mkey", 3}, {"child_path", "http-headers"}});
+    transport->reply(200, fake::envelope(json::array({{{"id", 3}, {"key", "X-Auth-Token"}, {"value", "Bearer other"}}})));
+    json result = apply(id);
+    ASSERT_TRUE(result["ok"]) << result.dump();
+    ASSERT_EQ(writes().size(), 2u);
+    EXPECT_NE(writes()[0].body.find("s3cr3t"), std::string::npos);
+    EXPECT_NE(writes()[1].body.find("s3cr3t"), std::string::npos);
+    // The device reported other values: the mismatches name the attributes, never the values.
+    EXPECT_EQ(result["data"]["operations"][0]["status"], "applied_unverified");
+    EXPECT_EQ(result["data"]["operations"][1]["status"], "applied_unverified");
+    EXPECT_EQ(result.dump().find("s3cr3t"), std::string::npos) << result.dump();
+    EXPECT_EQ(result.dump().find("Bearer other"), std::string::npos) << result.dump();
+    std::ifstream audit(paths.state / "audit.jsonl");
+    std::stringstream lines;
+    lines << audit.rdbuf();
+    EXPECT_EQ(lines.str().find("s3cr3t"), std::string::npos);
+
+    // A read's placeholder is never written back as the value.
+    json refused = plan({{"operations", {op({{"op", "update"}, {"resource", "system/automation-action"}, {"parent", "pihole-hook"},
+                                            {"child", "http-headers"}, {"key", "1"}, {"set", {{"value", "<redacted>"}}}})}}});
+    EXPECT_EQ(refused["error"]["code"], "validation");
+    EXPECT_EQ(refused["error"]["details"]["reason"], "redacted_placeholder");
 }

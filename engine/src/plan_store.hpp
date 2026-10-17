@@ -83,19 +83,38 @@ namespace forti::engine::detail {
     // key-material, token, passphrase, *-pwd, md5/auth keys, ...). Deliberately broad: over-redacting
     // a display is harmless, under-redacting is a leak.
     bool sensitive_name(std::string_view attribute);
+    // HTTP header names that carry a credential, case-insensitively: Authorization, Proxy-Authorization,
+    // Cookie, Set-Cookie, X-API-Key, X-Auth-Token, and any name containing "token", "secret",
+    // "password", "api-key" or "apikey". Webhook actions (system/automation-action http-headers) keep
+    // such headers as {"id", "key": <header name>, "value": <header value>} entries, and FortiOS
+    // returns the value in cleartext (var-string, not a password type): the attribute name "value"
+    // says nothing, the entry's "key" does.
+    bool sensitive_header(std::string_view name);
+    // Header entries are redacted wherever their "key" names a sensitive header. A child table of
+    // header entries (`http-headers`) addresses one entry whose "key" may not be part of the JSON at
+    // hand (a diff of "value", a read with fields=value): there every "value" is treated as secret.
+    inline constexpr std::string_view header_table = "http-headers";
+
     // Attribute names the live schema (?action=schema) types as "password", recursively.
     std::set<std::string, std::less<>> sensitive_from_schema(const json& schema);
 
     inline constexpr std::string_view redacted = "<redacted>";
-    // A copy with every sensitive attribute's value (at any depth) replaced by "<redacted>". Apply it to
-    // attribute-bearing JSON only (objects, diffs, wire bodies, error details), not to whole records.
+    // A copy with every sensitive attribute's value (at any depth) replaced by "<redacted>", and the
+    // "value" of header entries whose "key" is a sensitive_header(). Apply it to attribute-bearing JSON
+    // only (objects, diffs, wire bodies, error details), not to whole records.
     json redact(const json& value, const std::set<std::string, std::less<>>& extra = {});
     // "2 operations on lab (fortigate.test): 1 create, 1 update; risk elevated", from digest-covered fields.
     std::string summarize(const json& plan);
     // Read results: replaces, at any depth, string values starting "ENC " (FortiOS's reversible secret
-    // form) and non-empty values of sensitive_name() attributes with "<redacted>". Adds each redacted
-    // location to `paths` once, as a JSON pointer with "*" for array indices ("/*/psksecret").
-    void redact_read(json& value, std::set<std::string, std::less<>>& paths);
+    // form), non-empty values of sensitive_name() attributes and of `extra`, and the "value" of header
+    // entries whose "key" is a sensitive_header(), with "<redacted>". Adds each redacted location to
+    // `paths` once, as a JSON pointer with "*" for array indices ("/*/psksecret",
+    // "/*/http-headers/*/value").
+    void redact_read(json& value, std::set<std::string, std::less<>>& paths,
+                     const std::set<std::string, std::less<>>& extra = {});
+    // The attribute names to redact beyond sensitive_name() for one plan operation (a child table of
+    // header entries: "value").
+    std::set<std::string, std::less<>> redaction_extra(const json& op);
     // A plan as shown to people and agents: before/after objects (only with `full`), diffs and wire
     // bodies redacted. The stored file keeps real values, because apply needs them.
     json plan_view(const json& plan, bool full = false);

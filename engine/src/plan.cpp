@@ -1072,7 +1072,7 @@ namespace forti::engine {
                             done.record["verification"] = "the object still exists after the delete";
                         }
                         if (!mismatches.empty()) {
-                            done.record["mismatches"] = detail::redact(mismatches);
+                            done.record["mismatches"] = detail::redact(mismatches, detail::redaction_extra(op));
                             done.record["verification"] = "the device reports values other than those written (FortiOS "
                                                           "normalizes some values, e.g. 192.0.2.0/24 → 192.0.2.0 255.255.255.0)";
                         }
@@ -1124,7 +1124,7 @@ namespace forti::engine {
 
             if (lost_at) {
                 const json& op = ops[*lost_at];
-                record["before"] = detail::redact(op["before"]);
+                record["before"] = detail::redact(op["before"], detail::redaction_extra(op));
                 record["probe_error"] = probe_error;
                 record["recovery"] = recovery_limitation;
                 throw Failure(Code::management_connectivity_lost,

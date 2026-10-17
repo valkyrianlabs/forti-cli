@@ -49,6 +49,14 @@ is enabled on the device. So:
   (password, psk, secret, private-key, key-string, api-key, `*-key`, ...; checked against every
   attribute the FortiOS 7.4.8 schema types as a password). Audit records hold attribute names only,
   never values.
+- **Webhook header secrets**: an automation action's `http-headers` entries are `{"id", "key",
+  "value"}`, and FortiOS returns the value in cleartext (it is not a password type). Wherever an
+  entry's `key` names a credential header (`Authorization`, `Proxy-Authorization`, `Cookie`,
+  `Set-Cookie`, `X-API-Key`, `X-Auth-Token`, or any name containing `token`, `secret`, `password`,
+  `api-key`; case-insensitive), its `value` is redacted in reads (`/*/http-headers/*/value`), plan
+  diffs, request previews, verification mismatches and error details. In a child table read or change
+  of `http-headers`, where the entry's `key` may not be part of the data, every `value` is redacted.
+  A token in the action's `uri` or `http-body` is not recognized: keep credentials in a header.
 - **Plans refuse `"<redacted>"` as a value**, so copying a read object into a plan cannot overwrite a
   secret with the placeholder.
 - **Stored plan files** keep the real values, because apply writes them and compares the device's
