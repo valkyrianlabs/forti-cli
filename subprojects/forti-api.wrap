@@ -3,7 +3,7 @@
 # with a checkout (or a symlink to ../forti-api) and Meson uses it instead of downloading.
 [wrap-git]
 url = https://github.com/valkyrianlabs/forti-api.git
-revision = v1.1.1
+revision = v1.2.0
 depth = 1
 
 [provide]
