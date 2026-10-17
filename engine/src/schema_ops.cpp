@@ -230,15 +230,15 @@ namespace forti::engine::detail {
         if (resource.kind != Kind::table || !resource.schema || !resource.schema->type)
             throw Failure(Code::usage, std::format("{}: only a table's objects have child tables", resource.name()),
                           {{"resource", resource.name()}, {"kind", to_string(resource.kind)}});
-        const fs::Type& type = *resource.schema->type;
+        const fs::Endpoint& ep = *resource.schema;
+        const fs::Type& type = *ep.type;
         std::vector<std::string> tables;
         for (const fs::Field& field: type.fields)
-            if (field.is_table() && field.item->type && !field.item->type->key.empty() &&
-                field.item->type->field(field.item->type->key))
-                tables.emplace_back(field.name);
-        const fs::Field* field = type.field(attribute);
-        if (!field || std::ranges::find(tables, std::string_view(attribute)) == tables.end()) {
-            std::string message = field ? std::format("{}: {} is not a table attribute with keyed entries", resource.name(), attribute)
+            if (fs::child_table(ep, field.name)) tables.emplace_back(field.name);
+        const fs::Field* field = fs::child_table(ep, attribute);
+        if (!field) {
+            bool known = type.field(attribute) != nullptr;
+            std::string message = known ? std::format("{}: {} is not a table attribute with keyed entries", resource.name(), attribute)
                                         : std::format("{}: unknown table attribute {}", resource.name(), attribute);
             auto close = closest_names(attribute, tables);
             if (!close.empty()) message += std::format(" (did you mean {}?)", close.front());
@@ -248,6 +248,7 @@ namespace forti::engine::detail {
         }
         Child child;
         child.attribute = field->name;
+        child.field = field;
         child.type = field->item->type;
         child.key = child.type->key;
         fs::Kind kind = child.type->field(child.key)->kind;
@@ -264,9 +265,10 @@ namespace forti::engine::detail {
     std::string child_path(const Resource& resource, const Child& child, const std::string& parent, const std::string& key) {
         const fs::Endpoint& ep = endpoint(resource);
         check_key(ep, parent);
-        if (key.empty()) return fortiapi::path(ep.path, parent, child.attribute);
+        if (key.empty()) return fs::child_path(ep, *child.field, json(parent));
         check_number(entry_key_field(child).kind, key, child_label(resource, child));
-        return fortiapi::path(ep.path, parent, child.attribute, key);
+        json entry(key);
+        return fs::child_path(ep, *child.field, json(parent), &entry);
     }
 
     json create_body(const Resource& resource, const Child& child, const json& object) {
@@ -313,20 +315,9 @@ namespace forti::engine::detail {
     }
 
     std::string created_entry_key(const Child& child, const fortiapi::Reply& reply) {
-        auto text = [&](const json& value) -> std::string {
-            std::string out;
-            if (value.is_string()) out = value.get<std::string>();
-            else if (value.is_number_integer()) out = value.dump();
-            else return {};
-            if (child.numeric_key) {
-                bool digits = !out.empty() && std::ranges::all_of(out, [](char c) { return c >= '0' && c <= '9'; });
-                if (!digits) return {};
-            }
-            return out;
-        };
-        if (std::string key = text(reply.child_mkey); !key.empty()) return key;
-        if (reply.http_method == "POST" && reply.child_path == child.attribute) return text(reply.mkey);
-        return {};
+        auto key = fs::created_entry_key(*child.field, reply);
+        if (!key) return {};
+        return key->is_string() ? key->get<std::string>() : key->dump();
     }
 
 }  // namespace forti::engine::detail

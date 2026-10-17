@@ -56,14 +56,15 @@ namespace forti::engine::detail {
     //   cmdb/<path>/<parent key>/<attribute>               GET (list), POST (one new entry)
     //   cmdb/<path>/<parent key>/<attribute>/<entry key>   GET, PUT, DELETE
     //
-    // as fortiapi::ChildTable<Spec, &Type::attribute> addresses them, from the runtime schema (the
-    // entry type and its key are the attribute's item Type). A write changes one entry and leaves the
-    // others alone. On these paths FortiOS reports the PARENT's key as `mkey` and the entry's key as
-    // `child_mkey` (fortiapi::Reply::child_mkey).
+    // as fortiapi::ChildTable<Spec, &Type::attribute> addresses them, through the runtime schema's
+    // child_table / child_path / created_entry_key (the entry type and its key are the attribute's
+    // item Type). A write changes one entry and leaves the others alone. What a reply's `mkey` names
+    // depends on the method (fortiapi::Reply): the new entry on POST, the parent on PUT and GET.
     struct Child {
         std::string attribute;                                // "reserved-address"
         std::string key;                                      // the entry key attribute ("id", "name")
         bool numeric_key = false;
+        const fortiapi::schema::Field* field = nullptr;       // the attribute (schema::child_table)
         const fortiapi::schema::Type* type = nullptr;         // the entry type
     };
 
@@ -92,12 +93,8 @@ namespace forti::engine::detail {
     fortiapi::Reply remove(const Resource& resource, const Child& child, fortiapi::Client& client, const std::string& parent,
                            const std::string& key, const fortiapi::Query& query);
 
-    // The key of the entry a child POST created, as its reply reports it ("" when it does not):
-    // ChildTable::add's rule. FortiOS 7.4.8 sends the new entry's key as `mkey` of a child POST reply
-    // and no `child_mkey`; on other child replies `mkey` may be the PARENT's key, so `mkey` counts
-    // only when the reply echoes the POST and this attribute as child_path. `child_mkey` wins when
-    // present. A numeric key must be a number. (forti-api gap G17: the rule is not exposed for the
-    // runtime schema, so it is mirrored here.)
+    // The key of the entry a child POST created, as its reply reports it, as text ("" when it does
+    // not): fortiapi::schema::created_entry_key, the rule ChildTable::add uses.
     std::string created_entry_key(const Child& child, const fortiapi::Reply& reply);
 
     // The candidate closest to a misspelt name (edit distance 1 for names up to 4 characters, else up
