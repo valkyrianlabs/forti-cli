@@ -1,3 +1,4 @@
+#include "ops.hpp"
 #include "plan_store.hpp"
 #include "sha256.hpp"
 
@@ -178,7 +179,43 @@ namespace forti::engine::detail {
             std::string method, path;
             std::string key = is("key", json::value_t::string) ? op["key"].get<std::string>() : std::string();
             if (op.contains("key") && (!op["key"].is_string() || !addressable_key(key))) tampered(id, "operation");
-            if (name == "action") {
+            // A child table operation names its parent object and table attribute; the attribute must
+            // still be one of the resource's tables with keyed entries.
+            std::optional<Child> child;
+            std::string parent;
+            if (op.contains("child") || op.contains("parent")) {
+                if (!is("child", json::value_t::string) || !is("parent", json::value_t::string)) tampered(id, "operation");
+                parent = op["parent"].get<std::string>();
+                if (!addressable_key(parent) || name == "action") tampered(id, "operation");
+                try {
+                    child = child_of(resource, op["child"].get<std::string>());
+                } catch (const Failure&) {
+                    tampered(id, "operation");
+                }
+            }
+            auto at = [&](const std::string& entry) {
+                try {
+                    return child_path(resource, *child, parent, entry);
+                } catch (const Failure&) {
+                    tampered(id, "operation");
+                }
+            };
+            if (child) {
+                if (name == "create") {
+                    shape = is("object", json::value_t::object);
+                    method = "POST";
+                    path = at("");
+                } else if (name == "update") {
+                    shape = !key.empty() && is("set", json::value_t::object) && is("clear", json::value_t::array) &&
+                            std::ranges::all_of(op["clear"], [](const json& item) { return item.is_string(); });
+                    method = "PUT";
+                    if (!key.empty()) path = at(key);
+                } else if (name == "delete") {
+                    shape = !key.empty();
+                    method = "DELETE";
+                    if (!key.empty()) path = at(key);
+                }
+            } else if (name == "action") {
                 shape = resource.kind == Kind::monitor && is("body", json::value_t::object);
                 method = "POST";
                 path = resource.path;
@@ -313,6 +350,33 @@ namespace forti::engine::detail {
         return false;
     }
 
+    bool sensitive_header(std::string_view header) {
+        std::string name = lower(header);
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+        while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.erase(name.begin());
+        static constexpr std::string_view exact[] = {"authorization", "proxy-authorization", "cookie", "set-cookie",
+                                                     "x-api-key", "x-auth-token"};
+        static constexpr std::string_view fragments[] = {"token", "secret", "password", "api-key", "apikey", "api_key"};
+        if (std::ranges::find(exact, std::string_view(name)) != std::end(exact)) return true;
+        return std::ranges::any_of(fragments, [&](std::string_view fragment) { return name.find(fragment) != std::string::npos; });
+    }
+
+    namespace {
+
+        // {"key": "Authorization", "value": "Bearer ..."}: a header entry whose value is a credential.
+        bool secret_header_entry(const json& object) {
+            auto key = object.find("key");
+            return key != object.end() && key->is_string() && object.contains("value") &&
+                   sensitive_header(key->get_ref<const std::string&>());
+        }
+
+    }  // namespace
+
+    std::set<std::string, std::less<>> redaction_extra(const json& op) {
+        if (op.is_object() && op.value("child", "") == header_table) return {"value"};
+        return {};
+    }
+
     std::set<std::string, std::less<>> sensitive_from_schema(const json& schema) {
         std::set<std::string, std::less<>> out;
         auto walk = [&](auto& self, const json& node) -> void {
@@ -341,8 +405,9 @@ namespace forti::engine::detail {
         bool named_sensitive = false;
         if (auto it = value.find("attribute"); it != value.end() && it->is_string())
             named_sensitive = sensitive_name(it->get<std::string>()) || extra.contains(it->get<std::string>());
+        bool header = secret_header_entry(value);
         for (auto it = value.begin(); it != value.end(); ++it) {
-            bool secret = sensitive_name(it.key()) || extra.contains(it.key());
+            bool secret = sensitive_name(it.key()) || extra.contains(it.key()) || (header && it.key() == "value");
             bool value_slot = named_sensitive && (it.key() == "before" || it.key() == "after" || it.key() == "value" ||
                                                   it.key() == "expected" || it.key() == "actual" || it.key() == "table");
             if ((secret || value_slot) && !it.value().is_null()) out[it.key()] = redacted;
@@ -351,7 +416,7 @@ namespace forti::engine::detail {
         return out;
     }
 
-    void redact_read(json& value, std::set<std::string, std::less<>>& paths) {
+    void redact_read(json& value, std::set<std::string, std::less<>>& paths, const std::set<std::string, std::less<>>& extra) {
         // Iterative: device replies are depth-checked, but this keeps the walk off the stack anyway.
         std::vector<std::pair<json*, std::string>> stack{{&value, ""}};
         auto escaped = [](std::string_view key) {
@@ -365,12 +430,15 @@ namespace forti::engine::detail {
             if (node->is_array()) {
                 for (auto& item: *node) stack.emplace_back(&item, pointer + "/*");
             } else if (node->is_object()) {
+                // Decided before "key" itself is redacted (sensitive_name("key")) below.
+                bool header = secret_header_entry(*node);
                 for (auto it = node->begin(); it != node->end(); ++it) {
                     std::string at = pointer + "/" + escaped(it.key());
                     json& child = it.value();
                     bool empty = child.is_null() || (child.is_string() && child.get_ref<const std::string&>().empty()) ||
                                  (child.is_structured() && child.empty());
-                    if (sensitive_name(it.key()) && !empty) {
+                    bool secret = sensitive_name(it.key()) || extra.contains(it.key()) || (header && it.key() == "value");
+                    if (secret && !empty) {
                         child = redacted;
                         paths.insert(std::move(at));
                     } else {
@@ -417,16 +485,17 @@ namespace forti::engine::detail {
             // Only attribute-bearing subtrees are redacted: the operation's own "key" is an object
             // name, not the attribute "key" (an NTP or OSPF authentication key).
             json entry = json::object();
-            for (const char* key: {"index", "op", "resource", "key", "risk", "note"})
+            for (const char* key: {"index", "op", "resource", "parent", "child", "key", "risk", "note"})
                 if (auto it = op.find(key); it != op.end()) entry[key] = *it;
-            if (auto it = op.find("diff"); it != op.end()) entry["diff"] = redact(*it);
+            auto extra = redaction_extra(op);
+            if (auto it = op.find("diff"); it != op.end()) entry["diff"] = redact(*it, extra);
             if (auto it = op.find("wire"); it != op.end() && it->is_object()) {
                 entry["wire"] = *it;
-                if (it->contains("body")) entry["wire"]["body"] = redact((*it)["body"]);
+                if (it->contains("body")) entry["wire"]["body"] = redact((*it)["body"], extra);
             }
             if (full) {
                 for (const char* key: {"before", "after"})
-                    if (auto it = op.find(key); it != op.end()) entry[key] = redact(*it);
+                    if (auto it = op.find(key); it != op.end()) entry[key] = redact(*it, extra);
                 if (auto it = op.find("before_digest"); it != op.end()) entry["before_digest"] = *it;
             }
             operations.push_back(std::move(entry));

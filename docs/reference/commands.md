@@ -198,6 +198,9 @@ Works offline except with `--live`. See [Discovering and reading](/guides/discov
 
 ```text
 forti get <resource> [key]
+forti get <resource> <key> --child ATTR [--child-key KEY]
+  --child ATTR       the entries of this table attribute of the object (a child table)
+  --child-key KEY    one entry of the child table (needs --child)
   --filter EXPR      FortiOS filter, repeatable (AND); ',' inside one is OR (name==a,name==b)
   --fields a,b       return only these attributes
   --all              read every page of a listing
@@ -211,6 +214,7 @@ forti get <resource> [key]
 forti get firewall/policy --fields policyid,name,action,status --all
 forti get firewall address "LAN 10.0.0.0/24"
 forti get firewall/address/web
+forti get system.dhcp/server 1 --child reserved-address --child-key 21
 forti get monitor/system/status
 ```
 
@@ -218,7 +222,9 @@ The resource is its path, its FortiOS CLI words, or a last word only one resourc
 table object can be named by its path. When a listing has more pages, forti says so on standard
 error; `--all` reads them all. See
 [Naming a resource](/guides/discovering-and-reading#naming-a-resource) and
-[Discovering and reading](/guides/discovering-and-reading#get).
+[Discovering and reading](/guides/discovering-and-reading#get). With `--child`, the key names the
+parent object, and `--fields` and `--filter` name the entry's attributes
+([Child tables](/guides/discovering-and-reading#child-tables)).
 
 ## Change
 
@@ -228,6 +234,10 @@ error; `--all` reads them all. See
 forti set <resource> [key] attr=value... [--clear attr] [--dry-run] [--verbose]
 forti create <resource> attr=value... | --object JSON|@file [--dry-run] [--verbose]
 forti delete <resource> <key> [--dry-run] [--verbose]
+
+forti set <resource> <entry key> --parent KEY --child ATTR attr=value... [--clear attr]
+forti create <resource> --parent KEY --child ATTR attr=value... | --object JSON|@file
+forti delete <resource> <entry key> --parent KEY --child ATTR
 ```
 
 One command per change. The resource is named as for `get` (`firewall/address web`,
@@ -242,6 +252,12 @@ and then:
 
 `--dry-run` only plans; `--verbose` adds the request lines and the digest; `--json` prints the apply
 result with the plan (and never asks). See [Making changes](/guides/planning-and-applying-changes).
+
+`--parent KEY --child ATTR` changes one entry of object `KEY`'s table attribute `ATTR` (a DHCP
+server's `reserved-address`) instead of the object: the key given to `set` and `delete` is the
+entry's, and a numeric id left out of `create` (or 0) is assigned by the device. `forti plan
+set|create|delete` take the same options. See
+[Changing one entry of a table](/guides/planning-and-applying-changes#changing-one-entry-of-a-table).
 
 ### rollback
 

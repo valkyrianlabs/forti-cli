@@ -83,6 +83,46 @@ undo      forti rollback 20261015-142233-a1b2c3  (rollback plan 20261015-142240-
 digest; `--json` prints one envelope with the apply result and the plan (no questions: a guarded
 plan stops at the approval).
 
+### Changing one entry of a table
+
+Some attributes are tables: a DHCP server's `reserved-address`, a policy's `srcaddr`, an access
+list's `rule`. Setting such an attribute on the object replaces the whole list. `--parent KEY
+--child ATTR` changes one entry instead, on the paths FortiOS gives child tables
+(`cmdb/system.dhcp/server/1/reserved-address/21`), and leaves the object's other attributes and
+entries alone:
+
+```text
+forti set <resource> <entry key> --parent KEY --child ATTR attr=value... [--clear attr]
+forti create <resource> --parent KEY --child ATTR attr=value... | --object JSON|@file
+forti delete <resource> <entry key> --parent KEY --child ATTR
+```
+
+```sh
+forti create system.dhcp/server --parent 1 --child reserved-address ip=192.0.2.50 \
+    mac=00:00:5e:00:53:32 description=printer
+forti set system.dhcp/server 21 --parent 1 --child reserved-address description="office printer"
+forti delete system.dhcp/server 21 --parent 1 --child reserved-address
+```
+
+The key given to `set` and `delete` is the entry's; `--parent` is the object's. Attributes are the
+entry's (`ip`, `mac`, `description`), checked as for any change, and an update sends only the ones it
+changes. A numeric id left out of `create` (or 0) is assigned by the device: the apply record, the
+audit log and the rollback plan name the id it reported, so `forti rollback` deletes exactly that
+entry. `--child` must be a table attribute of the resource with keyed entries; the entry's key
+attribute cannot be changed by an update.
+
+The plan's before-state is that one entry: apply re-reads only it, so a change to the object's other
+entries or attributes since planning does not make the plan stale, and a change to this entry does
+(`stale_plan`). The risk tier is the object's (DHCP servers are `elevated`).
+
+:::callout[One entry, not the whole list]{variant="tip"}
+Writing a table attribute through its object sends the whole list from the copy you planned with.
+apply refuses it when the object changed before it re-reads it, but a list written from an old copy
+silently reverts entries others changed or added: FortiOS takes the last whole list it is sent. Child
+table operations change one entry and nothing else, so prefer them; a plan that sets a whole table
+attribute says so in its notes.
+:::
+
 ## Changes made by an agent
 
 An agent (Claude Code, Codex) changes the device through forti-mcp, under the same modes. In
@@ -138,6 +178,10 @@ object, or just the array of operations:
     {"op": "create", "resource": "firewall/address", "object": {"name": "web1", "subnet": "192.0.2.10 255.255.255.255"}},
     {"op": "update", "resource": "firewall/policy", "key": "12", "set": {"status": "disable"}, "clear": ["comments"]},
     {"op": "delete", "resource": "firewall/address", "key": "old-web"},
+    {"op": "create", "resource": "system.dhcp/server", "parent": "1", "child": "reserved-address",
+     "object": {"ip": "192.0.2.50", "mac": "00:00:5e:00:53:32", "description": "printer"}},
+    {"op": "update", "resource": "system.dhcp/server", "parent": "1", "child": "reserved-address",
+     "key": "7", "set": {"description": "nas"}},
     {"op": "action", "resource": "monitor/system/external-resource/dynamic", "body": {}}
   ]
 }
@@ -154,12 +198,25 @@ forti plan --profile fw01 --file - < changes.json
 | `operations` | 1 to 200 operations, executed in order |
 | `op` | `create`, `update`, `delete` or `action` |
 | `resource` | a resource path, as in `forti discover` |
-| `key` | the object's key, for `update` and `delete` on tables (singletons have none) |
+| `key` | the object's key, for `update` and `delete` on tables (singletons have none); with `child`, the entry's key |
+| `parent`, `child` | together: the operation changes one entry of the table attribute `child` of the object `parent` ([Changing one entry of a table](#changing-one-entry-of-a-table)); `object`, `set` and `clear` then name the entry's attributes |
 | `object` | `create`: the new object's attributes. Without its key (or with a numeric key of `0`), the device assigns one |
 | `set`, `clear` | `update`: attributes to set, and attribute names to reset to their defaults (at least one of the two) |
 | `body` | `action`: the JSON body of the monitor POST (default `{}`) |
 
-Any other field is a `usage` error. Which operation fits which resource:
+Any other field is a `usage` error.
+
+Monitor actions are sent as written: forti checks only that the path is a monitor path. Revoking
+DHCP leases, for example, is `monitor/system/dhcp/revoke` with the leases' addresses (risk
+`elevated`):
+
+```sh
+forti plan action monitor/system/dhcp/revoke --body '{"ip": ["192.0.2.50"]}' --apply
+```
+
+The body `{"ip": [...]}` is the one Fortinet's `fortinet.fortios` Ansible collection documents for this
+action (`revoke.system.dhcp`; IPv6: `monitor/system/dhcp6/revoke`). Always list the addresses: what
+FortiOS does with no `ip` is not documented. `forti get monitor/system/dhcp` lists the leases first. Which operation fits which resource:
 
 | Resource kind | Operations |
 |---|---|
@@ -183,7 +240,8 @@ stored. It also refuses:
 :::callout[Table attributes are replaced wholesale]{variant="warning"}
 FortiOS replaces a list attribute such as `srcaddr` or `member` with exactly the entries you send.
 List every entry you want to keep; the diff shows which entries the change adds and removes and the
-resulting list.
+resulting list. To change one entry, use a
+[child table operation](#changing-one-entry-of-a-table) instead.
 :::
 
 ### The plan
@@ -335,9 +393,10 @@ reverse order, built from the recorded before-states.
 
 | Operation | Undone by |
 |---|---|
-| create | a delete |
+| create | a delete (of the key the device reported, for a device-assigned id) |
 | update | setting the previous values (or clearing attributes that had none) |
 | delete | re-creating the object from its writable attributes |
+| one entry of a table | the same, on the same entry of the same object |
 | action | nothing: monitor actions cannot be rolled back; the record lists them under `rollback.skipped` |
 
 The rollback plan is an ordinary stored plan (`kind: rollback`, `rollback_of: <id>`). `forti rollback`

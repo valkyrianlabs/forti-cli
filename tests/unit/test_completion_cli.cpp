@@ -61,6 +61,12 @@ TEST_F(CompletionCli, OptionsAndValuedOptions) {
     EXPECT_TRUE(has(get, "--profile"));   // global
     EXPECT_TRUE(has(get, "--json"));
     EXPECT_EQ(complete({"options", "get", "--fi"}), (std::vector<std::string>{"--fields", "--filter"}));
+    EXPECT_EQ(complete({"options", "get", "--chi"}), (std::vector<std::string>{"--child", "--child-key"}));
+    for (const char* command: {"set", "create", "delete", "plan"}) {
+        auto valued_options = complete({"valued", command});
+        EXPECT_TRUE(has(valued_options, "--parent")) << command;
+        EXPECT_TRUE(has(valued_options, "--child")) << command;
+    }
     auto valued = complete({"valued", "history"});
     EXPECT_TRUE(has(valued, "--limit"));
     EXPECT_TRUE(has(valued, "-n"));

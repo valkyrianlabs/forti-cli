@@ -63,6 +63,10 @@ put it (or a symlink to it) at `subprojects/forti-api`:
 ln -sfn "$(cd ../forti-api && pwd)" subprojects/forti-api
 ```
 
+forti needs forti-api 1.2.0 or later (child tables). A system install older than that is refused at
+`meson setup`. To build against the checkout although an older SDK is installed (Homebrew's formula
+is found first), pass `--force-fallback-for=forti-api`.
+
 :::callout[Do not install the SDK from the wrap]{variant="warning"}
 When installing a source build, use `meson install --skip-subprojects` so the SDK headers from the
 wrap are not installed with forti.

@@ -104,6 +104,12 @@ namespace forti::cli {
             resource_and_key(args.positional, request);
             common(request, args);
             if (auto vdom = args.value("vdom")) request["vdom"] = *vdom;
+            // A child table: the entries of one table attribute of the object named by the key.
+            if (auto child = args.value("child")) request["child"] = *child;
+            if (auto child_key = args.value("child-key")) {
+                if (!args.value("child")) throw Failure(Code::usage, "--child-key needs --child (the table attribute)");
+                request["child_key"] = *child_key;
+            }
             if (auto filters = args.all("filter"); !filters.empty()) request["filter"] = filters;
             std::vector<std::string> fields;
             for (const auto& list: args.all("fields"))
@@ -132,8 +138,10 @@ namespace forti::cli {
                                        "passwords); do not paste or share it\n";
                 secrets = engine::Engine::Secrets::reveal;
             }
-            if (args.flag("all") && (request.contains("key") || args.value("start")))
-                throw Failure(Code::usage, "--all reads every item of a listing: it takes no key and no --start");
+            // A child table's key names its parent object: listing its entries is still a listing.
+            bool listing = request.contains("child") ? !request.contains("child_key") : !request.contains("key");
+            if (args.flag("all") && (!listing || args.value("start")))
+                throw Failure(Code::usage, "--all reads every item of a listing: it takes no key (no --child-key) and no --start");
             json result = args.flag("all") ? read_all(context, request, secrets)
                                            : engine::Engine::envelope([&] { return context.engine.read(request, secrets); });
             // The renderer leaves the pager hints out; they go to standard error below.
@@ -217,11 +225,18 @@ namespace forti::cli {
              {{"kind", "fields", "start", "count"}, {"live"}, {}}, run_discover},
             {"get", "Read configuration or monitor data",
              "usage: forti get <resource> [key]\n"
+             "       forti get <resource> <key> --child ATTR [--child-key KEY]\n"
              "\n"
              "The resource is its path (firewall/address), its FortiOS CLI words (firewall address,\n"
              "firewall service custom) or, when only one resource has it, its last word (address). A\n"
              "table object can also be read by its path: forti get firewall/address/web.\n"
              "\n"
+             "--child reads the entries of one table attribute of the object <key> (a child table, such as\n"
+             "a DHCP server's reserved-address); --child-key reads one entry. --fields and --filter then\n"
+             "name the entry's attributes.\n"
+             "\n"
+             "  --child ATTR       the entries of this table attribute of the object\n"
+             "  --child-key KEY    one entry of the child table (needs --child)\n"
              "  --filter EXPR      FortiOS filter, repeatable (AND); ',' inside one is OR (name==a,name==b)\n"
              "  --fields a,b       return only these attributes\n"
              "  --all              read every page of a listing\n"
@@ -239,8 +254,10 @@ namespace forti::cli {
              "  forti get firewall/policy --fields policyid,name,action --all\n"
              "  forti get firewall address \"LAN 10.0.0.0/24\"\n"
              "  forti get system interface port1\n"
+             "  forti get system.dhcp/server 1 --child reserved-address --fields id,ip,mac,description\n"
+             "  forti get system.dhcp/server 1 --child reserved-address --child-key 21\n"
              "  forti get monitor/system/status\n",
-             {{"filter", "fields", "start", "count", "param"}, {"reveal", "all"}, {}}, run_get},
+             {{"filter", "fields", "start", "count", "param", "child", "child-key"}, {"reveal", "all"}, {}}, run_get},
         };
     }
 

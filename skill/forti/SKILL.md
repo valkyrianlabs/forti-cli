@@ -28,6 +28,7 @@ edit them. Everything you need comes through the tools.
 - `fields` keeps responses small; always use it on big tables.
 - `filter` uses FortiOS operators: `==`, `!=`, `=@` (contains), `!@`, `<`, `<=`, `>`, `>=`. Several entries AND together; a comma inside one is OR (`name==a,name==b`).
 - `key` reads one object. `vdom` selects a VDOM.
+- Child tables (a table attribute of an object, e.g. a DHCP server's reservations): `forti_read {"resource":"system.dhcp/server","key":"1","child":"reserved-address","fields":["id","ip","mac","description"]}` lists the entries; add `"child_key":"21"` for one. `fields`/`filter` then name the entry's attributes.
 - Paging: default 50 items, max `count` 1000. When the result has `next_start`, continue with `"start": next_start` until it is gone, or say the data is partial.
 - `"params":{"with_meta":"1"}` adds `q_ref` (reference count) to cmdb objects.
 
@@ -48,7 +49,11 @@ profile's mode allows.
 
 `forti_apply {"profile":"P","operations":[{"op":"create","resource":"firewall/address","object":{"name":"web1","subnet":"192.0.2.10 255.255.255.255"}},{"op":"update","resource":"firewall/policy","key":"12","set":{"status":"disable"}}]}`
 
-(ops: `create`, `update` with `set`/`clear`, `delete`, `action` for monitor POSTs.) The result has the
+(ops: `create`, `update` with `set`/`clear`, `delete`, `action` for monitor POSTs.) To change one entry
+of a table attribute, add `"parent"` (the object's key) and `"child"` (the attribute); `key` is then the
+entry's, and a numeric id left out of `create` is assigned by the device and reported in the record:
+`{"op":"update","resource":"system.dhcp/server","parent":"1","child":"reserved-address","key":"21","set":{"description":"printer"}}`.
+Prefer this to `set`ting the whole list on the object, which reverts other writers' entries. The result has the
 plan (id, field-level diff, risk tier) and the execution record. To preview without applying, call
 `forti_plan` with the same operations: it validates against the catalog and the device and never
 changes anything; apply that plan later with `forti_apply {"plan_id":"..."}`.

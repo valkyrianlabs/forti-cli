@@ -94,6 +94,9 @@ Monitor endpoints have no live schema. The live schema is fetched from the devic
 
 ```text
 forti get <resource> [key]
+forti get <resource> <key> --child ATTR [--child-key KEY]
+  --child ATTR       the entries of this table attribute of the object (a child table)
+  --child-key KEY    one entry of the child table
   --filter EXPR      FortiOS filter, repeatable (AND); ',' inside one is OR (name==a,name==b)
   --fields a,b       return only these attributes
   --all              read every page of a listing
@@ -175,6 +178,27 @@ Tables page on the device: `next_start` is set whenever a page came back full. M
 not page consistently, so forti reads the whole result and windows it itself; `meta.total` is the
 full count and `meta.truncated` is true when items were left out.
 
+### Child tables
+
+Some attributes are tables of their own: a DHCP server's `reserved-address`, a policy's `srcaddr`,
+the rules of an access list. `--child` reads the entries of one of them, on the paths FortiOS gives
+child tables (`cmdb/system.dhcp/server/1/reserved-address`), instead of the whole parent object;
+`--child-key` reads one entry. The key names the parent object.
+
+```sh
+forti get system.dhcp/server 1 --child reserved-address --fields id,ip,mac,description
+forti get system.dhcp/server 1 --child reserved-address --child-key 21
+forti get system.dhcp/server 1 --child reserved-address --filter mac==00:00:5e:00:53:32
+```
+
+`--fields` and `--filter` name the entry's attributes (`ip`, `mac`), and are checked against them
+before anything is sent. `--child` must be a table attribute of the resource; anything else fails
+with `validation` and the table attributes it has. FortiOS answers a missing parent and a missing
+entry alike: `not_found` (exit 5). forti windows a child table's entries itself, as for monitor
+endpoints (`meta.total`), and redacts secrets in them as in any read.
+
+To change one entry, see [Changing one entry of a table](/guides/planning-and-applying-changes#changing-one-entry-of-a-table).
+
 ### Monitor endpoints and parameters
 
 Monitor endpoints return runtime state: `monitor/system/status`, `monitor/firewall/session-count-list`
@@ -199,7 +223,10 @@ replace, at any depth:
 
 - every string value starting with `ENC `, and
 - the value of every attribute whose name marks it as a secret (`password`, `psk`, `secret`,
-  `private-key`, `key-string`, `api-key`, names ending in `-key`, and others)
+  `private-key`, `key-string`, `api-key`, names ending in `-key`, and others), and
+- the `value` of a webhook header entry (`http-headers`) whose `key` names a credential header
+  (`Authorization`, `Cookie`, `X-API-Key`, names containing `token`, ...): FortiOS returns those in
+  cleartext
 
 with `"<redacted>"`. An unset secret stays visibly unset (`""` or `null`). `meta.redacted` lists the
 locations as JSON pointers, with `*` for list items (`["/*/psksecret"]`), and text output ends with a

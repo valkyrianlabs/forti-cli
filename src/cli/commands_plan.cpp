@@ -85,8 +85,16 @@ namespace forti::cli {
             return risk;
         }
 
+        // " \"web\"", or for a child table entry " \"1\" reserved-address \"7\"".
+        std::string target_of(const json& op) {
+            std::string out;
+            if (op.contains("parent")) out += " " + show(op["parent"]) + " " + op.value("child", "");
+            if (op.contains("key")) out += " " + show(op["key"]);
+            return out;
+        }
+
         void render_operation(std::ostream& out, const Style& style, const json& op, bool wire = true) {
-            std::string key = op.contains("key") ? " " + show(op["key"]) : "";
+            std::string key = target_of(op);
             out << std::format("{}. {} {}{}  [{}]\n", op.value("index", 0) + 1, style.bold(op.value("op", "")),
                                op.value("resource", ""), key, risk_label(style, op.value("risk", "")));
             if (op.contains("note")) out << "     " << style.dim(op["note"].get<std::string>()) << "\n";
@@ -178,7 +186,7 @@ namespace forti::cli {
 
         void render_record(std::ostream& out, const Style& style, const json& record) {
             for (const auto& op: record.value("operations", json::array())) {
-                std::string key = op.contains("key") ? " " + show(op["key"]) : "";
+                std::string key = target_of(op);
                 out << std::format("{}. {} {}{}  {}\n", op.value("index", 0) + 1, op.value("op", ""), op.value("resource", ""), key,
                                    status_label(style, op.value("status", "")));
                 if (op.contains("error")) out << "     " << op["error"].value("message", "") << "\n";
@@ -481,6 +489,19 @@ namespace forti::cli {
             return out;
         }
 
+        // --parent KEY --child ATTR: the operation changes one entry of the object's table attribute
+        // (a child table) instead of the object; the key (set, delete) is then the entry's.
+        json with_child(json op, const Args& args) {
+            auto parent = args.value("parent"), child = args.value("child");
+            if (!parent && !child) return op;
+            if (!parent || !child)
+                throw Failure(Code::usage, "--parent and --child go together: the object's key and its table attribute",
+                              {{"hint", "forti set system.dhcp/server 7 --parent 1 --child reserved-address description=nas"}});
+            op["parent"] = *parent;
+            op["child"] = *child;
+            return op;
+        }
+
         // The operation from `forti <verb> ...` or `forti plan <verb> ...`; `words` starts at the
         // resource.
         json operation_from_words(const std::string& verb, const std::vector<std::string>& words, const Args& args) {
@@ -491,6 +512,8 @@ namespace forti::cli {
             if (words.empty()) throw Failure(Code::usage, usage);
             if (verb == "action") {
                 if (words.size() != 1) throw Failure(Code::usage, usage);
+                if (args.value("parent") || args.value("child"))
+                    throw Failure(Code::usage, "--parent and --child address a child table entry: not an action");
                 json body = json::object();
                 if (auto given = args.value("body"))
                     body = parse_json(given->starts_with('@') ? read_input(given->substr(1)) : *given, "--body");
@@ -505,7 +528,7 @@ namespace forti::cli {
 
             if (verb == "delete") {
                 if (!assignments.empty() || !where.key) throw Failure(Code::usage, usage);
-                return {{"op", "delete"}, {"resource", where.resource}, {"key", *where.key}};
+                return with_child({{"op", "delete"}, {"resource", where.resource}, {"key", *where.key}}, args);
             }
             if (verb == "create") {
                 if (where.key)
@@ -522,7 +545,7 @@ namespace forti::cli {
                     auto [name, value] = assignment(word);
                     object[name] = std::move(value);
                 }
-                return {{"op", "create"}, {"resource", where.resource}, {"object", object}};
+                return with_child({{"op", "create"}, {"resource", where.resource}, {"object", object}}, args);
             }
             // set: a table needs a key; a singleton takes attributes straight away.
             json op = {{"op", "update"}, {"resource", where.resource}};
@@ -544,7 +567,7 @@ namespace forti::cli {
             if (auto clear = args.all("clear"); !clear.empty()) op["clear"] = clear;
             if (!op.contains("set") && !op.contains("clear"))
                 throw Failure(Code::usage, "nothing to change: give attr=value pairs or --clear attr", {{"hint", usage}});
-            return op;
+            return with_child(std::move(op), args);
         }
 
         // ---- apply, shared by every command that executes a plan ----
@@ -883,7 +906,7 @@ namespace forti::cli {
                 "Resources are named as for forti get: firewall/address web, firewall/address/web, firewall\n"
                 "address web, or address web. Values: attr=value is JSON when it parses as a number, boolean,\n"
                 "array or object, else text. Table attributes (srcaddr, member, ...) are replaced wholesale by\n"
-                "FortiOS: list every entry.\n"
+                "FortiOS: list every entry, or change one entry with --parent KEY --child ATTR.\n"
                 "\n"
                 "What happens follows the profile's mode. read-only: shows the change, changes nothing.\n"
                 "guarded: shows the change and asks once, \"Apply these changes?\" (without a terminal it stops\n"
@@ -898,13 +921,16 @@ namespace forti::cli {
                 "\n"
                 "options:\n"
                 "  --clear ATTR   reset an attribute to its default (repeatable)\n"
+                "  --parent KEY   with --child: change one entry of object KEY's table attribute ATTR; the\n"
+                "  --child ATTR   key is the entry's, and only that entry is read, written and verified\n"
                 "  --dry-run      show the plan; change nothing (same as forti plan set)\n"
                 "  --verbose      also show the request lines and the plan digest\n"
                 "\n"
                 "examples:\n"
                 "  forti set firewall/address/web comment=\"Web server\"\n"
                 "  forti set system global hostname=fw-lab\n"
-                "  forti set firewall/policy 7 status=disable\n";
+                "  forti set firewall/policy 7 status=disable\n"
+                "  forti set system.dhcp/server 21 --parent 1 --child reserved-address description=printer\n";
         static const std::string create_help = std::string(
                 "usage: forti create <resource> attr=value... [--object JSON|@file]\n"
                 "\n"
@@ -913,28 +939,35 @@ namespace forti::cli {
                 "\n"
                 "options:\n"
                 "  --object JSON  the object as JSON (@file reads a file, @- standard input)\n"
+                "  --parent KEY   with --child: add one entry to object KEY's table attribute ATTR (a\n"
+                "  --child ATTR   numeric id left out or 0 is assigned by the device)\n"
                 "  --dry-run      show the plan; change nothing\n"
                 "  --verbose      also show the request lines and the plan digest\n"
                 "\n"
-                "example:\n"
-                "  forti create firewall/address name=web subnet=\"192.0.2.10 255.255.255.255\"\n";
+                "examples:\n"
+                "  forti create firewall/address name=web subnet=\"192.0.2.10 255.255.255.255\"\n"
+                "  forti create system.dhcp/server --parent 1 --child reserved-address ip=192.0.2.50 \\\n"
+                "      mac=00:00:5e:00:53:32 description=printer\n";
         static const std::string delete_help = std::string(
                 "usage: forti delete <resource> <key>\n"
                 "\n"
-                "Delete a table object.\n"
+                "Delete a table object, or (--parent, --child) one entry of an object's table attribute.\n"
                 "\n") + std::string(change_notes) +
                 "\n"
                 "options:\n"
+                "  --parent KEY   with --child: delete entry <key> of object KEY's table attribute ATTR\n"
+                "  --child ATTR\n"
                 "  --dry-run      show the plan; change nothing\n"
                 "  --verbose      also show the request lines and the plan digest\n"
                 "\n"
-                "example:\n"
-                "  forti delete firewall/address/web\n";
+                "examples:\n"
+                "  forti delete firewall/address/web\n"
+                "  forti delete system.dhcp/server 21 --parent 1 --child reserved-address\n";
         return {
             {"set", "Change an object's attributes", set_help,
-             {{"clear"}, {"dry-run", "verbose"}, {}}, run_set},
-            {"create", "Create an object", create_help, {{"object"}, {"dry-run", "verbose"}, {}}, run_create},
-            {"delete", "Delete an object", delete_help, {{}, {"dry-run", "verbose"}, {}}, run_delete},
+             {{"clear", "parent", "child"}, {"dry-run", "verbose"}, {}}, run_set},
+            {"create", "Create an object", create_help, {{"object", "parent", "child"}, {"dry-run", "verbose"}, {}}, run_create},
+            {"delete", "Delete an object", delete_help, {{"parent", "child"}, {"dry-run", "verbose"}, {}}, run_delete},
             {"rollback", "Undo the last change (or a named one)",
              "usage: forti rollback [plan id]\n"
              "\n"
@@ -982,9 +1015,11 @@ namespace forti::cli {
              "\n"
              "options:\n"
              "  --apply      make the change now, as the profile's mode allows\n"
+             "  --parent KEY --child ATTR   (set, create, delete) one entry of a child table, as for forti set\n"
              "  --verbose    also print the plan digest\n"
              "  --yes, -y    approve: no question (scripts)\n",
-             {{"file", "clear", "object", "body"}, {"yes", "apply", "verbose"}, {{'f', "file"}, {'y', "yes"}}}, run_plan},
+             {{"file", "clear", "object", "body", "parent", "child"}, {"yes", "apply", "verbose"}, {{'f', "file"}, {'y', "yes"}}},
+             run_plan},
             {"apply", "Apply a saved plan (as the profile's mode allows)",
              "usage: forti apply [plan id]\n"
              "\n"

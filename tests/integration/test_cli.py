@@ -862,6 +862,137 @@ class Autonomous(CliTest):
         self.assertEqual(self.mock.singleton("system/global")["hostname"], "fw-mock")
 
 
+class ChildTables(CliTest):
+    """One DHCP reservation at a time, on FortiOS's child paths (cmdb/system.dhcp/server/<id>/reserved-address)."""
+    mode = "autonomous"
+
+    RESERVED = [{"id": 7, "ip": "192.0.2.7", "mac": "00:00:5e:00:53:07", "description": "nas"},
+                {"id": 8, "ip": "192.0.2.8", "mac": "00:00:5e:00:53:08", "description": "printer"}]
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.mock.add_dhcp_server(1, interface="internal", **{"reserved-address": self.RESERVED})
+        self.mock.clear_requests()
+
+    @staticmethod
+    def entry(op: str, **fields):  # type: ignore[no-untyped-def]
+        return {"op": op, "resource": "system.dhcp/server", "parent": "1", "child": "reserved-address", **fields}
+
+    def test_get_lists_and_reads_entries(self) -> None:
+        listed = self.json_of("get", "system.dhcp/server", "1", "--child", "reserved-address", "--fields", "id,ip")
+        self.assertEqual([e["id"] for e in listed["data"]], [7, 8])
+        self.assertEqual(listed["meta"]["child"], "reserved-address")
+        one = self.json_of("get", "system.dhcp/server/1", "--child", "reserved-address", "--child-key", "8")
+        self.assertEqual(one["data"]["description"], "printer")
+        self.assertEqual([r.api for r in self.mock.requests],
+                         ["cmdb/system.dhcp/server/1/reserved-address", "cmdb/system.dhcp/server/1/reserved-address/8"])
+        missing = self.json_of("get", "system.dhcp/server", "1", "--child", "reserved-address", "--child-key", "99", expect=5)
+        self.assertEqual(missing["error"]["code"], "not_found")
+        self.assertEqual(self.json_of("get", "system.dhcp/server", "9", "--child", "reserved-address", expect=5)["error"]["code"],
+                         "not_found")
+        text = self.forti("get", "system.dhcp/server", "1", "--child", "reserved-address", "--fields", "id,ip,description")
+        self.assertIn("printer", text.out)
+        refused = self.json_of("get", "system.dhcp/server", "1", "--child", "reserved-address", "--fields", "lease-time", expect=6)
+        self.assertEqual(refused["error"]["code"], "validation")
+
+    def test_create_update_delete_one_entry_and_roll_back(self) -> None:
+        planned = self.plan(self.entry("create", object={"ip": "192.0.2.50", "mac": "00:00:5e:00:53:32", "description": "tv"}),
+                            self.entry("update", key="7", set={"description": "nas-2"}),
+                            self.entry("delete", key="8"))["data"]
+        self.assertEqual(self.writes(), [], "planning never writes")
+        self.assertEqual(planned["risk"], "elevated")
+        self.assertEqual([op["wire"]["path"] for op in planned["operations"]],
+                         ["cmdb/system.dhcp/server/1/reserved-address", "cmdb/system.dhcp/server/1/reserved-address/7",
+                          "cmdb/system.dhcp/server/1/reserved-address/8"])
+        wires = [op["wire"] for op in planned["operations"]]
+
+        self.mock.clear_requests()
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertEqual([op["status"] for op in applied["operations"]], ["verified"] * 3, applied)
+        self.assertEqual(applied["operations"][0]["key"], "9", "the id the device assigned (child_mkey), not mkey 1")
+        writes = self.writes()
+        self.assertEqual([(w.method, w.api) for w in writes],
+                         [("POST", "cmdb/system.dhcp/server/1/reserved-address"),
+                          ("PUT", "cmdb/system.dhcp/server/1/reserved-address/7"),
+                          ("DELETE", "cmdb/system.dhcp/server/1/reserved-address/8")])
+        for write, wire in zip(writes, wires):
+            self.assertEqual(write.json(), wire.get("body"))
+        self.assertEqual(writes[1].json(), {"description": "nas-2"}, "only the changed attribute")
+        # The parent object itself is never read or written.
+        self.assertNotIn("cmdb/system.dhcp/server/1", [r.api for r in self.mock.requests])
+        entries = self.mock.reservations(1)
+        self.assertEqual(sorted(entries), [7, 9])
+        self.assertEqual(entries[7]["description"], "nas-2")
+        self.assertEqual(entries[9]["ip"], "192.0.2.50")
+
+        audit = [e for e in self.sb.audit() if e.get("event") == "apply"][-1]
+        self.assertEqual([(o["op"], o.get("key"), o.get("parent"), o.get("child")) for o in audit["operations"]],
+                         [("create", "9", "1", "reserved-address"), ("update", "7", "1", "reserved-address"),
+                          ("delete", "8", "1", "reserved-address")])
+        history = self.forti("history")
+        self.assertIn("create system.dhcp/server 1 reserved-address 9", history.out)
+
+        rollback_id = applied["rollback"]["plan_id"]
+        shown = self.json_of("plan", "show", rollback_id)["data"]
+        self.assertEqual([(op["op"], op["key"]) for op in shown["operations"]], [("create", "8"), ("update", "7"), ("delete", "9")])
+        rolled = self.json_of("rollback", planned["id"])["data"]
+        self.assertEqual([op["status"] for op in rolled["operations"]], ["verified"] * 3, rolled)
+        entries = self.mock.reservations(1)
+        self.assertEqual(sorted(entries), [7, 8])
+        self.assertEqual(entries[7]["description"], "nas")
+        self.assertEqual(entries[8]["mac"], "00:00:5e:00:53:08")
+
+    def test_set_create_delete_commands(self) -> None:
+        result = self.forti("set", "system.dhcp/server", "7", "--parent", "1", "--child", "reserved-address", "description=storage")
+        self.assertIn('update system.dhcp/server "1" reserved-address "7"', result.out)
+        self.assertEqual(self.mock.reservations(1)[7]["description"], "storage")
+        created = self.json_of("create", "system.dhcp/server", "--parent", "1", "--child", "reserved-address",
+                               "ip=192.0.2.60", "mac=00:00:5e:00:53:3c")["data"]
+        new_id = int(created["operations"][0]["key"])
+        self.assertEqual(self.mock.reservations(1)[new_id]["ip"], "192.0.2.60")
+        self.forti("delete", "system.dhcp/server", str(new_id), "--parent", "1", "--child", "reserved-address")
+        self.assertNotIn(new_id, self.mock.reservations(1))
+        self.assertEqual(self.forti("set", "system.dhcp/server", "7", "--parent", "1", "description=x", expect=2).code, 2)
+
+    def test_another_entry_changing_does_not_stale_the_plan(self) -> None:
+        planned = self.plan(self.entry("update", key="7", set={"description": "nas-2"}))["data"]
+        self.mock.set_reservation_attr(1, 8, "description", "changed by someone else")
+        self.mock.set_attr("system.dhcp/server", "1", "lease-time", 3600)
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertEqual(applied["operations"][0]["status"], "verified")
+        self.assertEqual(self.mock.reservations(1)[8]["description"], "changed by someone else")
+
+    def test_this_entry_changing_stales_the_plan(self) -> None:
+        planned = self.plan(self.entry("update", key="7", set={"description": "nas-2"}))["data"]
+        self.mock.set_reservation_attr(1, 7, "ip", "192.0.2.77")
+        self.mock.clear_requests()
+        stale = self.json_of("apply", planned["id"], expect=7)
+        self.assertEqual(stale["error"]["code"], "stale_plan")
+        self.assertEqual(stale["error"]["details"]["reason"], "before_changed")
+        self.assertEqual(stale["error"]["details"]["child"], "reserved-address")
+        self.assertEqual(self.writes(), [])
+
+    def test_missing_parent_and_entry_are_not_found(self) -> None:
+        missing = self.plan({**self.entry("create", object={"ip": "192.0.2.50", "mac": "00:00:5e:00:53:32"}), "parent": "9"},
+                            expect=5)
+        self.assertEqual(missing["error"]["code"], "not_found")
+        self.assertEqual(self.plan(self.entry("delete", key="99"), expect=5)["error"]["code"], "not_found")
+        self.assertEqual(self.writes(), [])
+
+    def test_revoking_a_lease_is_a_monitor_action(self) -> None:
+        self.mock.add_lease("192.0.2.50", "00:00:5e:00:53:32")
+        self.mock.add_lease("192.0.2.51", "00:00:5e:00:53:33")
+        leases = self.json_of("get", "monitor/system/dhcp")["data"]
+        self.assertEqual([lease["ip"] for lease in leases], ["192.0.2.50", "192.0.2.51"])
+        planned = self.json_of("plan", "action", "monitor/system/dhcp/revoke", "--body", '{"ip": ["192.0.2.50"]}')["data"]
+        self.assertEqual(planned["risk"], "elevated")
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertEqual(applied["operations"][0]["status"], "applied_unverified")
+        self.assertEqual([(w.method, w.api, w.json()) for w in self.writes()],
+                         [("POST", "monitor/system/dhcp/revoke", {"ip": ["192.0.2.50"]})])
+        self.assertEqual([lease["ip"] for lease in self.json_of("get", "monitor/system/dhcp")["data"]], ["192.0.2.51"])
+
+
 def main() -> int:
     global FORTI
     require_tools()
