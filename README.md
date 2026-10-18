@@ -1,3 +1,5 @@
+![forti-cli](https://media.valkyrianlabs.com/forti-cli.png)
+
 # forti-cli
 
 `forti`: FortiOS from the command line, built on [forti-api](https://github.com/valkyrianlabs/forti-api).
