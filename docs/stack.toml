@@ -1,0 +1,54 @@
+[project]
+title = "forti-cli"
+description = "forti, FortiOS from the command line - discover, read, plan and apply FortiGate configuration over the REST API."
+
+[[stack.languages]]
+name = "C++23"
+
+[[stack.libraries]]
+name = "forti-api"
+
+[[stack.libraries]]
+name = "nlohmann/json"
+
+[[stack.libraries]]
+name = "libcurl"
+
+[[stack.apis]]
+name = "FortiOS REST API"
+
+[[stack.security]]
+name = "macOS Keychain"
+
+[[stack.security]]
+name = "OpenSSL"
+
+[[stack.integrations]]
+name = "Claude Code"
+
+[[stack.integrations]]
+name = "Codex"
+
+[[stack.build]]
+name = "Meson"
+
+[[stack.build]]
+name = "Ninja"
+
+[[stack.testing]]
+name = "GoogleTest"
+
+[[stack.testing]]
+name = "ASan/UBSan"
+
+[[stack.packaging]]
+name = "Debian packages"
+
+[[stack.packaging]]
+name = "Homebrew"
+
+[[stack.infrastructure]]
+name = "GitHub Actions"
+
+[[stack.infrastructure]]
+name = "Podman"
