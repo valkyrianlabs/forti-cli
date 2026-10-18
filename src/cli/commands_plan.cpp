@@ -129,6 +129,10 @@ namespace forti::cli {
                 const json& request = op["wire"];
                 out << "     " << style.dim(std::format("{} {}", request.value("method", ""), request.value("path", "")));
                 if (request.contains("body") && !request["body"].is_null()) out << style.dim(" " + request["body"].dump());
+                // A large action body is stored once, by its SHA-256: name it, never print megabytes.
+                if (json ref = request.value("body_ref", json()); ref.is_object())
+                    out << style.dim(std::format(" (body of {} bytes, stored as state/blobs/{}.json)",
+                                                 ref.value("bytes", std::uint64_t{0}), ref.value("sha256", "")));
                 out << "\n";
             }
         }
@@ -190,6 +194,9 @@ namespace forti::cli {
                 out << std::format("{}. {} {}{}  {}\n", op.value("index", 0) + 1, op.value("op", ""), op.value("resource", ""), key,
                                    status_label(style, op.value("status", "")));
                 if (op.contains("error")) out << "     " << op["error"].value("message", "") << "\n";
+                if (op.contains("reply"))
+                    out << "     " << style.dim("reply " + show(op["reply"]) + (op.value("reply_truncated", false) ? " (truncated)" : ""))
+                        << "\n";
                 if (op.contains("verification")) out << "     " << op["verification"].get<std::string>() << "\n";
                 for (const auto& mismatch: op.value("mismatches", json::array()))
                     out << std::format("     {}: wrote {}, device reports {}\n", mismatch.value("attribute", ""),

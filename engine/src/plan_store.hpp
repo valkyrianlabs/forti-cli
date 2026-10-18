@@ -7,6 +7,8 @@
 //   <state>/plans/<id>.applied       written before the first mutation: a plan executes at most once
 //   <state>/approvals/<id>.json      guarded mode: the human approval of that plan's digest
 //   <state>/approvals/<id>.used      the approval consumed by apply (single use)
+//   <state>/blobs/<sha256>.json      a large action body, stored once (0600, directory 0700); the plan
+//                                    records {"body_ref": {"sha256", "bytes"}} instead of the body
 //   <state>/audit.jsonl              one JSON object per line: every apply and approve attempt, redacted
 //
 
@@ -21,6 +23,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -56,6 +59,32 @@ namespace forti::engine::detail {
     std::filesystem::path approval_file(const Paths& paths, std::string_view id);
 
     void save_plan(const Paths& paths, const json& plan);
+
+    // ---- Content-addressed action bodies ----
+    //
+    // A monitor action's body larger than inline_body_limit bytes of canonical JSON (threat-feed pushes
+    // carry tens of thousands of entries) is stored once, as exactly canonical(body), in
+    // <state>/blobs/<sha256>.json. The plan's operation carries "body_ref": {"sha256", "bytes"} and its
+    // wire record the same reference, never a copy, so the plan digest binds the content through the
+    // hash. Plans whose bodies fit stay as they always were (body inline in the operation and the wire).
+    inline constexpr std::size_t inline_body_limit = 64 * 1024;
+
+    // Canonical text of the bodies one plan stores, by lowercase hex SHA-256 of that text.
+    using Blobs = std::map<std::string, std::string, std::less<>>;
+    // {"sha256", "bytes"} for canonical text `text`.
+    json body_ref_of(std::string_view text);
+    [[nodiscard]] bool valid_body_ref(const json& ref);
+    std::filesystem::path blob_file(const Paths& paths, std::string_view sha256);
+    // Writes the blobs (identical bodies share one file; an existing one is kept only when its content
+    // still hashes to its name), then the plan, under the blob lock: a concurrent prune_blobs() sees
+    // either neither or both.
+    void save_plan(const Paths& paths, const json& plan, const Blobs& blobs);
+    // The body an operation's body_ref names, read and checked: a missing file, another size or another
+    // hash refuses the plan as tampered (policy_denied, reason "tampered"). Throws before anything is sent.
+    json load_body(const Paths& paths, std::string_view plan_id, const json& ref);
+    // Deletes every blob that no stored, not-yet-applied plan references (and leftovers of interrupted
+    // writes). Run after each apply, whatever its outcome. Never throws.
+    void prune_blobs(const Paths& paths) noexcept;
     // Loads and re-verifies a plan: not_found when missing; policy_denied (details.reason "tampered")
     // when the stored and recomputed digests, the id, or a per-operation risk tier disagree.
     json load_plan(const Paths& paths, std::string_view id);

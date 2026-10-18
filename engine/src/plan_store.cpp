@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <format>
@@ -18,6 +19,7 @@
 #include <system_error>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -132,6 +134,148 @@ namespace forti::engine::detail {
         write_private_file(plan_file(paths, plan.at("id").get<std::string>()), plan.dump(2) + "\n");
     }
 
+    // ---- content-addressed action bodies ----
+
+    namespace {
+
+        fs::path blobs_dir(const Paths& paths) { return paths.state / "blobs"; }
+
+        bool lower_hex(std::string_view text, std::size_t size) {
+            return text.size() == size &&
+                   std::ranges::all_of(text, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+        }
+
+        // Exclusive flock on <state>/blobs/.lock for as long as it lives. Plans that store blobs write
+        // them and their plan file under it, and prune_blobs() decides and deletes under it, so a blob is
+        // never deleted between being written (or found already there) and its plan becoming visible.
+        class BlobLock {
+            int fd_ = -1;
+
+        public:
+            explicit BlobLock(const Paths& paths) {
+                ensure_private_dir(paths.state);
+                ensure_private_dir(blobs_dir(paths));
+                fs::path file = blobs_dir(paths) / ".lock";
+                fd_ = ::open(file.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+                if (fd_ < 0) throw Failure(Code::config, std::format("cannot open {}", file.string()));
+                while (::flock(fd_, LOCK_EX) != 0) {
+                    if (errno == EINTR) continue;
+                    ::close(fd_);
+                    throw Failure(Code::config, std::format("cannot lock {}", file.string()));
+                }
+            }
+            ~BlobLock() { ::close(fd_); }   // closing releases the lock
+            BlobLock(const BlobLock&) = delete;
+            BlobLock& operator=(const BlobLock&) = delete;
+        };
+
+        // The file's bytes, or nullopt when it is missing or not a regular file (a symlink is refused).
+        std::optional<std::string> read_regular(const fs::path& file) {
+            int fd = ::open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            if (fd < 0) return std::nullopt;
+            struct stat info{};
+            if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) {
+                ::close(fd);
+                return std::nullopt;
+            }
+            std::string text(static_cast<std::size_t>(info.st_size), '\0');
+            std::size_t done = 0;
+            while (done < text.size()) {
+                ssize_t n = ::read(fd, text.data() + done, text.size() - done);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                done += static_cast<std::size_t>(n);
+            }
+            ::close(fd);
+            if (done != text.size()) return std::nullopt;
+            return text;
+        }
+
+    }  // namespace
+
+    json body_ref_of(std::string_view text) { return {{"sha256", hex(sha256(text))}, {"bytes", text.size()}}; }
+
+    bool valid_body_ref(const json& ref) {
+        if (!ref.is_object() || ref.size() != 2) return false;
+        auto sha = ref.find("sha256");
+        auto bytes = ref.find("bytes");
+        return sha != ref.end() && sha->is_string() && lower_hex(sha->get_ref<const std::string&>(), 64) &&
+               bytes != ref.end() && bytes->is_number_unsigned() && bytes->get<std::uint64_t>() > 0;
+    }
+
+    fs::path blob_file(const Paths& paths, std::string_view sha256) {
+        if (!lower_hex(sha256, 64)) throw Failure(Code::internal, "invalid body digest");
+        return blobs_dir(paths) / (std::string(sha256) + ".json");
+    }
+
+    void save_plan(const Paths& paths, const json& plan, const Blobs& blobs) {
+        if (blobs.empty()) return save_plan(paths, plan);
+        BlobLock lock(paths);
+        for (const auto& [sha, text]: blobs) {
+            fs::path file = blob_file(paths, sha);
+            // Identical bodies share one file. One that no longer hashes to its name is rewritten.
+            if (auto existing = read_regular(file); existing && *existing == text) continue;
+            write_private_file(file, text);
+        }
+        save_plan(paths, plan);
+    }
+
+    json load_body(const Paths& paths, std::string_view plan_id, const json& ref) {
+        if (!valid_body_ref(ref)) tampered(plan_id, "body_ref");
+        const std::string& sha = ref["sha256"].get_ref<const std::string&>();
+        auto text = read_regular(blob_file(paths, sha));
+        if (!text) tampered(plan_id, "body blob missing");
+        if (text->size() != ref["bytes"].get<std::uint64_t>() || hex(sha256(*text)) != sha)
+            tampered(plan_id, "body blob sha256");
+        json body = json::parse(*text, nullptr, false);
+        if (body.is_discarded() || !body.is_object()) tampered(plan_id, "body blob");
+        try {
+            check_reply_depth(body, "body");   // the SDK serializes it recursively
+        } catch (const Failure&) {
+            tampered(plan_id, "body blob");
+        }
+        return body;
+    }
+
+    void prune_blobs(const Paths& paths) noexcept {
+        try {
+            std::error_code error;
+            if (!fs::is_directory(blobs_dir(paths), error)) return;
+            BlobLock lock(paths);
+            std::set<std::string, std::less<>> referenced;
+            for (const auto& entry: fs::directory_iterator(plans_dir(paths), error)) {
+                if (entry.path().extension() != ".json") continue;
+                std::string id = entry.path().stem().string();
+                std::error_code ignored;
+                if (!valid_plan_id(id) || fs::exists(plans_dir(paths) / (id + ".applied"), ignored)) continue;
+                auto text = read_regular(entry.path());
+                if (!text || text->find("\"body_ref\"") == std::string::npos) continue;
+                json plan = json::parse(*text, nullptr, false);
+                if (!plan.is_object() || !plan.contains("operations") || !plan["operations"].is_array()) continue;
+                for (const auto& op: plan["operations"])
+                    if (op.is_object() && op.contains("body_ref") && valid_body_ref(op["body_ref"]))
+                        referenced.insert(op["body_ref"]["sha256"].get<std::string>());
+            }
+            if (error) return;   // the plans could not be listed: keep everything
+            std::vector<fs::path> unused;
+            for (const auto& entry: fs::directory_iterator(blobs_dir(paths), error)) {
+                std::string name = entry.path().filename().string();
+                if (name == ".lock") continue;
+                // <sha256>.json, or a write interrupted by a crash (<sha256>.json.tmp.<pid>): writers
+                // hold the lock, so none is in progress now.
+                bool blob = entry.path().extension() == ".json" && lower_hex(entry.path().stem().string(), 64);
+                if (blob && referenced.contains(entry.path().stem().string())) continue;
+                if (blob || name.find(".json.tmp.") != std::string::npos) unused.push_back(entry.path());
+            }
+            for (const auto& file: unused) {
+                std::error_code ignored;
+                fs::remove(file, ignored);
+            }
+        } catch (...) {
+            // Best effort: an unpruned blob is only disk space.
+        }
+    }
+
     Risk parse_risk(std::string_view text) {
         if (text == "low") return Risk::low;
         if (text == "elevated") return Risk::elevated;
@@ -216,7 +360,15 @@ namespace forti::engine::detail {
                     if (!key.empty()) path = at(key);
                 }
             } else if (name == "action") {
-                shape = resource.kind == Kind::monitor && is("body", json::value_t::object);
+                // The body inline (as it always was), or a reference to a stored blob (large bodies):
+                // exactly one of the two, and the wire record carries the same thing.
+                bool inline_body = is("body", json::value_t::object) && !op.contains("body_ref");
+                bool stored = op.contains("body_ref") && !op.contains("body") && valid_body_ref(op["body_ref"]);
+                shape = resource.kind == Kind::monitor && (inline_body || stored);
+                if (auto wire = op.find("wire"); shape && wire != op.end() && wire->is_object()) {
+                    if (inline_body) shape = !wire->contains("body_ref") && wire->value("body", json()) == op["body"];
+                    else shape = !wire->contains("body") && wire->value("body_ref", json()) == op["body_ref"];
+                }
                 method = "POST";
                 path = resource.path;
             } else if (resource.kind != Kind::monitor && resource.typed()) {
@@ -485,7 +637,8 @@ namespace forti::engine::detail {
             // Only attribute-bearing subtrees are redacted: the operation's own "key" is an object
             // name, not the attribute "key" (an NTP or OSPF authentication key).
             json entry = json::object();
-            for (const char* key: {"index", "op", "resource", "parent", "child", "key", "risk", "note"})
+            // A stored action body is shown by its reference ({"sha256", "bytes"}), never inline.
+            for (const char* key: {"index", "op", "resource", "parent", "child", "key", "risk", "note", "body_ref"})
                 if (auto it = op.find(key); it != op.end()) entry[key] = *it;
             auto extra = redaction_extra(op);
             if (auto it = op.find("diff"); it != op.end()) entry["diff"] = redact(*it, extra);

@@ -15,7 +15,10 @@ and `forti-mcp` binaries through libcurl and TLS. Python 3 standard library only
   as text; GET `mkey` = the parent's key; a missing entry is 404 with `child_path`, a missing parent
   404 without it. Writes carry revision, old_revision and revision_changed. Monitor: `system/status`,
   `system/config/backup` (plain text), `system/dhcp` (leases) with the action `system/dhcp/revoke`
-  ({"ip": [...]}), and an untyped list (`firewall/session-count-list`, not in the SDK registry).
+  ({"ip": [...]}), the threat-feed push `system/external-resource/dynamic` ({"commands": [{"name", "command":
+  snapshot|add|remove, "entries"}]}: HTTP 200 with one results entry per command, {"status": "error",
+  "message": "Connect pending"} for a feed in `.pending_feeds`, as FortiOS answers before it has loaded a
+  feed), and an untyped list (`firewall/session-count-list`, not in the SDK registry).
 * Faults the test controls (`MockFortiOS.drop_after_write()`, `.error_after_create()`,
   `.fail_status_after_write()`, `.normalize`), and a record of every request (`.requests`).
 
@@ -286,6 +289,8 @@ class Device:
         self.revision = 1
         self.next_policy_id = 1
         self.leases: list[dict[str, Any]] = []   # monitor/system/dhcp
+        self.feeds: dict[str, list[str]] = {}    # pushed threat-feed entries, by feed name
+        self.pending_feeds: set[str] = set()     # feeds FortiOS has not loaded yet ("Connect pending")
 
     def bump(self) -> None:
         self.revision += 1
@@ -839,6 +844,31 @@ class _Handler(BaseHTTPRequestHandler):
             with mock.lock:
                 mock.device.leases = [lease for lease in mock.device.leases if lease["ip"] not in ips]
             return 200, mock.envelope(method, api, results={}), "application/json"
+        if method == "POST" and path == "system/external-resource/dynamic":
+            request = json.loads(body or "{}")
+            commands = request.get("commands") if isinstance(request, dict) else None
+            if not isinstance(commands, list):
+                return 400, mock.envelope(method, api, 400, error=-651), "application/json"
+            results = []
+            with mock.lock:
+                for command in commands:
+                    name, verb = command.get("name"), command.get("command")
+                    entries = command.get("entries", [])
+                    if name in mock.device.pending_feeds:
+                        results.append({"name": name, "status": "error", "message": "Connect pending"})
+                        continue
+                    feed = mock.device.feeds.setdefault(name, [])
+                    if verb == "snapshot":
+                        feed[:] = list(entries)
+                    elif verb == "add":
+                        feed.extend(entry for entry in entries if entry not in feed)
+                    elif verb == "remove":
+                        feed[:] = [entry for entry in feed if entry not in entries]
+                    else:
+                        results.append({"name": name, "status": "error", "message": "invalid command"})
+                        continue
+                    results.append({"name": name, "status": "success"})
+            return 200, mock.envelope(method, api, results=results), "application/json"
         if method == "GET" and path == "system/status":
             return 200, mock.envelope(method, api, results={
                 "model_name": "FortiGate", "model_number": "60F", "model": "FGT60F", "hostname": "fw-mock",

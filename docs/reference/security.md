@@ -24,7 +24,7 @@ and do not protect against.
 | API keys (env / command source) | not stored | only the variable name or the command's argv is saved |
 | Passwords of forti's client certificates | `~/.forti/certs/<name>/client.pass`, or the secret store with `--keychain` | 0600 file in a 0700 directory, read through the `file` source (refused when group or others can access it); never printed |
 | Client certificate keys and the private CA keys | `~/.forti/certs/<name>/client.p12` (encrypted); the forti CA's `~/.forti/ca/ca.key`, and `certs/<name>/ca/ca.key` for a certificate with its own CA | 0600 files in 0700 directories; CA keys never leave the machine |
-| Plans, approvals, audit log | `~/.forti/state/` | 0600 files. Plan files keep real values (apply needs them) |
+| Plans, approvals, audit log | `~/.forti/state/` | 0600 files. Plan files keep real values (apply needs them), and so do large action bodies (`state/blobs/`, checked against the SHA-256 in the plan before apply sends them) |
 | Pre-change configuration backups (critical plans) | `~/.forti/state/backups/<plan id>.conf` | 0600 file in a 0700 directory, streamed to disk, never logged or printed; the 20 most recent are kept |
 
 Paths and overrides: [Configuration files](/reference/configuration-files).

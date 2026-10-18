@@ -16,6 +16,7 @@ if gtest_dep.found()
                             'unit/test_profiles.cpp',
                             'unit/test_plan.cpp',
                             'unit/test_child.cpp',
+                            'unit/test_action_bodies.cpp',
                             'unit/test_security.cpp',
                             'unit/test_security2.cpp',
                             # test_plan.cpp also checks engine internals (SHA-256 vectors, digests, redaction).
