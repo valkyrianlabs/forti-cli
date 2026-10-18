@@ -1,5 +1,5 @@
 project('forti-cli', 'cpp',
-        version : '0.5.0',
+        version : '0.6.0',
         meson_version : '>=1.3.0',
         license : 'MIT',
         default_options : ['warning_level=3', 'cpp_std=c++23', 'buildtype=release', 'b_ndebug=if-release', 'forti-api:tests=disabled'])
