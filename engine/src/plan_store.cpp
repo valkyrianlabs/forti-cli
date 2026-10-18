@@ -404,21 +404,238 @@ namespace forti::engine::detail {
         return fs::exists(plans_dir(paths) / (std::string(id) + ".applied"));
     }
 
-    void mark_applied(const Paths& paths, std::string_view id, Clock::time_point time) {
+    void mark_applied(const Paths& paths, std::string_view id, Clock::time_point time, const json& plan) {
         validate_plan_id(id);
         fs::path marker = plans_dir(paths) / (std::string(id) + ".applied");
+        json content = {{"plan_id", id}, {"applied_at", iso8601(time)}};
+        if (plan.is_object()) {
+            // Outside the plan's digest: what `forti plan list` shows once the plan file is gone.
+            const json device = plan.value("device", json::object());
+            content["kind"] = plan.value("kind", "plan");
+            content["created_at"] = plan.value("created_at", "");
+            content["profile"] = device.value("profile", "");
+            content["host"] = device.value("host", "");
+            content["digest"] = plan.value("digest", "");
+            content["risk"] = to_string(plan_risk(plan));
+            content["summary"] = summarize(plan);
+            content["operations"] = plan.value("operations", json::array()).size();
+            if (plan.contains("rollback_of")) content["rollback_of"] = plan["rollback_of"];
+        }
         // O_EXCL makes this the one gate: of two concurrent applies of a plan, exactly one creates it.
         int fd = ::open(marker.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (fd < 0) {
-            if (errno == EEXIST)
-                throw Failure(Code::policy_denied, std::format("plan {} was already applied; a plan runs at most once", id),
-                              {{"plan_id", id}, {"reason", "already_applied"}});
+            if (errno == EEXIST) refuse_applied(paths, id);
             throw Failure(Code::config, std::format("cannot write {}", marker.string()));
         }
-        std::string text = json{{"plan_id", id}, {"applied_at", iso8601(time)}}.dump() + "\n";
+        std::string text = content.dump() + "\n";
         bool written = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
         ::close(fd);
         if (!written) throw Failure(Code::config, std::format("cannot write {}", marker.string()));
+    }
+
+    std::optional<json> applied_marker(const Paths& paths, std::string_view id) {
+        validate_plan_id(id);
+        fs::path marker = plans_dir(paths) / (std::string(id) + ".applied");
+        std::error_code error;
+        if (!fs::exists(fs::symlink_status(marker, error))) return std::nullopt;
+        json content = nullptr;
+        if (fs::file_size(marker, error) <= 64 * 1024 && !error)
+            if (auto text = read_regular(marker)) content = json::parse(*text, nullptr, false);
+        if (!content.is_object() || content.value("plan_id", "") != id) content = {{"plan_id", id}};
+        return content;
+    }
+
+    void refuse_applied(const Paths& paths, std::string_view id, std::string_view hint) {
+        json details = {{"plan_id", id}, {"reason", "already_applied"}};
+        std::string when;
+        if (auto marker = applied_marker(paths, id)) {
+            if (auto at = marker->find("applied_at"); at != marker->end() && at->is_string()) {
+                details["applied_at"] = *at;
+                when = " at " + at->get<std::string>();
+            }
+            if (auto outcome = marker->find("outcome"); outcome != marker->end() && outcome->is_string())
+                details["outcome"] = *outcome;
+        }
+        throw Failure(Code::policy_denied, std::format("plan {} was already applied{}; {}", id, when, hint), std::move(details));
+    }
+
+    // ---- plan retention ----
+
+    namespace {
+
+        fs::path lock_file(const Paths& paths) { return plans_dir(paths) / ".lock"; }
+
+        int open_lock(const Paths& paths) {
+            return ::open(lock_file(paths).c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+        }
+
+        // A file's own record of when it was made ("applied_at", "approved_at", "used_at"), read from
+        // these small JSON files; nullopt when it has none.
+        std::optional<Clock::time_point> recorded_time(const fs::path& file, const char* field) {
+            std::error_code error;
+            if (fs::file_size(file, error) > 64 * 1024 || error) return std::nullopt;
+            auto text = read_regular(file);
+            if (!text) return std::nullopt;
+            json content = json::parse(*text, nullptr, false);
+            if (!content.is_object() || !content.contains(field) || !content[field].is_string()) return std::nullopt;
+            return parse_iso8601(content[field].get<std::string>());
+        }
+
+        std::optional<Clock::time_point> modified(const fs::path& file) {
+            struct stat info{};
+            if (::lstat(file.c_str(), &info) != 0) return std::nullopt;
+            return Clock::from_time_t(info.st_mtime);
+        }
+
+        bool remove_file(const fs::path& file) {
+            std::error_code ignored;
+            return fs::remove(file, ignored);
+        }
+
+        // "<id>.json" / "<id>.applied" / "<id>.used": the id, when valid; else empty.
+        std::string id_of(const fs::path& file, std::string_view extension) {
+            if (file.extension() != extension) return {};
+            std::string id = file.stem().string();
+            return valid_plan_id(id) ? id : std::string();
+        }
+
+        bool leftover(const fs::path& file) { return file.filename().string().find(".tmp.") != std::string::npos; }
+
+    }  // namespace
+
+    ApplyLock::ApplyLock(const Paths& paths) {
+        std::error_code error;
+        // No plans directory: there is no plan to protect (apply then fails with not_found).
+        if (!fs::is_directory(plans_dir(paths), error)) return;
+        fd_ = open_lock(paths);
+        if (fd_ < 0) throw Failure(Code::config, std::format("cannot open {}", lock_file(paths).string()));
+        while (::flock(fd_, LOCK_SH) != 0) {
+            if (errno == EINTR) continue;
+            ::close(fd_);
+            fd_ = -1;
+            throw Failure(Code::config, std::format("cannot lock {}", lock_file(paths).string()));
+        }
+    }
+
+    ApplyLock::~ApplyLock() {
+        if (fd_ >= 0) ::close(fd_);   // closing releases the lock
+    }
+
+    std::optional<Clock::time_point> plan_id_time(std::string_view id) {
+        // new_plan_id(): "YYYYMMDD-HHMMSS-" then random hex, the plan's created_at to the second.
+        auto digits = [&](std::size_t from, std::size_t count) {
+            return std::ranges::all_of(id.substr(from, count), [](char c) { return c >= '0' && c <= '9'; });
+        };
+        if (id.size() < 16 || id[8] != '-' || id[15] != '-' || !digits(0, 8) || !digits(9, 6)) return std::nullopt;
+        std::string text = std::format("{}-{}-{}T{}:{}:{}Z", id.substr(0, 4), id.substr(4, 2), id.substr(6, 2),
+                                       id.substr(9, 2), id.substr(11, 2), id.substr(13, 2));
+        return parse_iso8601(text);
+    }
+
+    void forget_applied(const Paths& paths, std::string_view id, const json& outcome) noexcept {
+        try {
+            validate_plan_id(id);
+            std::string name(id);
+            if (auto marker = applied_marker(paths, id); marker && outcome.is_object() && !outcome.empty()) {
+                marker->update(outcome);
+                // Replaced by rename: the marker exists throughout, so a concurrent mark_applied still fails.
+                write_private_file(plans_dir(paths) / (name + ".applied"), marker->dump() + "\n");
+            }
+            remove_file(plans_dir(paths) / (name + ".json"));
+            remove_file(approvals_dir(paths) / (name + ".json"));
+            remove_file(approvals_dir(paths) / (name + ".used"));
+        } catch (...) {
+            // Best effort: what is left behind is purged with the next plan or apply.
+        }
+    }
+
+    Purged purge_plans(const Paths& paths, std::chrono::days retention, Clock::time_point now) noexcept {
+        Purged out;
+        try {
+            std::error_code error;
+            if (fs::is_directory(plans_dir(paths), error)) {
+                int fd = open_lock(paths);
+                if (fd >= 0) {
+                    struct Closer {
+                        int fd;
+                        ~Closer() { ::close(fd); }
+                    } closer{fd};
+                    int locked;
+                    while ((locked = ::flock(fd, LOCK_EX | LOCK_NB)) != 0 && errno == EINTR) {}
+                    if (locked != 0) out.skipped = true;   // an apply is running (or the lock failed): next time
+                    else {
+                        Clock::time_point cutoff = now - retention;
+                        auto expired = [&](std::optional<Clock::time_point> recorded, const fs::path& file) {
+                            if (!recorded) recorded = modified(file);
+                            return recorded && *recorded < cutoff;
+                        };
+
+                        std::set<std::string, std::less<>> plans, markers;
+                        std::vector<fs::path> leftovers;
+                        for (const auto& entry: fs::directory_iterator(plans_dir(paths), error)) {
+                            if (auto id = id_of(entry.path(), ".json"); !id.empty()) plans.insert(id);
+                            else if (auto marked = id_of(entry.path(), ".applied"); !marked.empty()) markers.insert(marked);
+                            else if (leftover(entry.path())) leftovers.push_back(entry.path());
+                        }
+                        for (const auto& id: plans) {
+                            fs::path file = plans_dir(paths) / (id + ".json");
+                            if (markers.contains(id)) {
+                                // Applied before plans were deleted on apply (or the apply crashed): keep
+                                // the tombstone's summary, then drop the plan.
+                                if (auto marker = applied_marker(paths, id); marker && !marker->contains("summary"))
+                                    if (auto text = read_regular(file)) {
+                                        json plan = json::parse(*text, nullptr, false);
+                                        if (plan.is_object() && plan.value("id", "") == id) {
+                                            json tombstone = {{"kind", plan.value("kind", "plan")},
+                                                              {"created_at", plan.value("created_at", "")},
+                                                              {"profile", plan.value("device", json::object()).value("profile", "")},
+                                                              {"host", plan.value("device", json::object()).value("host", "")},
+                                                              {"digest", plan.value("digest", "")},
+                                                              {"summary", plan.value("summary", "")},
+                                                              {"risk", plan.value("risk", "")},
+                                                              {"operations", plan.value("operations", json::array()).size()}};
+                                            if (plan.contains("rollback_of")) tombstone["rollback_of"] = plan["rollback_of"];
+                                            tombstone.update(*marker);
+                                            write_private_file(plans_dir(paths) / (id + ".applied"), tombstone.dump() + "\n");
+                                        }
+                                    }
+                                out.applied += remove_file(file);
+                            } else if (expired(plan_id_time(id), file)) {
+                                out.plans += remove_file(file);
+                            }
+                        }
+                        for (const auto& id: markers) {
+                            fs::path file = plans_dir(paths) / (id + ".applied");
+                            if (expired(recorded_time(file, "applied_at"), file)) out.markers += remove_file(file);
+                        }
+                        for (const auto& file: leftovers)
+                            if (expired(std::nullopt, file)) out.leftovers += remove_file(file);
+
+                        // Approvals: past retention, or of a plan that is gone (applied or purged).
+                        for (const auto& entry: fs::directory_iterator(approvals_dir(paths), error)) {
+                            const fs::path& file = entry.path();
+                            std::string id = id_of(file, ".json");
+                            const char* field = "approved_at";
+                            if (id.empty()) {
+                                id = id_of(file, ".used");
+                                field = "used_at";
+                            }
+                            if (id.empty()) {
+                                if (leftover(file) && expired(std::nullopt, file)) out.leftovers += remove_file(file);
+                                continue;
+                            }
+                            std::error_code ignored;
+                            bool orphan = !fs::exists(plans_dir(paths) / (id + ".json"), ignored);
+                            if (orphan || expired(recorded_time(file, field), file)) out.approvals += remove_file(file);
+                        }
+                    }
+                }
+            }
+        } catch (...) {
+            // Best effort: whatever was not purged now is purged next time.
+        }
+        prune_blobs(paths);
+        return out;
     }
 
     // ---- approvals ----

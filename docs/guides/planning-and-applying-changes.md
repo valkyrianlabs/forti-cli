@@ -311,6 +311,38 @@ forti plan list                      # stored plans, newest first, with their st
 forti plan show <id>                 # the plan, its before/after, approval and applied state
 ```
 
+### How long plans are kept
+
+A plan is **deleted once an apply has started executing it**, whatever the outcome (applied,
+`partial_failure`, `outcome_unknown`, `management_connectivity_lost`), together with its approval
+records: it can never run again, and the audit log (`forti history`) and the rollback plan say what it
+did. A small marker, `state/plans/<id>.applied`, stays behind. It keeps the plan's summary and outcome,
+so `forti plan list` still lists the plan as `applied`, and applying it again is refused as
+**already applied** (`policy_denied`, reason `already_applied`, with `applied_at`), not "not found".
+`forti plan show` of an applied plan says when it was applied and that it is no longer stored.
+
+An apply refused before anything was sent (`stale_plan`, `approval_required`, `policy_denied`, a
+tampered plan, an unwritable audit log, a failed pre-change backup) keeps the plan, so you can approve
+it or retry.
+
+Everything else ages out. Plans never applied, rollback plans, applied markers and approval records
+older than the **retention period** are deleted: by the time each records (a plan's id begins with its
+creation time; markers and approvals hold `applied_at`, `approved_at`, `used_at`), else the file's
+modification time. The default is 30 days:
+
+```sh
+forti home retention          # Plans are kept for 30 days (the default).
+forti home retention 7        # keep them 7 days (config.json "plan_retention_days")
+forti home retention default  # back to 30
+```
+
+The value is a whole number of days from 1 to 3650. The purge is cheap and automatic: every plan, every
+apply and `forti plan list` run it, and stored action bodies that no remaining plan refers to go with
+it. It never runs while an apply is executing (an apply holds a shared lock on `state/plans/.lock`; the
+purge takes it exclusively or waits for the next run), so a plan in use is never deleted under it. The
+audit log and configuration backups are not affected (backups keep their 20-file limit). Agents cannot
+change the retention: no MCP tool writes `config.json`.
+
 ### Naming a plan
 
 Wherever a command takes a plan id, it also takes:
@@ -382,7 +414,7 @@ Apply takes only the plan id; the operations come from the stored plan. In order
 1. verifies the plan file (its format, its digest, and that every operation's shape, risk tier and
    request match what the catalog says) and every stored action body (present, with the size and
    SHA-256 the plan names), refusing a tampered plan;
-2. refuses a plan that was already applied: a plan runs at most once;
+2. refuses a plan that was already applied (its marker exists): a plan runs at most once;
 3. checks the mode, and in guarded mode a valid, unexpired approval for this digest;
 4. checks that the profile still points at the planned host and port, re-reads every before-state,
    and checks the device's serial number. Anything that moved makes the plan **stale** (`stale_plan`):
@@ -393,7 +425,9 @@ Apply takes only the plan id; the operations come from the stored plan. In order
 8. executes the operations in order, without retries, and stops at the first failure;
 9. verifies each operation by re-reading the object, and after each critical-risk operation probes
    management connectivity;
-10. rewrites the rollback plan from what actually happened, and appends the record to `audit.jsonl`.
+10. rewrites the rollback plan from what actually happened, and appends the record to `audit.jsonl`;
+11. deletes the plan file and its approval records once execution has started (step 7 on), keeping the
+    applied marker with the outcome ([How long plans are kept](#how-long-plans-are-kept)).
 
 Each operation ends with one status:
 
@@ -454,8 +488,9 @@ reverse order, built from the recorded before-states.
 | one entry of a table | the same, on the same entry of the same object |
 | action | nothing: monitor actions cannot be rolled back; the record lists them under `rollback.skipped` |
 
-The rollback plan is an ordinary stored plan (`kind: rollback`, `rollback_of: <id>`). `forti rollback`
-applies it:
+The rollback plan is an ordinary stored plan (`kind: rollback`, `rollback_of: <id>`): it is kept until
+it is applied or the retention period ends, even though the plan it undoes is deleted when applied.
+`forti rollback` applies it:
 
 ```sh
 forti rollback               # undo the profile's last apply

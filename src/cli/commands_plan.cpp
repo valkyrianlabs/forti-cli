@@ -347,7 +347,7 @@ namespace forti::cli {
         // as named. `latest` or nothing: the plan waiting to be applied for the selected profile, made
         // in the last day, but only when exactly one is waiting: with two agents (or two drafts) on one
         // device "the newest" is a guess, and forti never applies a plan it guessed. At a terminal the
-        // person picks from the list instead. `for_show`: `latest` is simply the newest plan.
+        // person picks from the list instead. `for_show`: `latest` is simply the newest stored plan.
         Named name_plan(Context& context, const Args& args, const std::string& given, bool for_show = false) {
             if (complete_id(given)) return {given, true};
             json plans = stored_plans(context);
@@ -357,10 +357,15 @@ namespace forti::cli {
                 for (const auto& plan: plans) {
                     if (plan.value("kind", "plan") == "rollback") continue;
                     if (profile && plan.value("profile", "") != *profile) continue;
-                    if (for_show) return {plan.value("id", ""), false};
+                    // An applied plan's file is deleted: "latest" is the newest one still stored.
+                    if (for_show && plan.value("stored", true)) return {plan.value("id", ""), false};
+                    if (for_show) continue;
                     if (pending(plan) && made_recently(plan)) waiting.push_back(plan);
                 }
                 std::string whose = profile ? std::format(" for profile {}", *profile) : "";
+                if (for_show)
+                    throw Failure(Code::not_found, std::format("no plan{} is stored", whose),
+                                  {{"hint", "forti plan list shows the stored plans; applied plans are deleted"}});
                 if (waiting.empty())
                     throw Failure(Code::not_found, std::format("no plan{} is waiting to be applied", whose),
                                   {{"hint", "forti plan list shows the stored plans; name an older one by its id"}});
@@ -844,6 +849,9 @@ namespace forti::cli {
             const std::string& id = named.id;
             if (context.output.format == Format::json) return execute(context, id);
             json shown = engine::Engine::envelope([&] { return engine::show_plan(context.engine, id); });
+            // An applied plan is no longer stored: apply itself says it already ran.
+            if (!shown.value("ok", false) && shown["error"].value("details", json::object()).value("reason", "") == "already_applied")
+                return execute(context, id);
             if (!shown.value("ok", false)) return emit(context.output, shown);
             const json& data = shown["data"];
             std::string state = data["state"].value("state", "");

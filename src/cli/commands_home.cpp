@@ -1,5 +1,6 @@
 //
-// `forti home`: where forti keeps everything (engine Paths: $FORTI_HOME, else ~/.forti), and
+// `forti home`: where forti keeps everything (engine Paths: $FORTI_HOME, else ~/.forti),
+// `forti home retention`, how long stored plans are kept (config.json "plan_retention_days"), and
 // `forti home migrate`, which moves a pre-0.2 setup (~/.config/forti, ~/.local/state/forti,
 // ~/.cache/forti, or the XDG equivalents) into the home.
 //
@@ -67,6 +68,11 @@ namespace forti::cli {
             } catch (const Failure& failure) {
                 data["secret_store"] = std::string("unavailable: ") + failure.what();
             }
+            try {
+                data["plan_retention_days"] = context.engine.profiles().retention_days();
+            } catch (const Failure&) {
+                data["plan_retention_days"] = nullptr;   // config.json is invalid: forti doctor says why
+            }
             if (paths.legacy)
                 data["hint"] = std::format("this is a pre-0.2 setup; `forti home migrate` moves it into {}",
                                            display_path(paths.home));
@@ -82,7 +88,11 @@ namespace forti::cli {
             };
             line("config", data.value("config_file", ""), data.value("config_exists", false) ? "" : "(not configured yet)");
             line("credentials", data.value("credentials", "") + "/", "file store");
-            line("state", data.value("state", "") + "/", "plans, approvals, audit log, backups");
+            std::string kept = data["plan_retention_days"].is_number()
+                                       ? std::format("plans (kept {} days), approvals, audit log, backups",
+                                                     data["plan_retention_days"].get<unsigned>())
+                                       : std::string("plans, approvals, audit log, backups");
+            line("state", data.value("state", "") + "/", kept);
             line("cache", data.value("cache", "") + "/");
             line("certs", data.value("certs", "") + "/", "client certificates (forti cert list)");
             line("forti CA", data.value("forti_ca", "") + "/", "issues them; its key never leaves this machine");
@@ -93,6 +103,45 @@ namespace forti::cli {
                 out << std::format("  {:<12} {}={}\n", "override", it.key(), it.value().get<std::string>());
             if (data.value("legacy", false))
                 out << "\n" << styled("legacy: ", Style::yellow) << data.value("hint", "") << "\n";
+        }
+
+        // ---- retention ----
+
+        // Shows the plan retention, or sets it in config.json ("default" removes the setting). Validated
+        // exactly as loading config.json validates it. Only here: no MCP tool changes forti's policy.
+        json run_retention(Context& context, const Args& args) {
+            const auto& paths = context.engine.options().paths;
+            engine::ProfileStore store(paths);
+            engine::ProfileSet set = store.load();
+            bool changed = false;
+            if (args.positional.size() == 2) {
+                const std::string& given = args.positional[1];
+                if (given == "default") set.plan_retention_days.reset();
+                else {
+                    json value = json::parse(given, nullptr, false);
+                    set.plan_retention_days = engine::parse_plan_retention_days(value.is_discarded() ? json(given) : value);
+                }
+                store.save(set);
+                changed = true;
+            }
+            return {{"plan_retention_days", set.retention_days()},
+                    {"default", !set.plan_retention_days.has_value()},
+                    {"changed", changed},
+                    {"config_file", paths.config_file().string()},
+                    {"plans", (paths.state / "plans").string()}};
+        }
+
+        void render_retention(std::ostream& out, const json& data, const json&) {
+            unsigned days = data.value("plan_retention_days", engine::default_plan_retention_days);
+            out << styled(std::format("Plans are {}kept for {} day{}", data.value("changed", false) ? "now " : "", days,
+                                      days == 1 ? "" : "s"),
+                          Style::bold)
+                << (data.value("default", false) ? " (the default)." : " (config.json plan_retention_days).") << "\n";
+            out << std::format("  A plan is deleted once an apply has started executing it; its applied marker (which\n"
+                               "  refuses a second apply), approvals, unapplied and rollback plans are deleted {} day{}\n"
+                               "  after they were made. The audit log and configuration backups are not affected.\n",
+                               days, days == 1 ? "" : "s");
+            out << styled("  forti home retention DAYS (1 to 3650) | forti home retention default", Style::dim) << "\n";
         }
 
         // ---- migrate ----
@@ -223,26 +272,38 @@ namespace forti::cli {
 
         int run_home(Context& context, const Args& args) {
             std::string action = args.positional.empty() ? "show" : args.positional[0];
-            if (args.positional.size() > 1) throw Failure(Code::usage, "usage: forti home [migrate]");
+            if (action == "retention") {
+                if (args.positional.size() > 2) throw Failure(Code::usage, "usage: forti home retention [DAYS|default]");
+                return emit(context.output, engine::ok(run_retention(context, args)), render_retention);
+            }
+            if (args.positional.size() > 1) throw Failure(Code::usage, "usage: forti home [retention|migrate]");
             if (action == "show")
                 return emit(context.output, engine::ok(describe_home(context)), render_home);
             if (action == "migrate")
                 return emit(context.output, engine::ok(run_migrate(context)), render_migrate);
-            throw Failure(Code::usage, std::format("unknown home action \"{}\"", action), {{"hint", "forti home | forti home migrate"}});
+            throw Failure(Code::usage, std::format("unknown home action \"{}\"", action),
+                          {{"hint", "forti home | forti home retention [DAYS] | forti home migrate"}});
         }
 
     }  // namespace
 
     std::vector<Command> home_commands() {
         return {
-            {"home", "Show where forti keeps its files, or migrate a pre-0.2 setup",
+            {"home", "Show where forti keeps its files, set plan retention, or migrate a pre-0.2 setup",
              "usage: forti home                 the forti home and every location in it\n"
+             "       forti home retention [DAYS|default]   how long stored plans are kept (default 30 days)\n"
              "       forti home migrate         move a pre-0.2 setup into the home\n"
              "\n"
              "The forti home is $FORTI_HOME, else ~/.forti. It holds config.json and credentials/\n"
              "(profiles and file-stored secrets), state/ (plans, approvals, audit log, backups), cache/,\n"
              "certs/<name>/ (client certificates) and ca/ (the forti CA that issues them).\n"
              "FORTI_CONFIG_DIR, FORTI_STATE_DIR and FORTI_CACHE_DIR still override single locations.\n"
+             "\n"
+             "A plan is deleted once an apply has started executing it (a small applied marker stays, so\n"
+             "applying it again is refused as already applied). Plans not applied, rollback plans, applied\n"
+             "markers and approvals are deleted after the retention period: `forti home retention DAYS`\n"
+             "sets it (a whole number of days, 1 to 3650; config.json plan_retention_days), `default`\n"
+             "restores 30. The audit log and configuration backups are not affected.\n"
              "\n"
              "Releases before 0.2 used ~/.config/forti, ~/.local/state/forti and ~/.cache/forti (or\n"
              "$XDG_CONFIG_HOME, $XDG_STATE_HOME, $XDG_CACHE_HOME). That setup keeps working until it is\n"

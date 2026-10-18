@@ -134,8 +134,14 @@ Ordered checks (`home`, `config`, `profile`, `secrets`, `tls_files`, `connection
 
 ```text
 forti home                 the forti home and every location in it
+forti home retention [DAYS|default]   how long stored plans are kept (default 30 days)
 forti home migrate         move a pre-0.2 setup into the home
 ```
+
+`retention` shows or sets `plan_retention_days` in `config.json`: a whole number of days from 1 to
+3650, or `default` (30). Plans not applied, rollback plans, applied markers and approvals older than
+that are deleted by the next plan, apply or `forti plan list`; applied plans themselves are deleted
+when they run. See [How long plans are kept](/guides/planning-and-applying-changes#how-long-plans-are-kept).
 
 The forti home is `$FORTI_HOME`, else `~/.forti`. `migrate` moves `credentials/`, the state and the
 cache, then `config.json`, from `~/.config/forti`, `~/.local/state/forti` and `~/.cache/forti` (or the

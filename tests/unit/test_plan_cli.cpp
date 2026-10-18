@@ -130,9 +130,56 @@ TEST_F(PlanCli, LatestSkipsRollbackPlansAndProfilesFilter) {
     script_apply("old", "new");
     ASSERT_EQ(forti({"--json", "apply", id}), 0) << err.str();
     std::string rollback = json_out()["data"]["rollback"]["plan_id"];
+    std::string waiting = plan_comment("newer");
     ASSERT_EQ(forti({"--json", "plan", "show", "latest"}), 0) << err.str();
-    EXPECT_EQ(json_out()["data"]["id"], id);   // the rollback plan is newer, but not "latest"
+    EXPECT_EQ(json_out()["data"]["id"], waiting);   // the rollback plan is newer, but not "latest"
     ASSERT_EQ(forti({"--json", "plan", "show", rollback}), 0);   // named in full it is fine
+}
+
+TEST_F(PlanCli, AnAppliedPlanIsDeletedAndARepeatIsRefusedAsApplied) {
+    std::string id = plan_comment("new");
+    script_apply("old", "new");
+    ASSERT_EQ(forti({"--json", "apply", id}), 0) << err.str();
+    std::string rollback = json_out()["data"]["rollback"]["plan_id"];
+    EXPECT_FALSE(fs::exists(paths.state / "plans" / (id + ".json")));
+    EXPECT_TRUE(fs::exists(paths.state / "plans" / (id + ".applied")));
+
+    // Named in full or by its tail, at a terminal or not: already applied, not "no such plan".
+    std::size_t sent = transport->requests.size();
+    for (const auto& name: {id, id.substr(16)}) {
+        EXPECT_EQ(forti({"apply", name}), engine::exit_code(engine::Code::policy_denied)) << name;
+        EXPECT_NE(err.str().find("already applied"), std::string::npos) << err.str();
+        EXPECT_EQ(forti({"--json", "apply", name}), engine::exit_code(engine::Code::policy_denied));
+        EXPECT_EQ(json_out()["error"]["details"]["reason"], "already_applied");
+    }
+    EXPECT_EQ(transport->requests.size(), sent);   // nothing was read or sent
+    EXPECT_EQ(forti({"--json", "plan", "show", id}), 5);
+    EXPECT_EQ(json_out()["error"]["details"]["reason"], "already_applied");
+    EXPECT_EQ(forti({"--json", "approve", id, "--yes"}), engine::exit_code(engine::Code::policy_denied));
+
+    // Listed from its marker; nothing else is stored but the rollback plan.
+    ASSERT_EQ(forti({"--json", "plan", "list"}), 0);
+    json listed = json_out()["data"];
+    ASSERT_EQ(listed.size(), 2u);
+    for (const auto& item: listed) {
+        if (item["id"] == id) {
+            EXPECT_EQ(item["state"], "applied");
+            EXPECT_FALSE(item["stored"].get<bool>());
+            EXPECT_EQ(item["outcome"], "ok");
+            EXPECT_EQ(item["rollback_plan"], rollback);
+            EXPECT_EQ(item["profile"], "lab");
+            EXPECT_NE(item["summary"].get<std::string>().find("1 update"), std::string::npos) << item.dump();
+        } else {
+            EXPECT_EQ(item["id"], rollback);
+            EXPECT_EQ(item["state"], "pending");
+        }
+    }
+    EXPECT_EQ(forti({"--json", "plan", "show", "latest"}), 5);   // no stored plan but the rollback
+
+    // forti rollback still finds the applied plan's rollback.
+    script_apply("new", "old");
+    ASSERT_EQ(forti({"--json", "rollback", id}), 0) << err.str();
+    EXPECT_FALSE(fs::exists(paths.state / "plans" / (rollback + ".json")));
 }
 
 TEST_F(PlanCli, DigestOnlyWithVerbose) {

@@ -117,6 +117,53 @@ TEST_F(HomeCli, HomePrintsEveryLocation) {
     EXPECT_EQ(run({"home", "frobnicate"}), 2);
 }
 
+TEST_F(HomeCli, RetentionShowsSetsValidatesAndSurvivesOtherChanges) {
+    ASSERT_EQ(run({"--json", "home", "retention"}), 0) << err.str();
+    EXPECT_EQ(json_out()["data"]["plan_retention_days"], 30);
+    EXPECT_TRUE(json_out()["data"]["default"].get<bool>());
+    EXPECT_FALSE(fs::exists(forti_home()));   // showing creates nothing
+    ASSERT_EQ(run({"home", "retention"}), 0);
+    EXPECT_NE(out.str().find("Plans are kept for 30 days (the default)."), std::string::npos) << out.str();
+
+    ASSERT_EQ(run({"home", "retention", "7"}), 0) << err.str();
+    EXPECT_NE(out.str().find("Plans are now kept for 7 days"), std::string::npos) << out.str();
+    EXPECT_EQ(json::parse(slurp(forti_home() / "config.json"))["plan_retention_days"], 7);
+    EXPECT_EQ(mode_of(forti_home() / "config.json"), 0600u);
+    ASSERT_EQ(run({"home"}), 0);
+    EXPECT_NE(out.str().find("plans (kept 7 days)"), std::string::npos) << out.str();
+    ASSERT_EQ(run({"--json", "home"}), 0);
+    EXPECT_EQ(json_out()["data"]["plan_retention_days"], 7);
+
+    // Whole days from 1: anything else is refused like a bad config.json, and nothing is written.
+    EXPECT_EQ(run({"home", "retention", "-1"}), 2);   // an unknown option
+    for (const char* bad: {"0", "1.5", "30.0", "1e2", "abc", "3651", ""}) {
+        EXPECT_EQ(run({"home", "retention", bad}), engine::exit_code(engine::Code::config)) << bad;
+        EXPECT_NE(err.str().find("plan_retention_days must be a whole number of days from 1 to 3650"), std::string::npos)
+                << bad << ": " << err.str();
+    }
+    EXPECT_EQ(saved().plan_retention_days, 7u);
+    ASSERT_EQ(run({"home", "retention", "1"}), 0) << err.str();
+    EXPECT_NE(out.str().find("kept for 1 day "), std::string::npos) << out.str();
+
+    // Other config.json writers keep it.
+    configure_lab();
+    ASSERT_EQ(run({"profile", "set", "lab", "timeout_ms=20000"}), 0) << err.str();
+    EXPECT_EQ(saved().plan_retention_days, 1u);
+
+    ASSERT_EQ(run({"--json", "home", "retention", "default"}), 0) << err.str();
+    EXPECT_TRUE(json_out()["data"]["default"].get<bool>());
+    EXPECT_FALSE(json::parse(slurp(forti_home() / "config.json")).contains("plan_retention_days"));
+    EXPECT_EQ(run({"home", "retention", "1", "2"}), 2);
+
+    // A hand-edited bad value is a config error everywhere, with what to do about it.
+    json config = json::parse(slurp(forti_home() / "config.json"));
+    config["plan_retention_days"] = 0;
+    engine::write_private_file(forti_home() / "config.json", config.dump());
+    EXPECT_EQ(run({"home", "retention"}), engine::exit_code(engine::Code::config));
+    EXPECT_NE(err.str().find("not 0"), std::string::npos) << err.str();
+    EXPECT_EQ(run({"profile", "list"}), engine::exit_code(engine::Code::config));
+}
+
 TEST_F(HomeCli, ConfigureCreatesThePrivateHome) {
     device_replies();
     ASSERT_EQ(run({"configure", "--profile", "lab", "--host", "fortigate.test", "--api-key-stdin"}, "k\n"), 0) << err.str();
@@ -732,6 +779,7 @@ TEST_F(HomeCli, HelpCoversTheNewCommands) {
     for (const char* text: {"home", "cert", "FORTI_HOME"}) EXPECT_NE(out.str().find(text), std::string::npos) << text;
     ASSERT_EQ(run({"help", "home"}), 0);
     EXPECT_NE(out.str().find("forti home migrate"), std::string::npos);
+    EXPECT_NE(out.str().find("forti home retention [DAYS|default]"), std::string::npos);
     ASSERT_EQ(run({"cert", "--help"}), 0);
     for (const char* text: {"--days", "--force", "--keychain", "--own-ca", "forti CA", "client.p12", "never printed", "cert use", "cert list"})
         EXPECT_NE(out.str().find(text), std::string::npos) << text;

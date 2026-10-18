@@ -18,6 +18,7 @@
 #include "session.hpp"
 #include "sha256.hpp"
 
+#include <forti/engine/approval.hpp>
 #include <forti/engine/engine.hpp>
 
 #include <forti_api/client.hpp>
@@ -458,6 +459,15 @@ namespace forti::engine {
             return notes;
         }
 
+        // Plan retention on every plan and apply (architecture.md, "Plan retention"). A config.json
+        // that cannot be read purges nothing.
+        void purge_quietly(Engine& engine) noexcept {
+            try {
+                (void) purge_plans(engine);
+            } catch (...) {
+            }
+        }
+
         constexpr std::string_view recovery_limitation =
                 "Rollback plans and config backups need a working management path to the device; they are not "
                 "independent recovery. Recovering from a management lockout needs the operator's independent path "
@@ -468,6 +478,10 @@ namespace forti::engine {
     // ---- plan ----
 
     json Engine::plan(const json& request) {
+        struct Purge {
+            Engine& engine;
+            ~Purge() { purge_quietly(engine); }
+        } purge{*this};
         try {
             allow_keys(request, {"profile", "vdom", "operations"}, "plan");
             const Profile& profile = this->profile(text(request, "profile", "plan"));
@@ -893,12 +907,26 @@ namespace forti::engine {
 
     json Engine::apply(const json& request) {
         const Paths& paths = options_.paths;
-        // Whatever the outcome: blobs that no plan still waiting to run references are deleted.
-        struct PruneBlobs {
-            const Paths& paths;
-            ~PruneBlobs() { detail::prune_blobs(paths); }
-        } prune{paths};
         json event = {{"event", "apply"}};
+        // However apply ends, in this order: a plan that started executing (past mark_applied) is
+        // deleted with its approval records, its marker keeping the outcome; the apply lock is
+        // released; then the store is purged (retention, and blobs no plan waiting to run references).
+        // A plan refused before that point (stale, unapproved, denied, tampered, audit log) is kept.
+        struct Finish {
+            Engine& engine;
+            const json& event;
+            std::optional<detail::ApplyLock> lock;
+            std::string committed;
+            ~Finish() {
+                if (!committed.empty()) {
+                    json outcome = {{"outcome", event.value("outcome", "unknown")}};
+                    if (auto it = event.find("rollback_plan"); it != event.end()) outcome["rollback_plan"] = *it;
+                    detail::forget_applied(engine.options().paths, committed, outcome);
+                }
+                lock.reset();
+                purge_quietly(engine);
+            }
+        } finish{*this, event, std::nullopt, {}};
         try {
             allow_keys(request, {"plan_id"}, "apply");
             std::string id = text(request, "plan_id", "apply");
@@ -907,6 +935,10 @@ namespace forti::engine {
             event["plan_id"] = id;
             if (!options_.actor.empty()) event["actor"] = options_.actor;
 
+            // Held until the plan is deleted: purge_plans() never runs during an apply.
+            finish.lock.emplace(paths);
+            // An applied plan's file is gone; its marker answers (already applied, not "not found").
+            if (detail::plan_applied(paths, id)) detail::refuse_applied(paths, id);
             json plan = detail::load_plan(paths, id);
             event["summary"] = detail::summarize(plan);
             const json& device = plan["device"];
@@ -918,9 +950,6 @@ namespace forti::engine {
             event["risk"] = detail::to_string(risk);
             if (plan.value("kind", "plan") == "rollback") event["rollback_of"] = plan.value("rollback_of", "");
 
-            if (detail::plan_applied(paths, id))
-                throw Failure(Code::policy_denied, std::format("plan {} was already applied; a plan runs at most once", id),
-                              {{"plan_id", id}, {"reason", "already_applied"}});
             // Stored action bodies are read and checked before anything else touches the device: a
             // missing or altered blob refuses the plan as tampered, with nothing sent.
             const json& ops = plan["operations"];
@@ -1021,7 +1050,8 @@ namespace forti::engine {
 
             // Committed: the plan can never run again (an atomic marker: of two concurrent applies only
             // one gets past this line), and a guarded approval is used up.
-            detail::mark_applied(paths, id, now);
+            detail::mark_applied(paths, id, now, plan);
+            finish.committed = id;
             if (profile.mode == Mode::guarded) detail::consume_approval(paths, id, now);
 
             // A provisional rollback plan exists before the first mutation, so a crash mid-apply still

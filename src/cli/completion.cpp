@@ -30,7 +30,7 @@ namespace forti::cli {
                 {"cert", {"create", "list", "show", "use", "remove"}},
                 {"mcp", {"install", "status", "repair", "uninstall"}},
                 {"install", {"mcp"}},
-                {"home", {"migrate"}},
+                {"home", {"retention", "migrate"}},
                 {"completion", {"bash", "zsh", "fish"}},
             };
             return table;

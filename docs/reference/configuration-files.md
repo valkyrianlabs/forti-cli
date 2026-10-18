@@ -45,7 +45,7 @@ $ forti home
 forti home: ~/.forti
   config       ~/.forti/config.json
   credentials  ~/.forti/credentials/  file store
-  state        ~/.forti/state/  plans, approvals, audit log, backups
+  state        ~/.forti/state/  plans (kept 30 days), approvals, audit log, backups
   cache        ~/.forti/cache/
   certs        ~/.forti/certs/  client certificates (forti cert list)
   forti CA     ~/.forti/ca/  issues them; its key never leaves this machine
@@ -53,7 +53,7 @@ forti home: ~/.forti
 ```
 
 With `--json`, `data` holds the same (`home`, `config_dir`, `config_file`, `credentials`, `state`,
-`cache`, `certs`, `secret_store`, `legacy`, `overrides`).
+`cache`, `certs`, `secret_store`, `plan_retention_days`, `legacy`, `overrides`).
 
 ### Overrides
 
@@ -113,17 +113,21 @@ Then run `forti home` and `forti doctor`.
 | macOS login Keychain, service `forti` | Keychain ACL | the macOS secret store: accounts `<profile>/api-key` and `<profile>/cert-password` |
 | `~/.forti/certs/<name>/` | 0700 | a client certificate (`forti configure`, `forti cert`): `ca.crt` and `client.crt` (0644), `client.p12` and `client.pass` (0600), and `ca/ca.key` for one with its own CA. See [Client certificates](/guides/client-certificates#the-files) |
 | `~/.forti/ca/` | 0700 | the forti CA: `ca.crt` (0644), `ca.key` (0600) |
-| `~/.forti/state/plans/<id>.json` | 0600, directory 0700 | stored plans, including rollback plans, with real values |
-| `~/.forti/state/plans/<id>.applied` | 0600 | marks a plan as applied: a plan runs at most once |
+| `~/.forti/state/plans/<id>.json` | 0600, directory 0700 | stored plans, including rollback plans, with real values; deleted once an apply has started executing them, or after the retention period |
+| `~/.forti/state/plans/<id>.applied` | 0600 | marks a plan as applied (a plan runs at most once) and keeps its summary and outcome; deleted after the retention period |
+| `~/.forti/state/plans/.lock` | 0600 | held by every apply, so the retention purge never runs during one |
 | `~/.forti/state/blobs/<sha256>.json` | 0600, directory 0700 | monitor action bodies over 64 KiB, stored once and named by their SHA-256; deleted after an apply once no waiting plan refers to them |
-| `~/.forti/state/approvals/<id>.json` | 0600, directory 0700 | a guarded-mode approval: plan id, digest, `approved_at`, `expires_at`, `approved_by` |
-| `~/.forti/state/approvals/<id>.used` | 0600 | an approval that an apply has consumed |
+| `~/.forti/state/approvals/<id>.json` | 0600, directory 0700 | a guarded-mode approval: plan id, digest, `approved_at`, `expires_at`, `approved_by`; deleted with its plan, or after the retention period |
+| `~/.forti/state/approvals/<id>.used` | 0600 | an approval that an apply has consumed (until the apply ends) |
 | `~/.forti/state/backups/<plan id>.conf` | 0600, directory 0700 | configuration backups taken before critical plans (the 20 most recent are kept) |
 | `~/.forti/state/audit.jsonl` | 0600 | one JSON line per apply attempt and per approval; attribute names, never values |
 
-:::callout[No automatic cleanup]{variant="note"}
-Plans, approvals and backups are never cleaned up automatically, apart from the backup limit.
-Deleting old plan files is safe once you no longer need them.
+:::callout[Plan retention]{variant="note"}
+A plan is deleted once an apply has started executing it; its `.applied` marker stays so a second apply
+is refused as already applied. Plans not applied, rollback plans, markers and approvals are deleted
+after `plan_retention_days` (default 30; `forti home retention DAYS`). The audit log is never cleaned
+up, and backups keep the 20 most recent. See
+[How long plans are kept](/guides/planning-and-applying-changes#how-long-plans-are-kept).
 :::
 
 The cache directory is resolved but not written in this release: `forti discover --live` reads the
@@ -145,6 +149,7 @@ device's schema each time.
 {
   "version": 1,
   "default_profile": "fw01",
+  "plan_retention_days": 30,
   "profiles": {
     "fw01": {
       "host": "fw01.example.net",
@@ -173,6 +178,17 @@ hand; keep it 0600.
 Keys other than those below are dropped the next time forti writes the file. A profile that contains
 a secret value (`token`, `password`, `api_key_value`) is rejected.
 :::
+
+Top-level keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `version` | `1` | the file format |
+| `default_profile` | none | the profile used when none is named (`forti profile default NAME`) |
+| `plan_retention_days` | `30` | how long stored plans, applied markers and approvals are kept, in whole days from 1 to 3650 (`forti home retention DAYS`). Anything else (0, a negative or fractional number, a string) makes `config.json` invalid: a `config` error naming the setting |
+| `profiles` | none | the profiles, by name; keys below |
+
+Profile keys:
 
 | Key | Default | Meaning |
 |---|---|---|

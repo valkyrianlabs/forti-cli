@@ -642,6 +642,49 @@ class ConcurrentAgents(CliTest):
         self.assertEqual(set(names) <= set(self.mock.table("firewall/address")), True)
         audit = [e for e in self.sb.audit() if e.get("event") == "apply" and e.get("outcome") == "ok"]
         self.assertEqual(sorted(e["plan_id"] for e in audit), sorted(ids))
+        # Concurrent applies (and the purges they run) deleted exactly their own plans.
+        plans = self.sb.state / "plans"
+        for plan_id in ids:
+            self.assertFalse((plans / f"{plan_id}.json").exists(), plan_id)
+            self.assertTrue((plans / f"{plan_id}.applied").exists(), plan_id)
+
+
+class PlanRetention(CliTest):
+    """Applied plans are deleted; everything else ages out after `forti home retention` days."""
+
+    mode = "autonomous"
+
+    def test_applied_plans_are_deleted_and_old_plans_purged(self) -> None:
+        planned = self.plan(create_address())["data"]
+        plans = self.sb.state / "plans"
+        self.assertTrue((plans / f"{planned['id']}.json").exists())
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertFalse((plans / f"{planned['id']}.json").exists())
+        self.assertTrue((plans / f"{planned['id']}.applied").exists())
+        self.assertTrue((plans / f"{applied['rollback']['plan_id']}.json").exists())
+
+        self.mock.clear_requests()
+        again = self.json_of("apply", planned["id"], expect=7)
+        self.assertEqual(again["error"]["details"]["reason"], "already_applied")
+        self.assertIn("already applied", self.forti("apply", planned["id"], expect=7).err)
+        self.assertEqual(self.mock.requests, [], "a repeat sends nothing")
+
+        # Retention: two days; a plan (and its approval) made five days ago goes on the next plan list.
+        self.assertIn("now kept for 2 days", self.forti("home", "retention", "2").out)
+        self.assertEqual(self.json_of("home", "retention")["data"]["plan_retention_days"], 2)
+        old = time.strftime("%Y%m%d-%H%M%S", time.gmtime(time.time() - 5 * 86400)) + "-abcdef"
+        (plans / f"{old}.json").write_text("{}")
+        approvals = self.sb.state / "approvals"
+        approvals.mkdir(mode=0o700, exist_ok=True)
+        (approvals / f"{old}.json").write_text("{}")
+        listed = {p["id"]: p for p in self.json_of("plan", "list")["data"]}
+        self.assertNotIn(old, listed)
+        self.assertFalse((plans / f"{old}.json").exists())
+        self.assertFalse((approvals / f"{old}.json").exists())
+        self.assertEqual(listed[planned["id"]]["state"], "applied")
+        self.assertFalse(listed[planned["id"]]["stored"])
+        self.assertEqual(listed[applied["rollback"]["plan_id"]]["state"], "pending")
+        self.assertEqual(self.forti("home", "retention", "0", expect=3).code, 3)
 
 
 class AutonomousAtTerminal(CliTest):
