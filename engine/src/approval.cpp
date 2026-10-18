@@ -46,15 +46,14 @@ namespace forti::engine {
                 throw Failure(Code::usage, "approve: approved_by must be 1-128 characters");
             if (lifetime <= std::chrono::seconds(0) || lifetime > std::chrono::days(7))
                 throw Failure(Code::usage, "approve: the lifetime must be between 1 second and 7 days");
+            // Applied plans are deleted: the marker answers before the (missing) plan file would.
+            if (detail::plan_applied(paths, plan_id)) detail::refuse_applied(paths, plan_id, "plan again");
             json plan = detail::load_plan(paths, plan_id);
             event["digest"] = plan["digest"];
             if (!shown_digest.empty() && plan["digest"] != shown_digest)
                 throw Failure(Code::stale_plan,
                               std::format("plan {} changed after it was shown; nothing was approved. Show it again", plan_id),
                               {{"plan_id", plan_id}, {"reason", "plan_changed"}});
-            if (detail::plan_applied(paths, plan_id))
-                throw Failure(Code::policy_denied, std::format("plan {} was already applied; plan again", plan_id),
-                              {{"plan_id", plan_id}, {"reason", "already_applied"}});
             const Profile& profile = engine.profile(plan["device"].value("profile", ""));
             event["mode"] = to_string(profile.mode);
             if (profile.mode == Mode::read_only)
@@ -94,7 +93,21 @@ namespace forti::engine {
     }
 
     json show_plan(Engine& engine, std::string_view plan_id) {
-        json plan = detail::load_plan(engine.options().paths, plan_id);
+        const Paths& paths = engine.options().paths;
+        detail::validate_plan_id(plan_id);
+        std::error_code missing;
+        if (!std::filesystem::exists(detail::plan_file(paths, plan_id), missing))
+            if (auto marker = detail::applied_marker(paths, plan_id)) {
+                json details = {{"plan_id", plan_id}, {"reason", "already_applied"}};
+                for (const char* key: {"applied_at", "outcome", "rollback_plan"})
+                    if (auto it = marker->find(key); it != marker->end()) details[key] = *it;
+                std::string when = marker->value("applied_at", "");
+                throw Failure(Code::not_found,
+                              std::format("plan {} was applied{} and is no longer stored (applied plans are deleted); "
+                                          "forti history shows what it did", plan_id, when.empty() ? "" : " at " + when),
+                              std::move(details));
+            }
+        json plan = detail::load_plan(paths, plan_id);
         json data = detail::plan_view(plan, true);
         data["state"] = approval_state(engine, plan);
         try {
@@ -106,15 +119,39 @@ namespace forti::engine {
         return ok(std::move(data));
     }
 
+    json purge_plans(Engine& engine) {
+        unsigned days = engine.profiles().retention_days();
+        detail::Purged purged = detail::purge_plans(engine.options().paths, std::chrono::days(days), detail::Clock::now());
+        return ok({{"retention_days", days},
+                   {"skipped", purged.skipped},
+                   {"removed", {{"plans", purged.plans}, {"applied", purged.applied}, {"markers", purged.markers},
+                                {"approvals", purged.approvals}, {"leftovers", purged.leftovers}}}});
+    }
+
     json list_plans(Engine& engine) {
         const Paths& paths = engine.options().paths;
+        (void) purge_plans(engine);
         fs::path dir = paths.state / "plans";
         json list = json::array();
         std::error_code error;
         for (const auto& entry: fs::directory_iterator(dir, error)) {
-            if (entry.path().extension() != ".json") continue;
             std::string id = entry.path().stem().string();
-            json item = {{"id", id}};
+            if (entry.path().extension() == ".applied" && valid_plan_id(id)) {
+                // An applied plan, its file deleted: listed from its marker until retention ends.
+                std::error_code ignored;
+                if (fs::exists(dir / (id + ".json"), ignored)) continue;   // listed below, from the plan
+                json marker = detail::applied_marker(paths, id).value_or(json::object());
+                json item = {{"id", id}, {"state", "applied"}, {"stored", false}};
+                for (const char* key: {"kind", "created_at", "profile", "host", "risk", "summary", "operations",
+                                       "rollback_of", "applied_at", "outcome", "rollback_plan"})
+                    if (auto it = marker.find(key); it != marker.end()) item[key] = *it;
+                if (!item.contains("created_at"))
+                    if (auto time = detail::plan_id_time(id)) item["created_at"] = detail::iso8601(*time);
+                list.push_back(std::move(item));
+                continue;
+            }
+            if (entry.path().extension() != ".json") continue;
+            json item = {{"id", id}, {"stored", true}};
             try {
                 json plan = detail::load_plan(paths, id);
                 json view = detail::plan_view(plan);

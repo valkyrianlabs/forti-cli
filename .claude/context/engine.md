@@ -249,7 +249,7 @@ Automatic safeguards (every mode that writes):
 1. **Plan** validates every operation against the catalog and the SDK types (resource exists,
    operation supported, attributes known and writable, values decode). It reads the current objects
    and computes before/after, a field diff, the exact SDK wire body and the risk tier. The plan is
-   stored at `state/plans/<id>.json` (0600). `digest` = SHA-256 over canonical JSON of {device
+   stored at `state/plans/<id>.json` (0600) until it is applied or ages out (30 days). `digest` = SHA-256 over canonical JSON of {device
    identity, operations, before digests}. An action body over 64 KiB is stored once in
    `state/blobs/<sha256>.json` and the operation carries `body_ref` {sha256, bytes}, so the digest binds
    its content through the hash. Planning never mutates the device.
@@ -259,8 +259,9 @@ Automatic safeguards (every mode that writes):
    sent). It executes in order with no retries (the SDK never retries after send) and verifies each
    operation by re-reading (monitor actions: the reply is recorded instead, and a failed command inside
    a 2xx reply fails the operation). It stops at the first failure. After every apply, whatever its
-   outcome, blobs no longer referenced by a not-yet-applied plan are deleted (under a lock shared with
-   plan's blob writes). Per-operation status: `verified | applied_unverified | failed | outcome_unknown |
+   outcome, the plan file is deleted once execution has started (its `.applied` marker stays) and blobs
+   no longer referenced by a not-yet-applied plan are deleted (under a lock shared with plan's blob
+   writes); see "Plan retention". Per-operation status: `verified | applied_unverified | failed | outcome_unknown |
    not_attempted`. Results are `partial_failure` / `outcome_unknown` with the full execution record. An
    HTTP failure is never assumed to mean "nothing changed".
 3. **Recovery aids, not guaranteed recovery.**
@@ -301,6 +302,33 @@ Automatic safeguards (every mode that writes):
 
 Discovering a capability never authorizes it. Execution policy is the profile mode plus the FortiOS
 account.
+
+### Plan retention
+
+Plans do not accumulate (forti-cli 0.7, decision 32). Files in `state/` (`plan_store.hpp`):
+
+- **Applied plans are deleted.** Once an apply is past `mark_applied` (the first mutation can follow;
+  whatever the outcome: applied, `partial_failure`, `outcome_unknown`, `management_connectivity_lost`),
+  it deletes `plans/<id>.json` and `approvals/<id>.{json,used}` as it returns. `plans/<id>.applied`
+  stays as the tombstone: `{plan_id, applied_at, kind, created_at, profile, host, digest, risk, summary,
+  operations, rollback_of?, outcome, rollback_plan}`, no values. Apply and approve check it before
+  loading the plan, so a repeat is `policy_denied` reason `already_applied` (with `applied_at`), never
+  `not_found`; `show_plan` gives `not_found` reason `already_applied`; `list_plans` lists tombstones
+  (`state: applied`, `stored: false`; every other item `stored: true`). Refusals before
+  `mark_applied` (stale, approval, policy, tampered, audit preflight, backup) keep the plan. Plans
+  applied by earlier releases are deleted by the next purge, their bare marker upgraded to a tombstone.
+- **Retention.** `purge_plans` deletes unapplied plans and rollback plans, markers and approval records
+  older than `plan_retention_days` (top-level in config.json, `ProfileSet::plan_retention_days`;
+  integer 1-3650, default 30; anything else is a `config` error), by the time each records (the plan
+  id's leading UTC timestamp; `applied_at`, `approved_at`, `used_at`), else mtime; approvals whose plan
+  file is gone; `*.tmp.<pid>` leftovers past retention. Then `prune_blobs`. The audit log and
+  backups (20-file rule) are untouched. It runs at the end of every `plan` and `apply` and at the start
+  of `list_plans`; it never throws (an unreadable config.json purges nothing).
+- **Locking.** Every apply holds a shared flock on `state/plans/.lock` from before it loads the plan
+  until it has deleted it; the purge takes it `LOCK_EX|LOCK_NB` and skips when an apply is running (the
+  next plan or apply purges). Blobs keep their own lock (`blobs/.lock`); no path waits on both locks in
+  opposite order.
+- **Setting it:** `forti home retention [DAYS|default]` (CLI only). No MCP tool writes config.json.
 
 ## MCP surface (forti-mcp)
 

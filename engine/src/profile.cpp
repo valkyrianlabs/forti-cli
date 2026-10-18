@@ -1,7 +1,9 @@
 #include <forti/engine/error.hpp>
 #include <forti/engine/profile.hpp>
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <format>
@@ -198,7 +200,27 @@ namespace forti::engine {
         for (const auto& [name, profile]: profiles) list[name] = profile.to_json();
         nlohmann::json out = {{"version", 1}, {"profiles", std::move(list)}};
         if (!default_profile.empty()) out["default_profile"] = default_profile;
+        if (plan_retention_days) out["plan_retention_days"] = *plan_retention_days;
         return out;
+    }
+
+    unsigned parse_plan_retention_days(const nlohmann::json& value) {
+        // A JSON integer only: 1.5, 30.0, "30", true and null are refused, not rounded or coerced. A
+        // retention of 0 would delete every plan before it could be approved.
+        if (value.is_number_integer()) {
+            std::int64_t days = value.is_number_unsigned()
+                                        ? static_cast<std::int64_t>(std::min<std::uint64_t>(value.get<std::uint64_t>(), INT64_MAX))
+                                        : value.get<std::int64_t>();
+            if (days >= 1 && days <= static_cast<std::int64_t>(max_plan_retention_days)) return static_cast<unsigned>(days);
+        }
+        std::string shown = value.is_string() ? "\"" + value.get<std::string>() + "\"" : value.dump();
+        if (shown.size() > 40) shown = shown.substr(0, 37) + "...";
+        throw Failure(Code::config,
+                      std::format("plan_retention_days must be a whole number of days from 1 to {}, not {} (the default "
+                                  "is {}; forti home retention DAYS sets it)",
+                                  max_plan_retention_days, shown, default_plan_retention_days),
+                      {{"setting", "plan_retention_days"}, {"minimum", 1}, {"maximum", max_plan_retention_days},
+                       {"default", default_plan_retention_days}});
     }
 
     ProfileSet ProfileSet::from_json(const nlohmann::json& json) {
@@ -206,6 +228,8 @@ namespace forti::engine {
         if (get_or<int>(json, "version", 1) != 1) throw Failure(Code::config, "config.json: unsupported version");
         ProfileSet set;
         set.default_profile = get_or<std::string>(json, "default_profile", "");
+        if (auto it = json.find("plan_retention_days"); it != json.end())
+            set.plan_retention_days = parse_plan_retention_days(*it);
         if (auto it = json.find("profiles"); it != json.end() && it->is_object())
             for (auto entry = it->begin(); entry != it->end(); ++entry)
                 set.profiles.emplace(entry.key(), Profile::from_json(entry.key(), entry.value()));

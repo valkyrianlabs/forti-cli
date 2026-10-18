@@ -253,7 +253,12 @@ TEST_F(BlobTest, PruningKeepsTheBlobsOfPlansStillWaiting) {
     std::ofstream(blobs() / (std::string(64, 'c') + ".json")) << "{}";
     EXPECT_FALSE(apply("not a plan id")["ok"]);
     EXPECT_EQ(blob_names(), std::vector<std::string>{waiting_ref + ".json"});
-    EXPECT_EQ(engine::list_plans(*sut)["data"].size(), 2u);   // plan files are untouched (actions have no rollback)
+    // The applied plan's file is gone (it is listed from its marker); the waiting one is untouched.
+    EXPECT_FALSE(fs::exists(plan_path(applied)));
+    EXPECT_TRUE(fs::exists(plan_path(waiting)));
+    json listed = engine::list_plans(*sut)["data"];
+    ASSERT_EQ(listed.size(), 2u);   // actions have no rollback plan
+    for (const auto& item: listed) EXPECT_EQ(item["state"], item["id"] == applied ? "applied" : "pending") << item.dump();
 }
 
 TEST_F(BlobTest, AnAlteredOrMissingBlobRefusesThePlanBeforeAnythingIsSent) {

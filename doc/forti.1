@@ -1,4 +1,4 @@
-.Dd October 17, 2026
+.Dd October 18, 2026
 .Dt FORTI 1
 .Os
 .Sh NAME
@@ -17,7 +17,7 @@
 .Op Fl -profile Ar name
 .Nm
 .Cm home
-.Op Cm migrate
+.Op Cm retention Oo Ar days Oc | Cm migrate
 .Nm
 .Cm cert
 .Cm create | show | remove
@@ -207,6 +207,12 @@ Set the operating mode.
 Delete the profile and its stored secrets.
 .It Cm home
 Print the forti home and every location in it, and flag a pre-0.2 setup.
+.It Cm home retention Op Ar days | Cm default
+Show or set how long stored plans are kept
+.Pq Li plan_retention_days No in config.json; default 30, from 1 to 3650 days .
+An applied plan is deleted once its apply has started executing; its marker, which refuses a second
+apply, plans never applied, rollback plans and approvals are deleted after the retention period.
+The audit log and backups are not affected.
 .It Cm home migrate
 Move a pre-0.2 setup
 .Pf ( Pa ~/.config/forti ,
@@ -375,6 +381,7 @@ does.
 .It Cm plan show Op Ar id
 .It Cm plan list
 Show a plan; list the stored plans, newest first.
+Applied plans are listed from their markers until the retention period ends.
 .It Cm apply Op Ar id
 Show a saved plan and apply it once, as the profile's mode allows.
 .It Cm history Oo Fl p Ar name Oc Oo Fl n Ar count Oc Oo Fl -all Oc Op Fl -verbose
@@ -507,6 +514,9 @@ The file secret store: one 0600 file per secret.
 Plans, approvals, pre-change backups and
 .Pa audit.jsonl
 .Pq Cm history .
+Plans and approvals are purged after
+.Cm home retention
+days.
 .It Pa ~/.forti/certs/ Ns Ar name Ns /
 Client certificates
 .Pq Cm cert list .

@@ -103,9 +103,21 @@ namespace forti::engine {
     // [A-Za-z0-9_-]{1,64}; throws Failure(usage) otherwise.
     void validate_profile_name(std::string_view name);
 
+    // How long stored plans are kept (architecture.md, "Plan retention"): config.json's top-level
+    // "plan_retention_days", an integer from 1 to max_plan_retention_days. Absent: the default.
+    inline constexpr unsigned default_plan_retention_days = 30;
+    inline constexpr unsigned max_plan_retention_days = 3650;
+    // The value as config.json holds it. Throws Failure(config) unless it is an integer (a JSON
+    // number without a fraction or exponent) from 1 to max_plan_retention_days.
+    unsigned parse_plan_retention_days(const nlohmann::json& value);
+
     struct ProfileSet {
         std::string default_profile;
         std::map<std::string, Profile> profiles;
+        // Set: config.json names it (kept as written); empty: default_plan_retention_days.
+        std::optional<unsigned> plan_retention_days;
+
+        [[nodiscard]] unsigned retention_days() const { return plan_retention_days.value_or(default_plan_retention_days); }
 
         [[nodiscard]] nlohmann::json to_json() const;
         static ProfileSet from_json(const nlohmann::json& json);

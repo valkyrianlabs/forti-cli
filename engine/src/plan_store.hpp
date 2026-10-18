@@ -3,13 +3,19 @@
 // (architecture.md, "Operating modes and mutation safety"). Shared by plan.cpp (Engine::plan /
 // Engine::apply) and approval.cpp (the CLI-facing approve / show / list API).
 //
-//   <state>/plans/<id>.json          the plan (0600); its digest is recomputed on every load
-//   <state>/plans/<id>.applied       written before the first mutation: a plan executes at most once
+//   <state>/plans/<id>.json          the plan (0600); its digest is recomputed on every load. Deleted once
+//                                    an apply has started executing it (the marker below stays)
+//   <state>/plans/<id>.applied       written before the first mutation: a plan executes at most once. Also
+//                                    the applied plan's tombstone (summary, outcome) until retention ends
+//   <state>/plans/.lock              held shared by every apply, exclusively by purge_plans()
 //   <state>/approvals/<id>.json      guarded mode: the human approval of that plan's digest
 //   <state>/approvals/<id>.used      the approval consumed by apply (single use)
 //   <state>/blobs/<sha256>.json      a large action body, stored once (0600, directory 0700); the plan
 //                                    records {"body_ref": {"sha256", "bytes"}} instead of the body
 //   <state>/audit.jsonl              one JSON object per line: every apply and approve attempt, redacted
+//
+// Plans, markers and approvals older than the retention period (config.json "plan_retention_days",
+// default 30) are purged (purge_plans). The audit log and config backups are not.
 //
 
 #ifndef FORTI_ENGINE_PLAN_STORE_HPP
@@ -93,8 +99,55 @@ namespace forti::engine::detail {
 
     bool plan_applied(const Paths& paths, std::string_view id);
     // Creates <id>.applied atomically (O_CREAT|O_EXCL). Throws Failure(policy_denied, reason
-    // "already_applied") when it exists: two concurrent applies of one plan cannot both proceed.
-    void mark_applied(const Paths& paths, std::string_view id, Clock::time_point time);
+    // "already_applied") when it exists: two concurrent applies of one plan cannot both proceed. With
+    // `plan`, the marker is also its tombstone: id, kind, created_at, profile, host, risk, summary,
+    // digest and the operation count stay listed after the plan file is deleted.
+    void mark_applied(const Paths& paths, std::string_view id, Clock::time_point time, const json& plan = nullptr);
+    // The marker's content ({"plan_id", "applied_at", ...}); nullopt when the plan was not applied. An
+    // unreadable marker still means applied: {"plan_id"} only.
+    std::optional<json> applied_marker(const Paths& paths, std::string_view id);
+    // The refusal for a plan that already ran (policy_denied, reason "already_applied").
+    [[noreturn]] void refuse_applied(const Paths& paths, std::string_view id, std::string_view hint = "a plan runs at most once");
+
+    // ---- Plan retention ----
+    //
+    // An apply that got past mark_applied deletes its plan file and approval records (forget_applied):
+    // the plan can never run again, and the marker answers a second apply. Everything else ages out:
+    // purge_plans() deletes plans (pending, approved, rollback), markers and approval records older
+    // than the retention period, by the time each records (a plan's id begins with its creation time;
+    // markers and approvals hold applied_at / approved_at / used_at), else the file's mtime.
+    //
+    // Every apply holds ApplyLock (a shared flock on <state>/plans/.lock) from before it loads its plan
+    // until it has deleted it. purge_plans() runs only when it gets the lock exclusively without
+    // waiting, so it never touches the files of an apply in progress; when one is running it skips
+    // (the next plan or apply purges). Plans need no lock: a new plan is never older than a day.
+    class ApplyLock {
+        int fd_ = -1;
+
+    public:
+        // Throws Failure(config) when <state>/plans exists but its lock cannot be opened or taken.
+        explicit ApplyLock(const Paths& paths);
+        ~ApplyLock();
+        ApplyLock(const ApplyLock&) = delete;
+        ApplyLock& operator=(const ApplyLock&) = delete;
+    };
+
+    // The creation time a plan id begins with ("20261018-093012-a1b2c3"); nullopt for another form.
+    std::optional<Clock::time_point> plan_id_time(std::string_view id);
+    // Deletes plans/<id>.json and approvals/<id>.{json,used}, and records `outcome` (the apply's
+    // outcome and rollback plan) in the marker. Never throws.
+    void forget_applied(const Paths& paths, std::string_view id, const json& outcome) noexcept;
+
+    struct Purged {
+        std::size_t plans = 0;      // unapplied plans (and rollback plans) past retention
+        std::size_t applied = 0;    // plan files of applied plans (left by forti before 0.7, or a crash)
+        std::size_t markers = 0;    // applied markers past retention
+        std::size_t approvals = 0;  // approval records (and used markers) past retention or without a plan
+        std::size_t leftovers = 0;  // interrupted writes (*.tmp.<pid>) past retention
+        bool skipped = false;       // an apply was running: nothing was purged this time
+    };
+    // Purges as described above, then prunes unreferenced blobs (also when skipped). Never throws.
+    Purged purge_plans(const Paths& paths, std::chrono::days retention, Clock::time_point now) noexcept;
 
     // ---- Approvals (guarded mode) ----
 

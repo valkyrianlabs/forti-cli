@@ -5,8 +5,8 @@
 // terminal says yes (or passes --yes, a decision made in advance), and forti-mcp calls it only for a
 // person's answer to the MCP client's own question (form elicitation, accept with approve: true),
 // never for anything in tool arguments, which the model writes. Both pass the digest of the plan the
-// person was shown, so an approval can never cover a plan they did not see. show_plan() and
-// list_plans() only read.
+// person was shown, so an approval can never cover a plan they did not see. show_plan() only reads;
+// list_plans() purges expired plans first.
 //
 // An approval is deliberately simple (maintainer decision): <state>/approvals/<id>.json with
 // {plan_id, digest, approved_at, expires_at, approved_by}, single use, default lifetime 24 hours. It is
@@ -35,12 +35,24 @@ namespace forti::engine {
                                 std::chrono::seconds lifetime = std::chrono::hours(24),
                                 std::string_view shown_digest = {});
 
-    // The verified plan (redacted, with before/after) plus its state: approval, applied, mode.
+    // The verified plan (redacted, with before/after) plus its state: approval, applied, mode. A plan
+    // that was applied is no longer stored: not_found, details.reason "already_applied" (and applied_at).
     nlohmann::json show_plan(Engine& engine, std::string_view plan_id);
 
-    // Stored plans, newest first: {id, kind, created_at, profile, host, risk, operations, summary, state}.
-    // state: pending | approved | approval_expired | applied | invalid | tampered.
+    // Stored plans, newest first: {id, kind, created_at, profile, host, risk, operations, summary, state,
+    // stored}.
+    // state: pending | approved | approval_expired | applied | invalid | tampered. Applied plans are
+    // listed from their markers (state applied, stored false, plus applied_at and outcome) until
+    // retention ends; every other item has stored true.
+    // Purges first (purge_plans).
     nlohmann::json list_plans(Engine& engine);
+
+    // Plan retention (architecture.md, "Plan retention"): deletes plans, applied markers and approval
+    // records older than the configured retention (ProfileSet::retention_days(), config.json
+    // "plan_retention_days", default 30 days), plan files of applied plans, and unreferenced blobs.
+    // Skipped while an apply runs. plan and apply call it; it throws only when config.json is invalid.
+    // Returns {retention_days, skipped, removed: {plans, applied, markers, approvals, leftovers}}.
+    nlohmann::json purge_plans(Engine& engine);
 
 }  // namespace forti::engine
 
