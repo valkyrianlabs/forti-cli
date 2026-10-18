@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <format>
 #include <fstream>
 
 using namespace forti;
@@ -418,4 +419,26 @@ TEST_F(PlanCli, SetCreateAndDeleteTakeParentAndChild) {
     EXPECT_EQ(forti({"delete", "system.dhcp/server", "21", "--parent", "1"}), 2);
     EXPECT_EQ(forti({"delete", "system.dhcp/server", "21", "--child", "reserved-address"}), 2);
     EXPECT_EQ(forti({"plan", "action", "monitor/system/dhcp/revoke", "--parent", "1", "--child", "reserved-address"}), 2);
+}
+
+TEST_F(PlanCli, LargeActionBodiesAreShownByReferenceAndRepliesArePrinted) {
+    json entries = json::array();
+    for (int i = 0; i < 6000; ++i) entries.push_back(std::format("host-{}.blocked.example", i));
+    json body = {{"commands", json::array({{{"name", "dns-block"}, {"command", "snapshot"}, {"entries", entries}}})}};
+    fs::path file = paths.state.parent_path() / "push.json";
+    std::ofstream(file) << body.dump();
+    transport->reply(200, fake::envelope({{"hostname", "fw01"}}));
+    ASSERT_EQ(forti({"plan", "action", "monitor/system/external-resource/dynamic", "--body", "@" + file.string()}), 0)
+            << err.str();
+    EXPECT_EQ(out.str().find("blocked.example"), std::string::npos);
+    EXPECT_NE(out.str().find("POST monitor/system/external-resource/dynamic (body of "), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("bytes, stored as state/blobs/"), std::string::npos) << out.str();
+
+    transport->reply(200, fake::envelope({{"hostname", "fw01"}}));
+    transport->reply(200, fake::envelope(json::array({{{"name", "dns-block"}, {"status", "error"}, {"message", "Connect pending"}}})));
+    EXPECT_EQ(forti({"apply", "latest"}), 8) << err.str() << out.str();
+    std::string text = out.str() + err.str();
+    EXPECT_NE(text.find("1 of 1 command failed: Connect pending"), std::string::npos) << text;
+    EXPECT_NE(text.find("reply [{\"message\":\"Connect pending\""), std::string::npos) << text;
+    EXPECT_EQ(writes(), 1u);
 }

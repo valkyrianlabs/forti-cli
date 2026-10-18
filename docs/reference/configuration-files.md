@@ -29,7 +29,7 @@ same home, so both see the same profiles.
 ├── certs/<name>/                0700   client certificates: ca.crt, client.crt, client.p12, client.pass
 ├── ca/                          0700   the forti CA that issues them: ca.crt, ca.key
 ├── state/                       0700   plans, approvals, backups, the audit log
-│   ├── plans/  approvals/  backups/
+│   ├── plans/  approvals/  backups/  blobs/
 │   └── audit.jsonl
 └── cache/                              reserved
 ```
@@ -115,6 +115,7 @@ Then run `forti home` and `forti doctor`.
 | `~/.forti/ca/` | 0700 | the forti CA: `ca.crt` (0644), `ca.key` (0600) |
 | `~/.forti/state/plans/<id>.json` | 0600, directory 0700 | stored plans, including rollback plans, with real values |
 | `~/.forti/state/plans/<id>.applied` | 0600 | marks a plan as applied: a plan runs at most once |
+| `~/.forti/state/blobs/<sha256>.json` | 0600, directory 0700 | monitor action bodies over 64 KiB, stored once and named by their SHA-256; deleted after an apply once no waiting plan refers to them |
 | `~/.forti/state/approvals/<id>.json` | 0600, directory 0700 | a guarded-mode approval: plan id, digest, `approved_at`, `expires_at`, `approved_by` |
 | `~/.forti/state/approvals/<id>.used` | 0600 | an approval that an apply has consumed |
 | `~/.forti/state/backups/<plan id>.conf` | 0600, directory 0700 | configuration backups taken before critical plans (the 20 most recent are kept) |

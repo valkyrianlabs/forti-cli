@@ -993,6 +993,62 @@ class ChildTables(CliTest):
         self.assertEqual([lease["ip"] for lease in self.json_of("get", "monitor/system/dhcp")["data"]], ["192.0.2.51"])
 
 
+class ThreatFeedPush(CliTest):
+    """A monitor action with a body far over the inline limit, end to end: stored once as a blob, sent as
+    planned, its reply recorded, and a per-command error in a successful reply reported as a failure."""
+    mode = "autonomous"
+
+    def push(self, entries: list[str], feed: str = "dns-block") -> Path:
+        body = {"commands": [{"name": feed, "command": "snapshot", "entries": entries}]}
+        path = self.sb.root / "push.json"
+        path.write_text(json.dumps(body))
+        return path
+
+    def blobs(self) -> list[str]:
+        blobs = self.sb.state / "blobs"
+        return sorted(p.name for p in blobs.iterdir() if p.name != ".lock") if blobs.exists() else []
+
+    def test_a_large_push_is_stored_once_sent_exactly_and_cleaned_up(self) -> None:
+        entries = [f"host-{i}.blocked.example" for i in range(20000)]
+        path = self.push(entries)
+        planned = self.json_of("plan", "action", "monitor/system/external-resource/dynamic", "--body", f"@{path}")["data"]
+        ref = planned["operations"][0]["body_ref"]
+        self.assertGreater(ref["bytes"], 64 * 1024)
+        self.assertEqual(planned["operations"][0]["wire"]["body_ref"], ref)
+        self.assertNotIn("blocked.example", json.dumps(planned))
+        plan_file = self.sb.state / "plans" / f"{planned['id']}.json"
+        self.assertLess(plan_file.stat().st_size, 8192)
+        self.assertEqual(self.blobs(), [f"{ref['sha256']}.json"])
+        self.assertEqual((self.sb.state / "blobs" / f"{ref['sha256']}.json").stat().st_mode & 0o777, 0o600)
+        shown = self.forti("plan", "show", planned["id"]).out
+        self.assertIn(f"stored as state/blobs/{ref['sha256']}.json", shown)
+        self.assertNotIn("blocked.example", shown)
+
+        applied = self.json_of("apply", planned["id"])["data"]
+        self.assertEqual(applied["operations"][0]["status"], "applied_unverified")
+        self.assertEqual(applied["operations"][0]["reply"], [{"name": "dns-block", "status": "success"}])
+        [write] = self.writes()
+        self.assertEqual((write.method, write.api), ("POST", "monitor/system/external-resource/dynamic"))
+        self.assertEqual(write.json()["commands"][0]["entries"], entries)
+        self.assertEqual(self.mock.device.feeds["dns-block"], entries)
+        self.assertEqual(self.blobs(), [])
+
+    def test_a_feed_that_is_not_loaded_yet_fails_the_push(self) -> None:
+        self.mock.device.pending_feeds.add("dns-block")
+        path = self.push([f"host-{i}.blocked.example" for i in range(5000)])
+        planned = self.json_of("plan", "action", "monitor/system/external-resource/dynamic", "--body", f"@{path}")["data"]
+        failed = self.json_of("apply", planned["id"], expect=8)["error"]
+        self.assertEqual(failed["code"], "partial_failure")
+        op = failed["details"]["operations"][0]
+        self.assertEqual(op["status"], "failed")
+        self.assertEqual(op["error"]["code"], "api")
+        self.assertEqual(op["error"]["details"]["errors"],
+                         [{"name": "dns-block", "status": "error", "message": "Connect pending"}])
+        self.assertEqual(len(self.writes()), 1)
+        self.assertNotIn("dns-block", self.mock.device.feeds)
+        self.assertEqual(self.blobs(), [])
+
+
 def main() -> int:
     global FORTI
     require_tools()

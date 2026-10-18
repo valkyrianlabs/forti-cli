@@ -261,8 +261,9 @@ namespace forti::engine {
 
         // The record stored in the plan for one operation. `current` is the object as read (nullopt:
         // absent); `known` is false when the state could not be read (no before-digest check then).
+        // An action body over detail::inline_body_limit goes to `blobs` and the record references it.
         json build_record(std::size_t index, const OpRequest& request, const Resource& resource,
-                          const std::optional<json>& current, bool known) {
+                          const std::optional<json>& current, bool known, detail::Blobs* blobs = nullptr) {
             json record = {{"index", index}, {"op", request.op}, {"resource", resource.name()},
                            {"path", resource.path}, {"kind", to_string(resource.kind)},
                            {"risk", detail::to_string(detail::risk_of(resource))}};
@@ -347,13 +348,26 @@ namespace forti::engine {
                 record["wire"] = {{"method", "DELETE"}, {"path", target_path(resource, child, request.parent, request.key)},
                                   {"body", nullptr}};
             } else {   // action
-                record["body"] = request.body;
+                // A large body (a threat-feed push of tens of thousands of entries) is stored once, by
+                // its SHA-256, instead of twice in the plan file; the digest binds it through the hash.
+                std::string text = detail::canonical(request.body);
+                json ref = nullptr;
+                if (text.size() > detail::inline_body_limit) {
+                    if (!blobs) throw Failure(Code::internal, "a large action body needs blob storage");
+                    ref = detail::body_ref_of(text);
+                    blobs->emplace(ref["sha256"].get<std::string>(), std::move(text));
+                    record["body_ref"] = ref;
+                } else {
+                    record["body"] = request.body;
+                }
                 record["before"] = nullptr;
                 record["before_digest"] = nullptr;
                 record["after"] = nullptr;
                 record["note"] = "monitor action: its side effects are not catalogued (forti-api gap G6); it cannot "
                                  "be verified by re-reading or rolled back";
-                record["wire"] = {{"method", "POST"}, {"path", resource.path}, {"body", request.body}};
+                record["wire"] = {{"method", "POST"}, {"path", resource.path}};
+                if (ref.is_null()) record["wire"]["body"] = request.body;
+                else record["wire"]["body_ref"] = std::move(ref);
             }
             record["diff"] = std::move(diff);
             return record;
@@ -493,6 +507,7 @@ namespace forti::engine {
             fortiapi::Query query = query_for(vdom);
             Identity identity;
             json records = json::array();
+            detail::Blobs blobs;
             for (std::size_t i = 0; i < parsed.size(); ++i) {
                 const auto& [op, resource] = parsed[i];
                 std::optional<json> current;
@@ -517,7 +532,7 @@ namespace forti::engine {
                     if (!result.ok())
                         throw fortiapi::ApiError(fortiapi::Method::Get, path, result.http_status, std::move(result.body));
                 }
-                records.push_back(build_record(i, op, resource, current, known));
+                records.push_back(build_record(i, op, resource, current, known, &blobs));
             }
             if (identity.serial.empty()) identity.take(client.get(fortiapi::Monitor::path("system/status"), query));
             if (identity.serial.empty())
@@ -526,7 +541,7 @@ namespace forti::engine {
             json device = {{"profile", profile.name}, {"host", profile.host}, {"port", profile.port},
                            {"vdom", vdom}, {"serial", identity.serial}, {"version", identity.version}};
             json plan = make_plan(std::move(device), std::move(records), detail::Clock::now(), "plan");
-            detail::save_plan(options_.paths, plan);
+            detail::save_plan(options_.paths, plan, blobs);
 
             json data = detail::plan_view(plan);
             std::string id = plan["id"];
@@ -781,19 +796,108 @@ namespace forti::engine {
             }
         }
 
-        json attribute_names(const json& op) {
+        // `body`: an action's body as sent (for a stored blob, not part of the operation record).
+        json attribute_names(const json& op, const json& body) {
             json names = json::array();
-            for (const char* key: {"set", "object", "body"})
+            for (const char* key: {"set", "object"})
                 if (auto it = op.find(key); it != op.end() && it->is_object())
                     for (auto field = it->begin(); field != it->end(); ++field) names.push_back(field.key());
+            if (body.is_object())
+                for (auto field = body.begin(); field != body.end(); ++field) names.push_back(field.key());
             if (auto it = op.find("clear"); it != op.end()) for (const auto& name: *it) names.push_back(name);
             return names;
+        }
+
+        // ---- action replies ----
+
+        // What an action's execution record keeps of the device's reply, and of the per-command errors
+        // a batch action reports. Bounded so one apply record (and its error details) stays well inside
+        // forti-mcp's 48 KiB result budget, which drops an error's details wholesale when they do not fit.
+        constexpr std::size_t max_reply_bytes = 16 * 1024;
+        constexpr std::size_t max_command_errors = 20;
+        constexpr std::size_t max_command_error_bytes = 8 * 1024;
+
+        // The leading items of an array (members of an object) whose compact JSON fits `limit` bytes;
+        // anything else that does not fit becomes null. `cut` is set when something was left out.
+        json bounded(const json& value, std::size_t limit, bool& cut) {
+            if (value.dump().size() <= limit) return value;
+            cut = true;
+            if (!value.is_structured()) return nullptr;
+            json out = value.is_array() ? json::array() : json::object();
+            std::size_t size = 2;
+            for (auto it = value.begin(); it != value.end(); ++it) {
+                std::size_t item = it.value().dump().size() + (out.empty() ? 0 : 1);
+                if (value.is_object()) item += json(it.key()).dump().size() + 1;
+                if (size + item > limit) break;
+                size += item;
+                if (value.is_array()) out.push_back(it.value());
+                else out[it.key()] = it.value();
+            }
+            return out;
+        }
+
+        // A short, printable excerpt of device text for a message.
+        std::string excerpt(const json& value) {
+            std::string text = value.is_string() ? value.get<std::string>() : value.dump();
+            for (char& c: text) if (static_cast<unsigned char>(c) < 0x20) c = ' ';
+            return text.size() > 200 ? text.substr(0, 197) + "..." : text;
+        }
+
+        // Records an action's reply in `record` ("reply": the results, read-redacted and bounded) and
+        // throws Failure(api) when FortiOS reports failed commands inside a successful reply: a batch
+        // action (external-resource/dynamic) answers HTTP 200 with one results entry per command, and a
+        // refused command is {"status": "error", ...} there, not an HTTP error.
+        void take_action_reply(json reply, std::string_view path, json& record) {
+            detail::check_reply_depth(reply, path);
+            json results = nullptr;
+            if (auto it = reply.find("results"); reply.is_object() && it != reply.end()) results = std::move(*it);
+            std::set<std::string, std::less<>> redacted;
+            detail::redact_read(results, redacted);
+            bool cut = false;
+            record["reply"] = bounded(results, max_reply_bytes, cut);
+            if (cut) record["reply_truncated"] = true;
+            if (!redacted.empty()) record["reply_redacted"] = redacted;
+
+            if (!results.is_array()) return;
+            json errors = json::array(), indexes = json::array();
+            std::size_t count = 0, bytes = 0;
+            for (std::size_t i = 0; i < results.size(); ++i) {
+                const json& entry = results[i];
+                if (!entry.is_object() || entry.value("status", json()) != "error") continue;
+                ++count;
+                std::size_t size = entry.dump().size();
+                if (errors.size() < max_command_errors && bytes + size <= max_command_error_bytes) {
+                    errors.push_back(entry);
+                    indexes.push_back(i);
+                    bytes += size;
+                }
+            }
+            if (count == 0) return;
+            std::string reason;
+            json first = errors.empty() ? json() : errors.front();
+            for (const char* key: {"message", "error", "cli_error"})
+                if (auto it = first.find(key); first.is_object() && it != first.end() && !it->is_null()) {
+                    reason = ": " + excerpt(*it);
+                    break;
+                }
+            json details = {{"path", path}, {"reason", "command_failed"}, {"errors", errors}, {"error_indexes", indexes},
+                            {"error_count", count}, {"commands", results.size()}};
+            if (errors.size() < count) details["errors_truncated"] = true;
+            throw Failure(Code::api,
+                          std::format("{}: the device reported {} of {} command{} failed{}", path, count, results.size(),
+                                      results.size() == 1 ? "" : "s", reason),
+                          std::move(details));
         }
 
     }  // namespace
 
     json Engine::apply(const json& request) {
         const Paths& paths = options_.paths;
+        // Whatever the outcome: blobs that no plan still waiting to run references are deleted.
+        struct PruneBlobs {
+            const Paths& paths;
+            ~PruneBlobs() { detail::prune_blobs(paths); }
+        } prune{paths};
         json event = {{"event", "apply"}};
         try {
             allow_keys(request, {"plan_id"}, "apply");
@@ -817,6 +921,13 @@ namespace forti::engine {
             if (detail::plan_applied(paths, id))
                 throw Failure(Code::policy_denied, std::format("plan {} was already applied; a plan runs at most once", id),
                               {{"plan_id", id}, {"reason", "already_applied"}});
+            // Stored action bodies are read and checked before anything else touches the device: a
+            // missing or altered blob refuses the plan as tampered, with nothing sent.
+            const json& ops = plan["operations"];
+            std::vector<json> bodies(ops.size());
+            for (std::size_t i = 0; i < ops.size(); ++i)
+                if (ops[i]["op"] == "action")
+                    bodies[i] = ops[i].contains("body_ref") ? detail::load_body(paths, id, ops[i]["body_ref"]) : ops[i]["body"];
             const Profile& profile = this->profile(device.value("profile", ""));
             event["mode"] = to_string(profile.mode);
             if (profile.mode == Mode::read_only)
@@ -846,7 +957,6 @@ namespace forti::engine {
             Identity identity;
 
             // Re-read every before-state; anything that moved makes the plan stale.
-            const json& ops = plan["operations"];
             std::vector<Resource> resources;
             std::vector<std::optional<json>> currents(ops.size());
             for (std::size_t i = 0; i < ops.size(); ++i) {
@@ -974,7 +1084,9 @@ namespace forti::engine {
                         else detail::remove(resource, client, done.key, query);
                     } else {
                         done.sent = true;
-                        fortiapi::Monitor::post(std::string_view(resource.path).substr(8), op["body"], query, client);
+                        take_action_reply(fortiapi::Monitor::post(std::string_view(resource.path).substr(8), bodies[i],
+                                                                  query, client),
+                                          resource.path, done.record);
                     }
                     done.status = "verified";
                     done.changed = true;
@@ -1104,7 +1216,7 @@ namespace forti::engine {
             for (std::size_t i = 0; i < executed.size(); ++i) {
                 records.push_back(executed[i].record);
                 json entry = {{"index", i}, {"op", ops[i]["op"]}, {"resource", ops[i]["resource"]},
-                              {"status", executed[i].status}, {"attributes", attribute_names(ops[i])}};
+                              {"status", executed[i].status}, {"attributes", attribute_names(ops[i], bodies[i])}};
                 if (!executed[i].key.empty()) entry["key"] = executed[i].key;
                 for (const char* field: {"parent", "child"})
                     if (auto it = ops[i].find(field); it != ops[i].end()) entry[field] = *it;

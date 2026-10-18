@@ -147,6 +147,10 @@ public:
   {"op": "delete", "resource": "system.dhcp/server", "parent": "1", "child": "reserved-address", "key": "21"},
   {"op": "action", "resource": "monitor/system/external-resource/dynamic", "body": {}}]}
  // plan records and views of child operations carry "parent" and "child"; other records are unchanged
+ // an action body whose canonical JSON exceeds 64 KiB (detail::inline_body_limit) is stored once as
+ // <state>/blobs/<sha256>.json (exactly canonical(body); 0600, dir 0700, atomic write, shared by identical
+ // bodies); its record and wire carry "body_ref": {"sha256": "<64 hex>", "bytes": N} instead of "body"
+ // (no inline copy). Smaller bodies stay inline ("body" and "wire.body"), as before
 
 // apply
 {"plan_id": "…"}            // nothing else is accepted: operations come from the stored plan
@@ -159,6 +163,17 @@ public:
   "start": 0, "count": 50, "returned": 50, "next_start": 50, "truncated": false}}
 {"ok": false, "error": {"code": "not_found", "message": "…", "details": {…}}}
 ```
+
+An apply's data (or a stopped apply's `error.details`) is the execution record: `{plan_id, digest,
+operations: [{index, op, resource, key?, parent?, child?, status, error?, verification?, …}], verified,
+applied_unverified, rollback, backup?, status: "applied"}`. An `action` operation's record also keeps
+the device's reply: `reply` (the reply's `results`, read-redacted, cut to its leading entries/members
+past 16 KiB), `reply_truncated: true` when cut, `reply_redacted` (JSON pointers) when anything was
+redacted. When `results` is an array with an object whose `status` is `"error"` (FortiOS's batch-command
+convention, e.g. `external-resource/dynamic` before a feed is loaded), the operation is `failed` with
+`error.code` `api` and `error.details` `{reason: "command_failed", path, errors: [<error entries, at
+most 20 / 8 KiB>], error_indexes: [<positions in results>], error_count, commands, errors_truncated?}`,
+and execution stops there (`partial_failure`).
 
 ### Error codes and CLI exit codes
 
@@ -184,7 +199,7 @@ public:
 ## Profiles and credentials
 
 - One forti home (`Paths`, profile.hpp): `$FORTI_HOME`, else `~/.forti` (0700). It holds `config.json` and
-  `credentials/`, `state/` (plans, approvals, audit log, backups), `cache/` (reserved) and
+  `credentials/`, `state/` (plans, approvals, audit log, backups, action-body blobs), `cache/` (reserved) and
   `certs/<name>/` (client certificates, named, any profile may use one) and `ca/` (the forti CA that
   issues them; `forti cert`, `src/cli/certs.hpp`). `$FORTI_CONFIG_DIR`, `$FORTI_STATE_DIR`, `$FORTI_CACHE_DIR`
   override single locations. A pre-0.2 setup (`$XDG_*_HOME/forti`, else `~/.config/forti`,
@@ -235,11 +250,17 @@ Automatic safeguards (every mode that writes):
    operation supported, attributes known and writable, values decode). It reads the current objects
    and computes before/after, a field diff, the exact SDK wire body and the risk tier. The plan is
    stored at `state/plans/<id>.json` (0600). `digest` = SHA-256 over canonical JSON of {device
-   identity, operations, before digests}. Planning never mutates the device.
+   identity, operations, before digests}. An action body over 64 KiB is stored once in
+   `state/blobs/<sha256>.json` and the operation carries `body_ref` {sha256, bytes}, so the digest binds
+   its content through the hash. Planning never mutates the device.
 2. **Apply** takes only `{plan_id}`. It recomputes the digest (tamper check) and checks the device
-   serial, then re-reads every before-state (`stale_plan` on drift). It executes in order with no
-   retries (the SDK never retries after send) and verifies each operation by re-reading. It stops at the
-   first failure. Per-operation status: `verified | applied_unverified | failed | outcome_unknown |
+   serial, then re-reads every before-state (`stale_plan` on drift). Stored action bodies are read and
+   checked first (size and SHA-256 against `body_ref`; missing or different refuses as tampered, nothing
+   sent). It executes in order with no retries (the SDK never retries after send) and verifies each
+   operation by re-reading (monitor actions: the reply is recorded instead, and a failed command inside
+   a 2xx reply fails the operation). It stops at the first failure. After every apply, whatever its
+   outcome, blobs no longer referenced by a not-yet-applied plan are deleted (under a lock shared with
+   plan's blob writes). Per-operation status: `verified | applied_unverified | failed | outcome_unknown |
    not_attempted`. Results are `partial_failure` / `outcome_unknown` with the full execution record. An
    HTTP failure is never assumed to mean "nothing changed".
 3. **Recovery aids, not guaranteed recovery.**

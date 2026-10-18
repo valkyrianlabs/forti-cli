@@ -202,7 +202,7 @@ forti plan --profile fw01 --file - < changes.json
 | `parent`, `child` | together: the operation changes one entry of the table attribute `child` of the object `parent` ([Changing one entry of a table](#changing-one-entry-of-a-table)); `object`, `set` and `clear` then name the entry's attributes |
 | `object` | `create`: the new object's attributes. Without its key (or with a numeric key of `0`), the device assigns one |
 | `set`, `clear` | `update`: attributes to set, and attribute names to reset to their defaults (at least one of the two) |
-| `body` | `action`: the JSON body of the monitor POST (default `{}`) |
+| `body` | `action`: the JSON body of the monitor POST (default `{}`). A body over 64 KiB is stored once, by its SHA-256 ([Large action bodies](#large-action-bodies)) |
 
 Any other field is a `usage` error.
 
@@ -271,6 +271,34 @@ host, port, VDOM, serial number, FortiOS version), and for each operation the be
 SHA-256 digest, the after-state, a field diff, the exact request (method, path and body) and the risk
 tier. The plan's digest is a SHA-256 over the device identity and the operations. Plan ids look like
 `20261015-142233-a1b2c3` (UTC time and six random hex digits).
+
+### Large action bodies
+
+A monitor action's body larger than 64 KiB (a threat-feed push of tens of thousands of entries, for
+example) is not copied into the plan. It is stored once as
+`~/.forti/state/blobs/<sha256>.json` (0600, in a 0700 directory), exactly as canonical JSON, and the
+operation and its request record carry a reference instead of the body:
+
+```json
+{"op": "action", "resource": "monitor/system/external-resource/dynamic",
+ "body_ref": {"sha256": "9b1f…", "bytes": 20971520},
+ "wire": {"method": "POST", "path": "monitor/system/external-resource/dynamic",
+          "body_ref": {"sha256": "9b1f…", "bytes": 20971520}}}
+```
+
+The reference is part of the plan's digest, so the digest (and an approval of it) covers the body's
+content. Plans that carry the same body share one file. `forti plan show`, `forti plan list`, the
+plan an agent gets back and the apply record show the reference and size, never the body:
+
+```text
+1. action monitor/system/external-resource/dynamic  [elevated]
+     POST monitor/system/external-resource/dynamic (body of 20971520 bytes, stored as state/blobs/9b1f….json)
+```
+
+Apply reads the file and checks its size and SHA-256 before it contacts the device. A missing or
+changed file refuses the plan like any other tampering (`policy_denied`, reason `tampered`), and
+nothing is sent. After every apply, whatever its outcome, forti deletes the stored bodies that no
+plan still waiting to be applied refers to. Smaller bodies stay inline in the plan, as before.
 
 :::callout[Stored plans hold real values]{variant="note"}
 Sensitive values are redacted in everything forti prints (diffs, request bodies, `plan show`). The
@@ -352,7 +380,8 @@ undo      forti rollback 20261015-142233-a1b2c3  (rollback plan 20261015-142240-
 Apply takes only the plan id; the operations come from the stored plan. In order, it:
 
 1. verifies the plan file (its format, its digest, and that every operation's shape, risk tier and
-   request match what the catalog says), refusing a tampered plan;
+   request match what the catalog says) and every stored action body (present, with the size and
+   SHA-256 the plan names), refusing a tampered plan;
 2. refuses a plan that was already applied: a plan runs at most once;
 3. checks the mode, and in guarded mode a valid, unexpired approval for this digest;
 4. checks that the profile still points at the planned host and port, re-reads every before-state,
@@ -372,7 +401,7 @@ Each operation ends with one status:
 |---|---|
 | `verified` | sent, and the re-read object matches what was written |
 | `applied_unverified` | sent and accepted, but not confirmed: a monitor action (cannot be re-read), a create whose key the device did not report, a failed re-read, or values that differ (FortiOS normalizes some, e.g. `192.0.2.0/24` to `192.0.2.0 255.255.255.0`; the record lists `mismatches`) |
-| `failed` | FortiOS refused it, or the connection failed before the request was sent |
+| `failed` | FortiOS refused it (for a monitor action, also a failed command inside a successful reply: [Monitor action replies](#monitor-action-replies)), or the connection failed before the request was sent |
 | `outcome_unknown` | the request may have reached the device, but no usable reply came back |
 | `not_attempted` | an earlier operation stopped the run |
 
@@ -385,6 +414,32 @@ An HTTP failure is never taken to mean "nothing changed": after a failed operati
 object. FortiOS creates are not transactional, so a create that failed can leave the object behind
 (`exists_after_failure`).
 :::
+
+### Monitor action replies
+
+A monitor action cannot be verified by re-reading, so its record keeps what the device answered:
+`reply` is the reply's `results`, with the same secret redaction as a read (`reply_redacted` lists
+what was redacted) and cut to its leading entries past 16 KiB (`reply_truncated: true`).
+
+Batch actions such as `monitor/system/external-resource/dynamic` answer HTTP 200 with one `results`
+entry per command, and a command FortiOS refused is an entry with `"status": "error"` there: a push
+to a threat feed FortiOS has not loaded yet (`Connect pending`) is one. forti treats such a reply as
+a failed operation: status `failed` (the request was sent, so not `outcome_unknown`), error code
+`api`, and execution stops there as at any failure (`partial_failure`, exit 8):
+
+```json
+{"index": 0, "op": "action", "resource": "monitor/system/external-resource/dynamic", "status": "failed",
+ "reply": [{"name": "dns-block", "status": "error", "message": "Connect pending"}],
+ "error": {"code": "api",
+           "message": "monitor/system/external-resource/dynamic: the device reported 1 of 1 command failed: Connect pending",
+           "details": {"reason": "command_failed", "path": "monitor/system/external-resource/dynamic",
+                       "errors": [{"name": "dns-block", "status": "error", "message": "Connect pending"}],
+                       "error_indexes": [0], "error_count": 1, "commands": 1}}}
+```
+
+`errors` holds up to 20 of the failed entries (8 KiB at most; `errors_truncated: true` when there were
+more), and `error_indexes` their positions in `results`. Commands of the same action that succeeded
+are not undone: a monitor action is never rolled back.
 
 ### Rollback plans
 
