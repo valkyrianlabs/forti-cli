@@ -10,20 +10,35 @@ class FortiCli < Formula
   license "MIT"
   head "https://github.com/valkyrianlabs/forti-cli.git", branch: "main"
 
-  # Header-only SDK: needed to compile, not at run time.
-  depends_on "forti-api" => :build
+  # Only homebrew/core dependencies: Homebrew trusts the formulae named on the command line
+  # (brew install valkyrianlabs/tap/forti-cli) and refuses to load any other formula from an untrusted
+  # third-party tap, build dependencies included, even when it pours a bottle. So forti-api is a
+  # resource below, and forti-mcp is named as well when wanted:
+  #   brew install valkyrianlabs/tap/forti-cli valkyrianlabs/tap/forti-mcp
   depends_on "meson" => :build
   depends_on "ninja" => :build
   depends_on "pkgconf" => :build
 
-  # The MCP server for AI clients (forti mcp install): installed alongside, still its own formula.
-  depends_on "valkyrianlabs/tap/forti-mcp"
-
   uses_from_macos "curl"
 
+  # forti-api, the header-only SDK: needed to compile, not at run time. Its release archive; bump it
+  # to the latest forti-api release when one is cut.
+  resource "forti-api" do
+    url "https://github.com/valkyrianlabs/forti-api/releases/download/v1.3.0/forti-api-1.3.0.tar.gz"
+    sha256 "218cb631522250bf95182212d88eaa9c4f2d494cd66d6e8d2b236eb1c356ae83"
+  end
+
   def install
+    # The SDK's headers and pkg-config file go into the build tree only, where dependency('forti-api')
+    # finds them; none of it reaches the keg.
+    resource("forti-api").stage do
+      system "meson", "setup", "build", "-Dtests=disabled", *std_meson_args(prefix: buildpath/"forti-api-sdk")
+      system "meson", "install", "-C", "build"
+    end
+    ENV.prepend_path "PKG_CONFIG_PATH", buildpath/"forti-api-sdk/share/pkgconfig"
+
     # std_meson_args sets --buildtype=release and --wrap-mode=nofallback (stricter than nodownload):
-    # forti-api always comes from the forti-api formula, never from subprojects/forti-api.wrap.
+    # forti-api always comes from the resource above, never from subprojects/forti-api.wrap.
     # optimization=3 is meson.build's release profile, repeated so it holds whatever the build type;
     # strip=true installs the binary without its symbol table (24 MB -> 12 MB).
     # The tests need GoogleTest and run in CI; the `test do` block exercises the installed binary.
