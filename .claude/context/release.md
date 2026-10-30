@@ -14,11 +14,20 @@ specifics in `PROJECT.md` next to it (`vlr install-local-skill` regenerates it).
 | Homebrew (`valkyrianlabs/tap`) | `Formula/forti-cli.rb`, builds from the source archive | `vlr homebrew formula` / `publish` (`packaging/homebrew/forti-cli.rb`) |
 
 No package ever vendors forti-api: `debian/rules` passes `--wrap-mode=nodownload` with the system
-`libforti-api-dev`, and the formula's `std_meson_args` pass `--wrap-mode=nofallback` with the
-`forti-api` formula. The source archive therefore carries only `subprojects/forti-api.wrap` (as in
+`libforti-api-dev`, and the formula's `std_meson_args` pass `--wrap-mode=nofallback` with its
+`forti-api` resource. The source archive therefore carries only `subprojects/forti-api.wrap` (as in
 Git); a from-source build without a system forti-api fetches the pinned v1.0.0 through the wrap,
 which is what `meson dist --include-subprojects` would have embedded. We deliberately do not ship
-that: the tap and APT both provide forti-api.
+that: APT provides forti-api, and the formula its resource.
+
+The formula depends on homebrew/core formulae only. Homebrew trusts the formulae a user names in
+full (`brew install valkyrianlabs/tap/forti-cli`) and refuses to load any other formula from an
+untrusted third-party tap, build dependencies included and even when it pours a bottle; so
+forti-api is the formula's `resource "forti-api"` (its release archive, installed into the build
+tree), never a `depends_on`. The `homebrew-check` job installs with an empty trust store and no
+`brew trust`, so a dependency on the tap fails there first. Bump the resource to a newer forti-api
+release when the build needs one. forti-mcp is not a dependency either: users name it too
+(`brew install valkyrianlabs/tap/forti-cli valkyrianlabs/tap/forti-mcp`).
 
 ## Cutting a release
 

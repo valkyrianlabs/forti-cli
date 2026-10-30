@@ -10,7 +10,7 @@ so AI clients get the same, bounded surface.
 ## Quick start
 
 ```sh
-brew install valkyrianlabs/tap/forti-cli    # or: sudo apt install forti-cli (apt.valkyrianlabs.com)
+brew install valkyrianlabs/tap/forti-cli valkyrianlabs/tap/forti-mcp   # or: sudo apt install forti-cli (apt.valkyrianlabs.com)
 
 forti configure                 # address, API key (hidden), client certificate, mode; checks the connection
 forti get firewall policy       # FortiOS CLI words work; `forti doctor` when something fails

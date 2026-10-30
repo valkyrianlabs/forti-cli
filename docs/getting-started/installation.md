@@ -58,15 +58,16 @@ recommends (unless recommends are turned off). The `.deb` from a GitHub release 
 
 :::tab[Homebrew (macOS, Linux)]{value="homebrew"}
 ```bash
-brew install valkyrianlabs/tap/forti-cli
+brew install valkyrianlabs/tap/forti-cli valkyrianlabs/tap/forti-mcp
 ```
 
-Homebrew pours a prebuilt bottle on macOS 15 or later (Apple silicon and Intel), and installs
-forti-mcp with it. Elsewhere it builds from source against the `forti-api` formula, which it needs
-only at build time.
+That installs the forti CLI and forti-mcp, the MCP server `forti mcp install` registers; leave out
+`valkyrianlabs/tap/forti-mcp` for the CLI alone. Homebrew pours a prebuilt bottle on macOS 15 or
+later (Apple silicon and Intel). Elsewhere it builds from source, with the forti-api SDK compiled in.
 
-:::callout[Trust the tap first]{variant="note"}
-Recent Homebrew versions ask you to trust a third-party tap first: `brew trust valkyrianlabs/tap`.
+:::callout[No tap or trust step]{variant="note"}
+Homebrew trusts the formulae named in full on the command line, so there is no `brew tap` or
+`brew trust` step. Name each formula you want in full, as above.
 :::
 :::
 
@@ -93,8 +94,9 @@ the details.
 
 ## forti-mcp
 
-forti-mcp, the MCP server for AI clients, comes with forti-cli (a Homebrew dependency, an APT
-recommendation). It is also a package of its own, with no dependency on forti-cli:
+forti-mcp, the MCP server for AI clients, comes with forti-cli through APT (a recommendation); with
+Homebrew, name it in the same install command (above). It is also a package of its own, with no
+dependency on forti-cli:
 `brew install valkyrianlabs/tap/forti-mcp` or `sudo apt install forti-mcp`. `forti mcp install`
 registers it with your AI clients in the `~/.forti` workspace
 ([AI agent integration](/guides/ai-agent-integration)).
